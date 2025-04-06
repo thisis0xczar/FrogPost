@@ -66,7 +66,7 @@ For the fuzzing functionality, FrogPost requires a native messaging host to comm
    Use the following sed command to replace the placeholder \[your_id_here\] in the manifest file:
 
    ```
-   sed -i '' 's/\abcdefghijklmnopabcdefghijklmnop/<your-extension-id>/g'com.nodeserver.starter.json
+   sed -i '' 's/\abcdefghijklmnopabcdefghijklmnop/<your-extension-id>/g' com.nodeserver.starter.json
    ```
 
 3. Verify that the "allowed_origins" field now includes:
