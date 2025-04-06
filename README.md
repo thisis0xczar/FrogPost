@@ -39,7 +39,7 @@ Unauthorized testing of applications without permission may violate laws and reg
 1. Clone the repository:
 
    ```
-   git clone [https://github.com/thisis0xczar/FrogPost.git](https://github.com/thisis0xczar/FrogPost.git)
+   git clone https://github.com/thisis0xczar/FrogPost.git
    ```
 
 2. Open Chrome and navigate to `chrome://extensions/`
