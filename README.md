@@ -283,7 +283,7 @@ Here's a breakdown of the primary buttons available in the FrogPost dashboard:
 
 1. Setup Passive Listeners iframes (i.e Listeners that does not exchange any communication with the main page) ?
 
-2. Fix Callback integration properly.
+2. ~Fix Callback integration properly.~
 
 3. Upload XSS Payloads file.
 
