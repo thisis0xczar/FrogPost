@@ -1,0 +1,63 @@
+{
+  "manifest_version": 3,
+  "name": "FrogPost",
+  "version": "1.0",
+  "description": "FrogPost - One Stop Shop for postMessage communication and exploitation",
+  "permissions": [
+    "tabs",
+    "storage",
+    "scripting",
+    "webNavigation",
+    "nativeMessaging",
+    "unlimitedStorage",
+    "debugger",
+    "downloads",
+    "declarativeNetRequest",
+    "declarativeNetRequestFeedback"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content_forwarder.js"],
+      "run_at": "document_start",
+      "all_frames": true,
+      "match_origin_as_fallback": true
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "dashboard/*",
+        "fuzzer/*",
+        "static/*",
+        "icons/*"
+      ],
+      "matches": [
+        "<all_urls>"
+      ]
+    }
+  ],
+  "action": {
+    "default_icon": {
+      "16": "icons/frog-logo16.png",
+      "48": "icons/frog-logo48.png",
+      "128": "icons/frog-logo128.png"
+    },
+    "default_title": "Open FrogPost Dashboard"
+  },
+  "icons": {
+    "16": "icons/frog-logo16.png",
+    "48": "icons/frog-logo48.png",
+    "128": "icons/frog-logo128.png"
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval' http://localhost:* http://127.0.0.1:*; object-src 'self'"
+  }
+}
