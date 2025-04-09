@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>FrogPost - Fuzzer Environment</title>
+  <style>
+    :root {
+      --bg-primary: #1e1e1e; --bg-secondary: #2a2a2a; --card-bg: #2a2a2a;
+      --code-bg: #252525; --text-primary: #e0e0e0; --text-secondary: #aaaaaa;
+      --text-muted: #777777; --accent-primary: #4dd051; --accent-primary-hover: #5edc61;
+      --accent-secondary: #f07178; --accent-info: #82aaff; --border-color: #424242;
+      --scrollbar-track: #2a2a2a; --scrollbar-thumb: #555;
+      --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+      --font-mono: 'SF Mono', 'Fira Code', 'Fira Mono', 'Roboto Mono', monospace;
+    }
+    body { font-family: var(--font-sans); margin: 0; padding: 0; background-color: var(--bg-primary); color: var(--text-primary); display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+    .header { background-color: var(--bg-secondary); padding: 10px 25px; box-shadow: 0 1px 2px rgba(0,0,0,.25); display: flex; justify-content: space-between; align-items: center; color: var(--text-primary); border-bottom: 1px solid var(--border-color); flex-shrink: 0; }
+    .fuzzer-title { font-size: 20px; font-weight: 500; margin: 0; display: flex; align-items: center; font-family: var(--font-sans); }
+    .fuzzer-title img { height: 40px; margin-right: 10px; }
+    .fuzzer-badge { background-color: var(--accent-primary); color: #111; padding: 3px 8px; border-radius: 4px; margin-left: 12px; font-size: 13px; font-weight: 600; font-family: var(--font-sans); text-transform: uppercase; letter-spacing: .5px; }
+    #statusContainer { padding: 15px 20px; background-color: var(--bg-secondary); border-radius: 0; box-shadow: none; margin: 0; border-bottom: 1px solid var(--border-color); flex-shrink: 0; }
+    #statusContainer h2 { margin: 0 0 10px; font-size: 16px; font-weight: 600; color: var(--text-primary); border-bottom: none; padding-bottom: 0; }
+    #fuzzerStatus { font-weight: 500; color: var(--text-primary); padding: 8px 12px; background: var(--bg-primary); border-radius: 4px; border: 1px solid var(--border-color); border-left-width: 4px; border-left-color: var(--accent-primary); font-family: var(--font-mono); font-size: 13px; }
+    #fuzzerStatus.error { border-left-color: var(--accent-secondary); color: var(--accent-secondary); background-color: rgba(240,113,120,.05); border-color: var(--accent-secondary); border-left-width: 4px; }
+    .main-layout { display: flex; flex-grow: 1; overflow: hidden; }
+    #payloadContainer { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; padding: 15px; flex-grow: 1; overflow: hidden; }
+    #targetFrameContainer, #payloadLogContainer { background: var(--card-bg); border-radius: 5px; border: 1px solid var(--border-color); box-shadow: 0 2px 4px rgba(0,0,0,.15); padding: 0; display: flex; flex-direction: column; overflow: hidden; }
+    #targetFrameContainer h3, #payloadLogContainer h3 { margin: 0; padding: 10px 15px; border-bottom: 1px solid var(--border-color); color: var(--text-primary); font-size: 14px; font-weight: 600; flex-shrink: 0; background-color: var(--bg-secondary); font-family: var(--font-sans); }
+    #targetFrame { flex-grow: 1; border: none; display: block; margin: 0; padding: 0; background-color: #fff; width: 100%; height: 100%; }
+    #payloadLog { padding: 15px; overflow-y: auto; flex-grow: 1; scrollbar-width: thin; scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track); background-color: var(--bg-primary); }
+    #payloadLog::-webkit-scrollbar { width: 8px; } #payloadLog::-webkit-scrollbar-track { background: var(--scrollbar-track); } #payloadLog::-webkit-scrollbar-thumb { background-color: var(--scrollbar-thumb); border-radius: 4px; border: 2px solid var(--scrollbar-track); }
+    .payload-entry { margin-bottom: 10px; padding: 10px 12px; background: var(--bg-secondary); border-radius: 4px; border: 1px solid var(--border-color); border-left-width: 3px; border-left-color: var(--text-muted); }
+    .payload-entry.sent { border-left-color: var(--accent-primary); } .payload-entry.received { border-left-color: var(--accent-info); }
+    .payload-info { margin-bottom: 8px; font-size: 11px; color: var(--text-secondary); display: flex; justify-content: space-between; text-transform: uppercase; font-family: var(--font-mono); }
+    .payload-info span:first-child { font-weight: 600; } .payload-info span:first-child.sent { color: var(--accent-primary); } .payload-info span:first-child.received { color: var(--accent-info); }
+    .payload-data { font-family: var(--font-mono); white-space: pre-wrap; word-break: break-all; background: var(--code-bg); color: var(--text-primary); padding: 10px; border-radius: 4px; max-height: 180px; overflow-y: auto; font-size: 12px; border: 1px solid var(--border-color); scrollbar-width: thin; scrollbar-color: var(--scrollbar-thumb) var(--code-bg); }
+    .payload-data::-webkit-scrollbar { width: 6px; } .payload-data::-webkit-scrollbar-track { background: var(--code-bg); } .payload-data::-webkit-scrollbar-thumb { background-color: var(--scrollbar-thumb); border-radius: 3px; border: 1px solid var(--code-bg); }
+    .control-sidebar { width: 280px; height: 100%; background-color: var(--bg-secondary); box-shadow: -1px 0 4px rgba(0,0,0,.2); z-index: 5; display: flex; flex-direction: column; border-left: 1px solid var(--border-color); padding: 20px; flex-shrink: 0; box-sizing: border-box; overflow-y: auto; }
+    .control-sidebar h3 { margin-top: 0; margin-bottom: 15px; font-size: 16px; font-weight: 600; color: var(--text-primary); border-bottom: 1px solid var(--border-color); padding-bottom: 8px; font-family: var(--font-sans); }
+    .sidebar-controls { display: flex; flex-direction: column; gap: 10px; }
+    .control-button { padding: 9px 16px; background-color: var(--accent-primary); color: #111; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; font-weight: 600; transition: background-color .2s ease, opacity .2s ease; text-align: center; font-family: var(--font-sans); }
+    .control-button:hover:not(:disabled) { background-color: var(--accent-primary-hover); }
+    .control-button:disabled { background-color: var(--border-color); color: var(--text-muted); cursor: not-allowed; opacity: 0.7; }
+    .control-button.secondary { background-color: var(--bg-primary); color: var(--text-secondary); border: 1px solid var(--border-color); }
+    .control-button.secondary:hover:not(:disabled) { background-color: var(--border-color); color: var(--text-primary); }
+    .control-button.danger { background-color: var(--accent-secondary); color: var(--text-primary); }
+    .control-button.danger:hover:not(:disabled) { background-color: #d46067; }
+    .callback-url-container { display: flex; flex-direction: column; gap: 8px; margin-bottom: 15px; }
+    .callback-url-container label { font-size: 13px; color: var(--text-secondary); font-weight: 500; margin-bottom: -3px; }
+    .callback-url-container input { flex-grow: 1; padding: 9px 12px; border: 1px solid var(--border-color); border-radius: 4px; font-size: 13px; background-color: var(--bg-primary); color: var(--text-primary); font-family: var(--font-mono); }
+    .callback-url-container input:focus { outline: none; border-color: var(--accent-primary); box-shadow: 0 0 0 2px rgba(77,208,81,.2); }
+    .callback-url-container button { padding: 9px 16px; margin-top: 5px; }
+    @media screen and (max-width:1000px){.main-layout{flex-direction:column}#payloadContainer{grid-template-columns:1fr;padding-bottom:0}.control-sidebar{width:100%;height:auto;position:relative;border-left:none;border-top:1px solid var(--border-color);box-shadow:none;flex-direction:row;flex-wrap:wrap;align-items:center;padding:15px}.callback-url-container{flex-direction:row;flex-grow:1;margin-bottom:0;margin-right:15px;align-items:center}.callback-url-container input{width:auto}.callback-url-container label{margin-bottom:0;margin-right:5px}.sidebar-controls{flex-direction:row}#targetFrameContainer,#payloadLogContainer{min-height:400px}}
+    @media screen and (max-width:600px){.control-sidebar{flex-direction:column;align-items:stretch}.callback-url-container{flex-direction:column;align-items:stretch;margin-right:0;margin-bottom:10px}.sidebar-controls{flex-direction:column;align-items:stretch}.fuzzer-title{font-size:18px}.fuzzer-badge{font-size:12px;padding:2px 6px;margin-left:8px}.header{padding:8px 15px}}
+  </style>
+  <script src="../fuzzer/payloads.js"></script>
+  <script type="module" src="../fuzzer/fuzzer.js"></script>
+</head>
+<body>
+<div class="header">
+  <h1 class="fuzzer-title">
+    <img src="../icons/frog-logo48.png" alt="FrogPost Logo"> FrogPost <span class="fuzzer-badge">Fuzzer</span>
+  </h1>
+</div>
+
+<div id="statusContainer">
+  <h2>Fuzzer Status</h2>
+  <div id="fuzzerStatus">Initializing...</div>
+</div>
+
+<div class="main-layout">
+  <div id="payloadContainer">
+    <div id="targetFrameContainer">
+      <h3>Target Frame</h3>
+    </div>
+    <div id="payloadLogContainer">
+      <h3>Payload Log</h3>
+      <div id="payloadLog">
+      </div>
+    </div>
+  </div>
+
+  <div class="control-sidebar">
+    <h3>Controls</h3>
+    <div class="sidebar-controls">
+      <button id="startFuzzingButton" class="control-button" disabled>Start Fuzzing</button>
+      <button id="createPocButton" class="control-button secondary" disabled>Create POC</button>
+      <button id="stopFuzzing" class="control-button danger" disabled>Stop Fuzzing</button>
+      <button id="clearLog" class="control-button secondary">Clear Log</button>
+    </div>
+  </div>
+</div>
+
+<script>
+  let currentFuzzerInstance = null;
+  let isFuzzingRunning = false;
+  function updateStatus(message, isError = false) {
+    const statusElement = document.getElementById('fuzzerStatus');
+    if (statusElement) {
+      statusElement.textContent = message;
+      statusElement.style.borderLeftColor = isError ? 'var(--accent-secondary)' : 'var(--accent-primary)';
+      statusElement.classList.toggle('error', isError);
+    }
+    if(isError) { console.error(`[Test Env Status] ${message}`); }
+    else { console.log(`[Test Env Status] ${message}`); }
+  }
+
+  function logMessage(data, type) {
+    const logElement = document.getElementById('payloadLog');
+    if (!logElement) return;
+    const entry = document.createElement('div');
+    entry.className = `payload-entry ${type}`;
+    const info = document.createElement('div');
+    info.className = 'payload-info';
+    const typeSpan = document.createElement('span');
+    typeSpan.textContent = `${type.toUpperCase()}`;
+    typeSpan.className = type;
+    const timeSpan = document.createElement('span');
+    timeSpan.textContent = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+    info.appendChild(typeSpan); info.appendChild(timeSpan);
+    const content = document.createElement('div');
+    content.className = 'payload-data';
+    try {
+      let displayData;
+      if (typeof data === 'object' && data !== null) { displayData = JSON.stringify(data, null, 2); }
+      else if (typeof data === 'string') { try { const parsed = JSON.parse(data); displayData = JSON.stringify(parsed, null, 2); } catch (e) { displayData = data; } }
+      else { displayData = String(data); }
+      content.textContent = displayData;
+    } catch (e) { content.textContent = `[Unable to display data: ${e.message}]`; console.warn("Error displaying message data:", data, e); }
+    entry.appendChild(info); entry.appendChild(content);
+    if (logElement.parentNode) {
+      logElement.appendChild(entry);
+      const isScrolledToBottom = logElement.scrollHeight - logElement.clientHeight <= logElement.scrollTop + 30;
+      if (isScrolledToBottom) {
+        logElement.scrollTo({ top: logElement.scrollHeight, behavior: 'smooth' });
+      }
+    }
+    else { console.warn("Log element detached, cannot append message:", data); }
+  }
+
+  function setButtonState(isRunning, disableAll = false) {
+    const startBtn = document.getElementById('startFuzzingButton');
+    const stopBtn = document.getElementById('stopFuzzing');
+    const createPocBtn = document.getElementById('createPocButton');
+    const clearLogBtn = document.getElementById('clearLog');
+
+    if (startBtn) startBtn.disabled = isRunning || disableAll;
+    if (stopBtn) stopBtn.disabled = !isRunning || disableAll;
+    if (createPocBtn) createPocBtn.disabled = isRunning || disableAll;
+    if (clearLogBtn) clearLogBtn.disabled = disableAll;
+  }
+
+  function startFuzzing() {
+    if (isFuzzingRunning) { updateStatus("Fuzzing already running."); return; }
+    if (!currentFuzzerInstance) { updateStatus("Error: Fuzzer not initialized.", true); return; }
+    updateStatus("Starting fuzzer execution...");
+    setButtonState(true);
+    try {
+      currentFuzzerInstance.start(() => {
+        updateStatus("Fuzzing completed.");
+        isFuzzingRunning = false;
+        setButtonState(false);
+      });
+      isFuzzingRunning = true;
+    } catch(startError) {
+      updateStatus(`Error starting fuzzer: ${startError.message}`, true);
+      console.error("Fuzzer start error:", startError);
+      isFuzzingRunning = false;
+      setButtonState(false);
+    }
+  }
+
+  function stopFuzzing() {
+    if (!isFuzzingRunning) { updateStatus("Fuzzing is not running."); return; }
+    if (currentFuzzerInstance && typeof currentFuzzerInstance.stop === 'function') {
+      currentFuzzerInstance.stop();
+      updateStatus("Fuzzing stopped by user.");
+      isFuzzingRunning = false;
+      setButtonState(false);
+    } else {
+      updateStatus("Error: Cannot stop fuzzer instance.", true);
+    }
+  }
+
+  function clearLog() {
+    const logElement = document.getElementById('payloadLog');
+    if(logElement) { logElement.innerHTML = ''; }
+    updateStatus("Log cleared.");
+  }
+
+  window.addEventListener('DOMContentLoaded', async () => {
+    try {
+      updateStatus("Initializing fuzzer environment...");
+
+      const response = await fetch('/current-config');
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`Error fetching config: ${response.status} - ${errorText || 'Server error'}`);
+      }
+      const config = await response.json();
+      if (!config || !config.target || !config.payloads) {
+        throw new Error("Invalid or missing configuration from server (target/payloads).");
+      }
+      window.fuzzerConfig = config;
+
+      updateStatus(`Loaded configuration for target: ${config.target}`);
+
+      const iframe = document.createElement('iframe');
+      iframe.id = 'targetFrame';
+      iframe.src = config.target;
+      iframe.sandbox = "allow-scripts allow-modals allow-same-origin allow-popups allow-forms allow-top-navigation";
+
+      const container = document.getElementById('targetFrameContainer');
+      if (!container) throw new Error("Missing targetFrameContainer element");
+      while (container.firstChild && container.firstChild.nodeName !== 'H3') {
+        container.removeChild(container.firstChild);
+      }
+      container.appendChild(iframe);
+      window.sendToFrame = function(message) {
+        const targetIframe = document.getElementById('targetFrame');
+        if (targetIframe && targetIframe.contentWindow) {
+          logMessage(message, 'sent');
+          targetIframe.contentWindow.postMessage(message, '*');
+        } else {
+          console.warn("Target frame not available to send message:", message);
+          updateStatus("Error: Target frame lost connection.", true);
+          stopFuzzing();
+        }
+      };
+
+      iframe.onload = () => {
+        updateStatus(`Target iframe loaded. Initializing fuzzer class...`);
+
+        if (typeof window.SinkAwarePostMessageFuzzer === 'undefined' || typeof window.SinkAwarePostMessageFuzzer.initialize !== 'function' || typeof generatePocHtml === 'undefined' || typeof openPocWindow === 'undefined') {
+          updateStatus("Error: Fuzzer class or POC functions not found. Check script loading.", true);
+          console.error("Missing Fuzzer classes/functions. Ensure fuzzer.js is loaded correctly.", { SinkAwarePostMessageFuzzer: typeof window.SinkAwarePostMessageFuzzer, generatePocHtml: typeof generatePocHtml });
+          setButtonState(false, true);
+          return;
+        }
+
+        try {
+          currentFuzzerInstance = window.SinkAwarePostMessageFuzzer.initialize(config);
+          if (!currentFuzzerInstance) { throw new Error("Fuzzer initialization returned null."); }
+
+          updateStatus("Fuzzer initialized. Ready.");
+          setButtonState(false);
+          document.getElementById('startFuzzingButton').addEventListener('click', startFuzzing);
+          document.getElementById('stopFuzzing').addEventListener('click', stopFuzzing);
+          document.getElementById('clearLog').addEventListener('click', clearLog);
+          const createPocButton = document.getElementById('createPocButton');
+          if (createPocButton) {
+            createPocButton.addEventListener('click', () => {
+              if (window.fuzzerConfig && window.fuzzerConfig.target && window.fuzzerConfig.payloads) {
+                console.log('[Test Environment] Generating POC HTML...');
+                const pocHtml = generatePocHtml(window.fuzzerConfig.target, window.fuzzerConfig.payloads);
+                console.log('[Test Environment] Opening POC window...');
+                openPocWindow(pocHtml);
+              } else {
+                alert('Fuzzer configuration not fully loaded yet or missing data. Cannot create POC.');
+                console.error('Cannot create POC, fuzzerConfig:', window.fuzzerConfig);
+              }
+            });
+          } else {
+            console.warn('Create POC button element not found!');
+          }
+
+        } catch(initError) {
+          updateStatus(`Fuzzer initialization error: ${initError.message}`, true);
+          console.error("Fuzzer init error:", initError);
+          setButtonState(false, true);
+        }
+      };
+
+      iframe.onerror = (error) => {
+        updateStatus(`Error: Target iframe failed to load (${config.target}). Check network/console.`, true);
+        console.error("Iframe load error:", error);
+        setButtonState(false, true);
+      };
+      window.addEventListener('message', event => {
+        const targetIframe = document.getElementById('targetFrame');
+        if (targetIframe && event.source === targetIframe.contentWindow) {
+          logMessage(event.data, 'received');
+        }
+      });
+      window.addEventListener('message', event => {
+        if (event.data && event.data.type === 'serverReady' && event.data.autoStart) {
+          console.log("[Fuzzer Env] Received autoStart signal, ignoring. User must click 'Start Fuzzing'.");
+          if (!isFuzzingRunning) {
+            const startBtn = document.getElementById('startFuzzingButton');
+            if (startBtn) startBtn.disabled = false;
+          }
+        }
+      });
+
+    } catch (error) {
+      updateStatus(`Fatal Error in Fuzzer Environment: ${error.message}`, true);
+      console.error('Fatal Error in Fuzzer Environment:', error);
+      setButtonState(false, true);
+    }
+  });
+</script>
+</body>
+</html>

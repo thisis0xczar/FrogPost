@@ -1,0 +1,10 @@
+{
+  "name": "com.nodeserver.starter",
+  "description": "Native messaging host for Node.js server starter",
+  "path": "/Users/[USER_NAME]/Library/Application Support/NodeServerStarter/start.sh",
+  "type": "stdio",
+  "allowed_origins": [
+    "chrome-extension://abcdefghijklmnopabcdefghijklmnop/"
+  ]
+}
+
