@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>FrogPost</title>
+    <link rel="stylesheet" href="./dashboard.css">
+
+    <script src="../imports/acorn.js"></script>
+    <script src="../imports/walk.js"></script>
+
+    <script src="../fuzzer/payloads.js"></script>
+    <script src="../static/handler-extractor.js"></script>
+    <script src="../static/trace-report-storage.js"></script>
+    <script src="../static/static-handler-analyzer.js"></script>
+    <script type="module" src="../fuzzer/fuzzer.js"></script>
+    <script type="module" src="../static/tracer.js"></script>
+    <script type="module" src="./dashboard.js"></script>
+</head>
+<body>
+<div class="dashboard">
+    <div class="header">
+        <div class="logo-container">
+            <img src="../icons/frog-logo48.png" alt="FrogPost Logo" class="frog-logo">
+            <h1 id="postmessage-inspector" class="dashboard-title">FrogPost</h1>
+        </div>
+        <div class="header-controls">
+            <button id="checkAll" class="control-button" aria-label="Check All Endpoints">Check All</button>
+            <button id="clearMessages" class="control-button" aria-label="Clear Messages">Clear All</button>
+            <button id="exportMessages" class="control-button" aria-label="Export Messages">Export</button>
+            <button id="refreshMessages" class="control-button" aria-label="Refresh Messages">Refresh</button>
+            <button id="debugToggle" class="control-button debug-off" aria-label="Toggle Debug Mode">Debug: OFF</button>
+        </div>
+    </div>
+
+    <div class="main-content" role="main">
+        <div id="endpointsSection" class="section">
+            <div class="section-title">Endpoints</div>
+            <div id="endpointsList" class="panel">
+                <div class='no-endpoints'>Loading captured communications...</div>
+            </div>
+        </div>
+
+        <div id="messagesSection" class="section">
+            <div class="section-title">Messages</div>
+            <div id="messagesList" class="panel">
+                <div class='no-messages'>Select a host or iframe to view messages.</div>
+            </div>
+        </div>
+
+        <div id="controlSidebar" class="control-sidebar">
+            <div class="sidebar-toggle" id="sidebarToggle">
+                <span>🔗</span>
+            </div>
+            <div class="sidebar-content">
+                <div class="callback-url-section">
+                    <label for="callbackUrlInput" class="sidebar-label">Callback URL:</label>
+                    <div class="callback-url-input-group">
+                        <input type="text" id="callbackUrlInput" placeholder="e.g., https://your-server.com/log" aria-label="Callback URL">
+                        <button id="saveCallbackUrl" class="control-button primary-button" aria-label="Save Callback URL">Save</button>
+                    </div>
+                    <div id="callback-status" class="callback-status"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="iframeTemplates" style="height: 1px; width: 1px; overflow: hidden; position: fixed; bottom: 0; left: 0; visibility: hidden;">
+        <iframe id="testFrame1"></iframe>
+        <iframe id="testFrame2"></iframe>
+        <iframe id="testFrame3"></iframe>
+    </div>
+
+    <div id="queryModalContainer"></div>
+    <div id="reportPanelContainer"></div>
+    <div id="progressIndicatorContainer"></div>
+    <div id="fullPayloadModalContainer"></div>
+    <div id="editMessageModalContainer"></div>
+    <div id="handlerDisplayModalContainer"></div>
+
+</div>
+</body>
+</html>
