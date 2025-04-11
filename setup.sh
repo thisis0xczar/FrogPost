@@ -1,7 +1,9 @@
 #!/bin/bash
 
+# Exit on any error
 set -e
 
+# Print the ASCII art at runtime
 cat << "EOF"
 ###############################################################################
 #                                                                             #
@@ -81,8 +83,12 @@ FULL_REPO_PATH=$(cd "$FROGPOST_REPO" && pwd)
 sed -i '' "s|const rootDir = .*|const rootDir = '${FULL_REPO_PATH}';|" "$SERVER_JS_SRC"
 echo "✅ rootDir set to: $FULL_REPO_PATH"
 
-# ========== STEP 4: Update start_server.sh with path ==========
-echo "🛠  Updating SERVER_JS path in start_server.sh..."
+# ========== STEP 4: Update start_server.sh ==========
+echo "🛠  Updating start_server.sh..."
+# First, replace any [USER_NAME] placeholders in the start_server.sh source file
+sed -i '' "s|\[USER_NAME\]|${USER_NAME}|g" "$START_SH_SRC"
+
+# Then update the SERVER_JS path
 ESCAPED_PATH=$(echo "$SERVER_JS_DST" | sed 's/\//\\\//g')
 sed -i '' "s|^SERVER_JS=.*|SERVER_JS=\"${SERVER_JS_DST}\" # Set by install script|" "$START_SH_SRC"
 echo "✅ start_server.sh updated."
@@ -91,6 +97,10 @@ echo "✅ start_server.sh updated."
 echo "📦 Copying server files to $SERVER_DIR..."
 cp "$SERVER_JS_SRC" "$SERVER_JS_DST"
 cp "$START_SH_SRC" "$START_SH_DST"
+
+# Replace any remaining [USER_NAME] in the copied start_server.sh file
+sed -i '' "s|\[USER_NAME\]|${USER_NAME}|g" "$START_SH_DST"
+
 chmod +x "$START_SH_DST"
 echo "✅ Server files installed."
 
@@ -98,13 +108,21 @@ echo "✅ Server files installed."
 echo "📋 Verifying manifest content:"
 cat "$MANIFEST_DST" | grep -E 'path|allowed_origins'
 
-# ========== STEP 7: Install Node.js dependencies ==========
+# ========== STEP 7: Create log file directory if referenced ==========
+LOG_DIR="$HOME/Library/Application Support/NodeServerStarter"
+LOG_FILE="$LOG_DIR/node-finder.log"
+echo "📝 Creating log file: $LOG_FILE"
+touch "$LOG_FILE"
+chmod 666 "$LOG_FILE"
+echo "✅ Log file ready."
+
+# ========== STEP 8: Install Node.js dependencies ==========
 echo "📦 Installing Node.js dependencies..."
 cd "$SERVER_DIR"
 npm install express cors body-parser
 echo "✅ Dependencies installed."
 
-# ========== STEP 8: Save extension ID for reference ==========
+# ========== STEP 9: Save extension ID for reference ==========
 echo "$EXTENSION_ID" > "$FROGPOST_REPO/extension_id.txt"
 echo "💾 Extension ID saved to: $FROGPOST_REPO/extension_id.txt"
 
