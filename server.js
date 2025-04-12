@@ -4,7 +4,7 @@ const cors = require('cors');
 const path = require('path');
 const http = require('http');
 
-const rootDir = '/Users/lidorbs/Desktop/FrogPost_working';
+const rootDir = '/Users/[USER_NAME]/Library/Application Support/NodeServerStarter/server.js';
 
 const app = express();
 const server = http.createServer(app);
