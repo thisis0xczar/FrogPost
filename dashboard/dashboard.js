@@ -1114,15 +1114,13 @@ async function sendMessageTo(targetKey, button) {
 
 function escapeHTML(str) {
     if (str === undefined || str === null) return '';
-    str = String(str);
-    return str
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&#039;');
+    return String(str)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
 }
-
 
 function renderMessages() {
     const messagesList = document.getElementById("messagesList");
@@ -3194,8 +3192,8 @@ function displayReport(reportData, panel) {
             panel.removeChild(panel.firstChild);
         }
     } catch (clearError) {
-        panel.innerHTML = '<p class="error-message">Internal error clearing report panel.</p>'; // Add basic error message to panel
-        return; // Stop if clearing fails
+        panel.innerHTML = '<p class="error-message">Internal error clearing report panel.</p>';
+        return;
     }
 
     let header;
@@ -3211,7 +3209,6 @@ function displayReport(reportData, panel) {
         };
     } catch (headerError) {
         console.error("[displayReport] Error creating/adding header:", headerError);
-        // Attempt to add error message even if header fails
         panel.innerHTML = '<p class="error-message">Internal error creating report header.</p>';
         return;
     }
@@ -3301,11 +3298,10 @@ function displayReport(reportData, panel) {
         if (uniqueVulns.length > 0) {
             findingsHTML += `<div class="subsection"><h5 class="report-subsection-title">DOM XSS Sinks Detected (${uniqueVulns.length})</h5><table class="report-table"><thead><tr><th>Sink</th><th>Severity</th><th>Context Snippet</th></tr></thead><tbody>`;
             uniqueVulns.forEach(vuln => {
-                // Added checks for potentially missing properties in vuln
                 const type = vuln?.type || '?';
                 const severity = vuln?.severity || 'N/A';
-                const context = vuln?.context || '';
-                findingsHTML += `<tr class="severity-row-${severity.toLowerCase()}"><td>${safeEscapeHTML(type)}</td><td><span class="severity-badge severity-${severity.toLowerCase()}">${safeEscapeHTML(severity)}</span></td><td><code class="context-snippet">${safeEscapeHTML(context)}</code></td></tr>`;
+                const contextHTML = vuln?.context || '';
+                findingsHTML += `<tr class="severity-row-${severity.toLowerCase()}"><td>${safeEscapeHTML(type)}</td><td><span class="severity-badge severity-${severity.toLowerCase()}">${safeEscapeHTML(severity)}</span></td><td class="context-snippet-cell">${contextHTML}</td></tr>`; // REMOVED code tag
             });
             findingsHTML += `</tbody></table></div>`;
         } else { findingsHTML += `<p class="no-findings-text">No direct DOM XSS sinks found.</p>`; }
@@ -3315,8 +3311,8 @@ function displayReport(reportData, panel) {
             uniqueIssues.forEach(issue => {
                 const type = issue?.type || '?';
                 const severity = issue?.severity || 'N/A';
-                const context = issue?.context || '';
-                findingsHTML += `<tr class="severity-row-${severity.toLowerCase()}"><td>${safeEscapeHTML(type)}</td><td><span class="severity-badge severity-${severity.toLowerCase()}">${safeEscapeHTML(severity)}</span></td><td><code class="context-snippet">${safeEscapeHTML(context)}</code></td></tr>`;
+                const contextHTML = issue?.context || '';
+                findingsHTML += `<tr class="severity-row-${severity.toLowerCase()}"><td>${safeEscapeHTML(type)}</td><td><span class="severity-badge severity-${severity.toLowerCase()}">${safeEscapeHTML(severity)}</span></td><td class="context-snippet-cell">${contextHTML}</td></tr>`; // REMOVED code tag
             });
             findingsHTML += `</tbody></table></div>`;
         } else { findingsHTML += `<p class="no-findings-text">No other security issues found.</p>`; }
@@ -3331,7 +3327,7 @@ function displayReport(reportData, panel) {
                 const prop = flow?.property || '?';
                 const sink = flow?.sink || '?';
                 const context = flow?.context || '';
-                flowSection.innerHTML += `<tr><td><code>event.data.${safeEscapeHTML(prop)}</code></td><td>${safeEscapeHTML(sink)}</td><td><code class="context-snippet">${safeEscapeHTML(context)}</code></td></tr>`;
+                flowSection.innerHTML += `<tr><td><code>event.data.${safeEscapeHTML(prop)}</code></td><td>${safeEscapeHTML(sink)}</td><td><code class="context-snippet">${safeEscapeHTML(context)}</code></td></tr>`; // Keep code tag here? Or remove too? Let's keep for now.
             });
             flowSection.innerHTML += `</tbody></table>`;
             content.appendChild(flowSection);
@@ -3342,7 +3338,6 @@ function displayReport(reportData, panel) {
         if (payloads?.length > 0) {
             const payloadSection = document.createElement('div');
             payloadSection.className = 'report-section report-payloads';
-            // Use safe renderer
             payloadSection.innerHTML = `<h4 class="report-section-title">Generated Payloads (${payloads.length})</h4><div id="payloads-list" class="payloads-list report-list">${payloads.slice(0, 10).map((p, index) => safeRenderPayload(p, index)).join('')}</div>${payloads.length > 10 ? `<button id="showAllPayloadsBtn" class="control-button secondary-button show-more-btn">Show All ${payloads.length} Payloads</button>` : ''}`;
             content.appendChild(payloadSection);
         } else {
@@ -3352,11 +3347,10 @@ function displayReport(reportData, panel) {
             content.appendChild(payloadSection);
         }
 
-        if (structures?.length > 0) { // Check if structures exists and has length
+        if (structures?.length > 0) {
             const structureSection = document.createElement('div');
             structureSection.className = 'report-section report-structures';
             let structuresHTML = `<h4 class="report-section-title">Unique Message Structures (${structures.length})</h4><div class="structures-list report-list">`;
-            // Use safe renderer
             structures.slice(0, 3).forEach((s, index) => { structuresHTML += safeRenderStructure(s, index); });
             structuresHTML += `</div>`;
             if (structures.length > 3) { structuresHTML += `<button id="showAllStructuresBtn" class="control-button secondary-button show-more-btn">Show All ${structures.length} Structures</button>`; }
@@ -3369,7 +3363,7 @@ function displayReport(reportData, panel) {
             content.appendChild(structureSection);
         }
 
-        attachReportEventListeners(panel, reportData); // Attach all listeners at the end
+        attachReportEventListeners(panel, reportData);
 
     } catch (renderError) {
         content.innerHTML = `<p class="error-message">Error rendering report details: ${renderError.message}<br><pre>${renderError.stack}</pre></p>`;
@@ -3599,7 +3593,7 @@ async function checkAllEndpoints() {
 }
 
 async function populateInitialHandlerStates() {
-    log.handler("Populating initial handler states from storage...");
+    log.debug("Populating initial handler states from storage...");
     try {
         const allData = await chrome.storage.local.get(null);
         endpointsWithHandlers.clear();
@@ -3612,7 +3606,7 @@ async function populateInitialHandlerStates() {
                 }
             }
         }
-        log.handler(`Initial handler states populated. Count: ${endpointsWithHandlers.size}`);
+        log.debug(`Initial handler states populated. Count: ${endpointsWithHandlers.size}`);
     } catch (error) {
         log.error("Error populating initial handler states:", error);
     } finally {
