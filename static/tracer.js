@@ -11,6 +11,7 @@ class HandlerTracer {
             { name: "setTimeout with string", pattern: /setTimeout\s*\(\s*("|'|`)(?![^"'`]*?function)/, severity: "Critical", methods: ['regex'], category: 'setTimeout' },
             { name: "setInterval with string", pattern: /setInterval\s*\(\s*("|'|`)(?![^"'`]*?function)/, severity: "Critical", methods: ['regex'], category: 'setInterval' },
             { name: "window.execScript", pattern: /window\.execScript\s*\(/, severity: "Critical", methods: ['regex'], category: 'eval' },
+            { name: "element.innerHTML assignment", pattern: /\.innerHTML\s*=/, severity: "High", methods: ['regex'], category: 'innerHTML' }, // <<< ADDED THIS LINE
             { name: "insertAdjacentHTML", pattern: /\.insertAdjacentHTML\s*\(/, severity: "High", methods: ['regex', 'ast'], argIndex: 1, category: 'innerHTML' },
             { name: "DOM_XSS_DOMParser", pattern: /DOMParser\.parseFromString$/, severity: 'High', methods: ['ast'], argIndex: 0, category: 'innerHTML' },
             { name: "DOMParser innerHTML Regex", pattern: /DOMParser.*innerHTML/, severity: "High", methods: ['regex'], category: 'innerHTML' },
@@ -20,16 +21,15 @@ class HandlerTracer {
             { name: "OpenRedirect_assign_AST", pattern: /\.location\.assign$/, severity: 'High', methods: ['ast'], argIndex: 0, category: 'location_href' },
             { name: "OpenRedirect_replace_AST", pattern: /\.location\.replace$/, severity: 'High', methods: ['ast'], argIndex: 0, category: 'location_href' },
             { name: "location.href assign", pattern: /\.location\.href\s*=/, severity: "High", methods: ['regex'], category: 'location_href' },
-            { name: "document.createElement('script')", pattern: /document\.createElement\s*\(\s*['"]script['"]/, severity: "High", methods: ['regex'], category: 'script_manipulation' },
+            { name: "document.createElement('script')", pattern: /document\.createElement\s*\(\s*['"]script['"]\)/, severity: "High", methods: ['regex'], category: 'script_manipulation' },
             { name: "jQuery html", pattern: /\$\(.*\)\.html\s*\(|\$\.[a-zA-Z0-9_]+\.html\s*\(/, severity: "High", methods: ['regex'], category: 'innerHTML' },
             { name: "iframe.src JS", pattern: /\.src\s*=\s*(?!['"]https?:)/, severity: "High", methods: ['regex'], category: 'src_manipulation' },
             { name: "script.src JS", pattern: /\.src\s*=\s*(?!['"]https?:)/, severity: "High", methods: ['regex'], category: 'script_manipulation' },
             { name: "srcdoc assignment", pattern: /\.srcdoc\s*=/, severity: "High", methods: ['regex'], category: 'innerHTML' },
             { name: "EvalInjection_setTimeout_AST", pattern: /^(?:window\.|self\.|top\.)?setTimeout$/, severity: 'High', methods: ['ast'], argIndex: 0, category: 'setTimeout' },
             { name: "EvalInjection_setInterval_AST", pattern: /^(?:window\.|self\.|top\.)?setInterval$/, severity: 'High', methods: ['ast'], argIndex: 0, category: 'setInterval' },
-
-            { name: "jQuery attr href", pattern: /\$.*?\.attr\s*\(\s*['"]href['"]/, severity: "Medium", methods: ['regex'], category: 'location_href' },
-            { name: "jQuery prop href", pattern: /\$.*?\.prop\s*\(\s*['"]href['"]/, severity: "Medium", methods: ['regex'], category: 'location_href' },
+            { name: "jQuery attr href", pattern: /\$.*?\.attr\s*\(\s*['"]href['"]\)/, severity: "Medium", methods: ['regex'], category: 'location_href' },
+            { name: "jQuery prop href", pattern: /\$.*?\.prop\s*\(\s*['"]href['"]\)/, severity: "Medium", methods: ['regex'], category: 'location_href' },
             { name: "document.domain assignment", pattern: /document\.domain\s*=/, severity: "Medium", methods: ['regex'], category: 'generic' },
             { name: "document.cookie assignment", pattern: /document\.cookie\s*=/, severity: "Medium", methods: ['regex'], category: 'generic' },
             { name: "createContextualFragment", pattern: /createContextualFragment\s*\(/, severity: "Medium", methods: ['regex'], category: 'innerHTML' },
@@ -39,7 +39,7 @@ class HandlerTracer {
             { name: "jQuery before", pattern: /\$.*?\.before\s*\(/, severity: "Medium", methods: ['regex'], category: 'innerHTML' },
             { name: "element.appendChild", pattern: /\.appendChild\s*\(/, severity: "Medium", methods: ['regex'], category: 'dom_manipulation' },
             { name: "element.insertBefore", pattern: /\.insertBefore\s*\(/, severity: "Medium", methods: ['regex'], category: 'dom_manipulation' },
-            { name: "setAttribute dangerous", pattern: /\.setAttribute\s*\(\s*['"](?:src|href|onclick|onerror|onload|on\w+)['"]/, severity: "Medium", methods: ['regex'], category: 'src_manipulation' },
+            { name: "setAttribute dangerous", pattern: /\.setAttribute\s*\(\s*['"](?:src|href|onclick|onerror|onload|on\w+)['"]\)/, severity: "Medium", methods: ['regex'], category: 'src_manipulation' },
             { name: "unsafe template literal", pattern: /`.*?\${(?![^{}]*?encodeURIComponent)(?![^{}]*?escape)/m, severity: "Medium", methods: ['regex'], category: 'generic' },
             { name: "Handlebars.compile", pattern: /Handlebars\.compile\s*\(/, severity: "Medium", methods: ['regex'], category: 'generic' },
             { name: "Vue $compile", pattern: /\$compile\s*\(/, severity: "Medium", methods: ['regex'], category: 'generic' },
@@ -52,7 +52,6 @@ class HandlerTracer {
             { name: "URLManipulation_replaceState_AST", pattern: /history\.replaceState$/, severity: 'Medium', methods: ['ast'], argIndex: 2, category: 'location_href'},
             { name: "StorageManipulation_localStorage_AST", pattern: /localStorage\.setItem$/, severity: 'Medium', methods: ['ast'], argIndex: 1, category: 'generic' },
             { name: "StorageManipulation_sessionStorage_AST", pattern: /sessionStorage\.setItem$/, severity: 'Medium', methods: ['ast'], argIndex: 1, category: 'generic' },
-
             { name: "localStorage Regex", pattern: /localStorage\.setItem\s*\(|localStorage\[\s*/, severity: "Low", methods: ['regex'], category: 'generic' },
             { name: "sessionStorage Regex", pattern: /sessionStorage\.setItem\s*\(|sessionStorage\[\s*/, severity: "Low", methods: ['regex'], category: 'generic' },
             { name: "addEventListener other", pattern: /\.addEventListener\s*\(\s*['"](?!message)/, severity: "Low", methods: ['regex'], category: 'generic' },
@@ -160,35 +159,58 @@ class HandlerTracer {
         function findDataPathForSink(context) {
             for (const path of sortedPaths) {
                 if (path === '(root)') continue;
-                const escapedPath = path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/(\\\.|\[|\])/g,'\\$1');
+                const escapedPath = path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
                 const pathRegex = new RegExp(`(?:event|e|msg|message|evt)\\.data\\.${escapedPath}`, 'i');
-                if (pathRegex.test(context)) {
-                    return path;
-                }
-                const bracketPath = path.includes('.') ? path.split('.').map(p => `['${p}']`).join('') : `['${path}']`;
+                if (pathRegex.test(context)) return path;
+                const bracketPath = path.includes('.')
+                    ? path.split('.').map(p => `['${p.replace(/'/g, "\\'")}']`).join('')
+                    : `['${path.replace(/'/g, "\\'")}']`;
                 const bracketRegex = new RegExp(`(?:event|e|msg|message|evt)\\.data${bracketPath}`, 'i');
-                if (bracketRegex.test(context)) {
-                    return path;
-                }
-
+                if (bracketRegex.test(context)) return path;
             }
             if (/(?:event|e|msg|message|evt)\.data/.test(context)) return '(root)';
             return '';
         }
 
+        const escapeHTML = (str) => String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); // Ensure input is string
+
+        // Process Regex Sinks
         this.domXssSinks.filter(p => p.methods.includes('regex')).forEach(sink => {
             let match;
             const regex = new RegExp(sink.pattern.source, 'g' + (sink.pattern.flags || ''));
             while ((match = regex.exec(handlerCode)) !== null) {
-                const context = this.extractContext(handlerCode, match.index, match[0].length);
-                const sinkPath = findDataPathForSink(context);
+                const rawContext = this.extractContext(handlerCode, match.index, match[0].length);
+                const sinkPath = findDataPathForSink(rawContext);
+                const exactMatchSnippet = match[0];
+                const key = `${sink.name || sink.type}#${exactMatchSnippet}`;
 
-                const key = `${sink.name || sink.type}#${context}`;
                 if (!foundSinks.has(key)) {
+                    let highlightedContextHTML = escapeHTML(rawContext); // Default to escaped version if match fails
+                    let highlightStartIndex = -1;
+                    let highlightEndIndex = -1;
+
+                    const matchIndexInRawContext = rawContext.indexOf(exactMatchSnippet);
+
+                    if (matchIndexInRawContext !== -1) {
+                        highlightStartIndex = matchIndexInRawContext;
+                        highlightEndIndex = highlightStartIndex + exactMatchSnippet.length;
+                        const partBefore = rawContext.substring(0, highlightStartIndex);
+                        const partMatch = rawContext.substring(highlightStartIndex, highlightEndIndex);
+                        const partAfter = rawContext.substring(highlightEndIndex);
+
+                        highlightedContextHTML = partBefore +
+                            '<span class="highlight-finding">' +
+                            escapeHTML(partMatch) +
+                            '</span>' +
+                            partAfter;
+                    }
+
                     const sinkData = {
                         type: sink.name || sink.type,
                         severity: sink.severity,
-                        context: context,
+                        context: highlightedContextHTML, // Store the HTML string
+                        highlightStart: highlightStartIndex,
+                        highlightEnd: highlightEndIndex,
                         method: 'regex',
                         path: sinkPath || '',
                         category: sink.category || 'generic'
@@ -198,7 +220,7 @@ class HandlerTracer {
             }
         });
 
-
+        // Process AST Sinks (No highlighting applied here currently)
         if (staticAnalysisData?.dataFlows) {
             vulnerabilities.dataFlows = staticAnalysisData.dataFlows;
             (staticAnalysisData.dataFlows || []).forEach(flow => {
@@ -206,7 +228,6 @@ class HandlerTracer {
                     let isMatch = false;
                     if (sinkPattern.nodeType && sinkPattern.nodeType !== flow.nodeType) return;
                     if (sinkPattern.argIndex !== undefined && sinkPattern.argIndex !== flow.argIndex) return;
-
                     let contextToMatch = flow.destinationContext || "";
                     if(sinkPattern.pattern instanceof RegExp){
                         const testRegex = new RegExp(sinkPattern.pattern.source, sinkPattern.pattern.flags.replace('g', ''));
@@ -214,8 +235,6 @@ class HandlerTracer {
                     } else if(typeof sinkPattern.pattern === 'string'){
                         isMatch = contextToMatch.includes(sinkPattern.pattern);
                     }
-
-
                     if (isMatch) {
                         const context = flow.fullCodeSnippet || flow.taintedNodeSnippet || '';
                         const key = `${sinkPattern.name || sinkPattern.type}#${context}`;
@@ -225,7 +244,9 @@ class HandlerTracer {
                                 severity: sinkPattern.severity,
                                 path: flow.sourcePath || '(root)',
                                 conditions: flow.guardingConditions || [],
-                                context: context,
+                                context: escapeHTML(context), // Escape AST context for safety
+                                highlightStart: -1,
+                                highlightEnd: -1,
                                 method: 'ast',
                                 category: sinkPattern.category || 'generic'
                             };
@@ -238,6 +259,7 @@ class HandlerTracer {
 
         vulnerabilities.sinks = Array.from(foundSinks.values());
 
+        // Process Security Checks
         const hasMessageListener = /addEventListener\s*\(\s*['"]message['"]/i.test(handlerCode) ||
             /onmessage\s*=\s*function/i.test(handlerCode) ||
             /window\.onmessage/i.test(handlerCode) ||
@@ -245,19 +267,16 @@ class HandlerTracer {
 
         if (hasMessageListener && !this.checkOriginValidation(handlerCode)) {
             if (!vulnerabilities.securityIssues.some(iss => iss.type === "Missing origin check")) {
-                vulnerabilities.securityIssues.push({ type: "Missing origin check", severity: "High", context: "No explicit origin validation found." });
+                vulnerabilities.securityIssues.push({ type: "Missing origin check", severity: "High", context: "No explicit origin validation found.", highlightStart: -1, highlightEnd: -1 });
             }
         }
-
         const hasTypeCheck = /\.(?:type|action|messageType|kind|command)\s*===?\s*['"`]/i.test(handlerCode) ||
             /switch\s*\(\s*(?:event|e|msg|message|evt)\.data(?:\.(?:type|action|messageType|kind|command))?\s*\)/i.test(handlerCode);
-
         if (hasMessageListener && !hasTypeCheck) {
             if (!vulnerabilities.securityIssues.some(iss => iss.type === "No message type validation")) {
-                vulnerabilities.securityIssues.push({ type: "No message type validation", severity: "Medium", context: "Handler does not appear to validate message type/action/kind." });
+                vulnerabilities.securityIssues.push({ type: "No message type validation", severity: "Medium", context: "Handler does not appear to validate message type/action/kind.", highlightStart: -1, highlightEnd: -1 });
             }
         }
-
 
         for (const check of this.securityChecks) {
             if (check.name === "Missing origin check" && vulnerabilities.securityIssues.some(iss => iss.type === "Missing origin check")) continue;
@@ -268,9 +287,39 @@ class HandlerTracer {
                 const flags = [...new Set(['g', 'm', 's', ...(check.pattern.flags?.split('') || [])])].join('');
                 const regex = new RegExp(check.pattern.source, flags);
                 while ((match = regex.exec(handlerCode)) !== null) {
-                    const context = this.extractContext(handlerCode, match.index, match[0].length);
-                    if (!vulnerabilities.securityIssues.some(iss => iss.type === check.name && iss.context === context)) {
-                        vulnerabilities.securityIssues.push({ type: check.name, severity: check.severity, context: context });
+                    const exactMatchSnippet = match[0];
+                    const rawContext = this.extractContext(handlerCode, match.index, match[0].length);
+                    let highlightedContextHTML = escapeHTML(rawContext); // Default
+                    let highlightStartIndex = -1;
+                    let highlightEndIndex = -1;
+
+                    const matchIndexInRawContext = rawContext.indexOf(exactMatchSnippet);
+
+                    if (matchIndexInRawContext !== -1) {
+                        highlightStartIndex = matchIndexInRawContext;
+                        highlightEndIndex = highlightStartIndex + exactMatchSnippet.length;
+                        const partBefore = rawContext.substring(0, highlightStartIndex);
+                        const partMatch = rawContext.substring(highlightStartIndex, highlightEndIndex);
+                        const partAfter = rawContext.substring(highlightEndIndex);
+                        // *** CORRECTED LOGIC ***
+                        highlightedContextHTML = partBefore + // Raw before
+                            '<span class="highlight-finding">' +
+                            escapeHTML(partMatch) + // Escape only match
+                            '</span>' +
+                            partAfter; // Raw after
+                        // *** END CORRECTION ***
+                    }
+
+                    const findingKey = `${check.name}#${exactMatchSnippet}`;
+                    // Deduplicate based on finding type and raw match snippet
+                    if (!vulnerabilities.securityIssues.some(iss => iss.type === check.name && iss.context.includes(escapeHTML(exactMatchSnippet)))) {
+                        vulnerabilities.securityIssues.push({
+                            type: check.name,
+                            severity: check.severity,
+                            context: highlightedContextHTML, // Store HTML string
+                            highlightStart: highlightStartIndex,
+                            highlightEnd: highlightEndIndex
+                        });
                     }
                     if (!regex.global) break;
                 }
@@ -280,37 +329,20 @@ class HandlerTracer {
         return vulnerabilities;
     }
 
-    analyzeDataFlowEnhanced(handlerCode) {
-        const dataFlows = []; if (!handlerCode || typeof handlerCode !== 'string') return dataFlows;
-        const codeToAnalyze = handlerCode.length > 50000 ? handlerCode.substring(0, 50000) : handlerCode;
-        const dataProperties = new Set();
-        const assignmentPattern = /(?:const|let|var)\s+([a-zA-Z0-9_$]+)\s*=\s*(?:event|e|msg|message|evt)\.data(?:\.([a-zA-Z0-9_$]+)|\[['"`](.+?)['"`]\])?/g;
-        let assignmentMatch; while ((assignmentMatch = assignmentPattern.exec(codeToAnalyze)) !== null) { const varName = assignmentMatch[1]; const directProp = assignmentMatch[2]; const bracketProp = assignmentMatch[3]; if (directProp) dataProperties.add({ identifier: varName, sourcePath: `event.data.${directProp}` }); else if (bracketProp) dataProperties.add({ identifier: varName, sourcePath: `event.data.${bracketProp}` }); else dataProperties.add({ identifier: varName, sourcePath: 'event.data' }); }
-        const directAccessPattern = /(?:event|e|msg|message|evt)\.data\.([a-zA-Z0-9_$]+(?:(?:\.[a-zA-Z0-9_$]+)|(?:\[.+?\]))?)/g;
-        let directMatch; while ((directMatch = directAccessPattern.exec(codeToAnalyze)) !== null) { dataProperties.add({ identifier: `event.data.${directMatch[1]}`, sourcePath: `event.data.${directMatch[1]}` }); }
-        if (/(?<!\.)\b(?:event|e|msg|message|evt)\.data\b(?![\.\['])/.test(codeToAnalyze)) { dataProperties.add({ identifier: 'event.data', sourcePath: 'event.data'}); }
-        if (dataProperties.size === 0) return dataFlows;
-        for (const sink of this.domXssSinks.filter(p=>p.methods.includes('regex'))) {
-            const sinkRegex = new RegExp(sink.pattern.source, 'g' + (sink.pattern.flags || '')); let sinkMatch;
-            while ((sinkMatch = sinkRegex.exec(codeToAnalyze)) !== null) {
-                const sinkContext = this.extractContext(codeToAnalyze, sinkMatch.index, sinkMatch[0].length);
-                for (const prop of dataProperties) {
-                    const escapedIdentifier = prop.identifier.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-                    const propUsagePattern = new RegExp(`\\b${escapedIdentifier}\\b`);
-                    if (propUsagePattern.test(sinkContext)) {
-                        const propertyName = prop.sourcePath.startsWith('event.data.') ? prop.sourcePath.substring('event.data.'.length) : prop.sourcePath;
-                        if (!dataFlows.some(df => df.property === propertyName && df.sink === sink.name)) { dataFlows.push({ property: propertyName, sink: sink.name, severity: sink.severity, context: sinkContext }); }
-                    }
-                }
-            }
-        }
-        return dataFlows;
+    extractContext(codeToSearchIn, index, length) {
+        const before = Math.max(0, index - 50); // Use 50 padding again
+        const after = Math.min(codeToSearchIn.length, index + length + 50);
+        let context = codeToSearchIn.substring(before, after);
+        context = context.replace(/\n|\r/g, "↵").trim();
+        return context;
     }
 
     extractContext(codeToSearchIn, index, length) {
-        const before = Math.max(0, index - 50); const after = Math.min(codeToSearchIn.length, index + length + 50);
-        let context = codeToSearchIn.substring(before, after); context = context.replace(/\n|\r/g, "↵").trim();
-        if (context.length > 150) context = context.substring(0, 70) + "..." + context.substring(context.length - 70); return context;
+        const before = Math.max(0, index - 50);
+        const after = Math.min(codeToSearchIn.length, index + length + 50);
+        let context = codeToSearchIn.substring(before, after);
+        context = context.replace(/\n|\r/g, "↵").trim();
+        return context;
     }
 
     async generateFuzzingPayloads(uniqueStructures, vulnerabilities, originalMessages = []) {
@@ -319,6 +351,8 @@ class HandlerTracer {
         const MAX_PAYLOADS_PER_SINK_PATH = 30;
         const MAX_PAYLOADS_PER_DUMB_FIELD = 20;
         const MAX_DUMB_FIELDS_TO_TARGET = 50;
+        log.debug(`[generateFuzzingPayloads] Starting. Structures: ${uniqueStructures?.length}, Sinks: ${vulnerabilities?.sinks?.length}`);
+
 
         if (!Array.isArray(uniqueStructures)) uniqueStructures = [];
 
@@ -331,6 +365,7 @@ class HandlerTracer {
                 if (Array.isArray(parsed) && parsed.length > 0) {
                     customXssPayloads = parsed;
                     customPayloadsActive = true;
+                    log.debug(`[generateFuzzingPayloads] Using ${customXssPayloads.length} custom payloads.`);
                 }
             }
         } catch (e) {
@@ -340,6 +375,7 @@ class HandlerTracer {
         const allXssPayloads = customPayloadsActive
             ? customXssPayloads
             : (window.FuzzingPayloads?.XSS || ['<script>alert("FP_XSS_Default")</script>']);
+        log.debug(`[generateFuzzingPayloads] Using base payload list size: ${allXssPayloads.length}`);
 
         let callbackUrl = null;
         let processedCallbackPayloads = [];
@@ -351,40 +387,54 @@ class HandlerTracer {
                 processedCallbackPayloads = callbackTemplates.map(template =>
                     template.replace(/%%CALLBACK_URL%%/g, callbackUrl)
                 );
-                console.log(`[Payload Gen] Prepared ${processedCallbackPayloads.length} callback payload strings.`);
+                log.debug(`[generateFuzzingPayloads] Prepared ${processedCallbackPayloads.length} callback payload strings.`);
             }
         } catch(e) {
             console.error("Error getting callback URL for payload generation:", e);
         }
 
         const combinedPayloadStrings = [...allXssPayloads, ...processedCallbackPayloads];
+        log.debug(`[generateFuzzingPayloads] Combined injectable strings count: ${combinedPayloadStrings.length}`);
         const shuffleArray = arr => [...arr].sort(() => 0.5 - Math.random());
 
         const severityOrder = { 'critical': 3, 'high': 2, 'medium': 1, 'low': 0 };
         const sinksWithPath = (vulnerabilities?.sinks || [])
             .filter(s => s.path && s.path !== '(root)');
+        log.debug(`[generateFuzzingPayloads] Found ${sinksWithPath.length} sinks with specific paths.`);
 
         structureLoop: for (const structure of uniqueStructures) {
+            log.debug(`[generateFuzzingPayloads] Processing structure type: ${structure.type}`);
             const handledPaths = new Set();
             const isStaticStructure = structure.source === 'static-analysis';
             const exampleData = structure.examples?.[0]?.data;
             let baseMsgData = exampleData !== undefined ? exampleData : structure.original;
 
-            if (baseMsgData === undefined) continue;
+            if (baseMsgData === undefined){
+                log.debug(`[generateFuzzingPayloads] Skipping structure - baseMsgData is undefined.`);
+                continue;
+            }
 
             if (typeof baseMsgData === 'string' && (baseMsgData.startsWith('{') || baseMsgData.startsWith('['))) {
                 try { baseMsgData = JSON.parse(baseMsgData); } catch (e) {}
             }
+            log.debug(`[generateFuzzingPayloads] Using base message data:`, JSON.stringify(baseMsgData).substring(0, 200));
 
             if (this.isPlainObject(baseMsgData)) {
                 const structurePaths = structure.pathsToFuzz || [];
+                log.debug(`[generateFuzzingPayloads] Structure paths to fuzz:`, structurePaths.map(p=>p.path));
 
                 const sinkPathsForThisStructure = sinksWithPath
-                    .filter(sink => structurePaths.some(p => p.path === sink.path || sink.path.startsWith(p.path + '.') || sink.path.startsWith(p.path + '[')))
+                    .filter(sink => {
+                        const found = structurePaths.some(p => p.path === sink.path || sink.path.startsWith(p.path + '.') || sink.path.startsWith(p.path + '['));
+                        log.debug(`[generateFuzzingPayloads] Sink path "${sink.path}" ${found ? 'matches' : 'does NOT match'} structure paths.`);
+                        return found;
+                    })
                     .sort((a, b) => (severityOrder[b.severity?.toLowerCase()] ?? -1) - (severityOrder[a.severity?.toLowerCase()] ?? -1));
+                log.debug(`[generateFuzzingPayloads] Applicable sink paths for this structure:`, sinkPathsForThisStructure.map(s=>s.path));
 
                 for (const sink of sinkPathsForThisStructure) {
                     const path = sink.path;
+                    log.debug(`[generateFuzzingPayloads] SMART loop - Target path: "${path}" for sink: ${sink.type}`);
                     if (handledPaths.has(path) || generatedPayloads.length >= MAX_PAYLOADS_TOTAL) continue;
 
                     const payloadsToInject = shuffleArray(combinedPayloadStrings).slice(0, MAX_PAYLOADS_PER_SINK_PATH);
@@ -394,6 +444,7 @@ class HandlerTracer {
                         try {
                             const modifiedMsg = JSON.parse(JSON.stringify(baseMsgData));
                             this.setValueAtPath(modifiedMsg, path, payloadString);
+                            log.debug(`[generateFuzzingPayloads] SMART Inject: Path="${path}", PayloadString="${payloadString.substring(0,50)}...", ResultingMsg:`, JSON.stringify(modifiedMsg));
                             const isCallback = processedCallbackPayloads.includes(payloadString);
                             let payloadType = isStaticStructure ? 'smart-static' : 'smart-message';
                             if(isCallback) payloadType = isStaticStructure ? 'smart-static-callback' : 'smart-message-callback';
@@ -404,17 +455,21 @@ class HandlerTracer {
                                 payload: modifiedMsg, targetPath: path, sinkType: sink.type,
                                 description: `${isCallback ? 'Callback' : 'XSS'} payload for ${sink.type} sink via path: ${path}`
                             });
-                        } catch (e) {}
+                        } catch (e) {
+                            log.error(`[generateFuzzingPayloads] SMART Error setting path "${path}":`, e);
+                        }
                     }
                     handledPaths.add(path);
                 }
 
                 const allStringFields = structurePaths.filter(p => p.type === 'string').map(p => p.path) || [];
                 const remainingStringFields = allStringFields.filter(path => !handledPaths.has(path));
+                log.debug(`[generateFuzzingPayloads] Remaining string fields for DUMB fuzzing:`, remainingStringFields);
 
                 if (remainingStringFields.length > 0) {
                     const fieldsToTarget = shuffleArray(remainingStringFields).slice(0, MAX_DUMB_FIELDS_TO_TARGET);
                     for (const field of fieldsToTarget) {
+                        log.debug(`[generateFuzzingPayloads] DUMB loop - Target field: "${field}"`);
                         if (generatedPayloads.length >= MAX_PAYLOADS_TOTAL) break structureLoop;
                         const selectedPayloads = shuffleArray(combinedPayloadStrings).slice(0, MAX_PAYLOADS_PER_DUMB_FIELD);
                         for (const payloadString of selectedPayloads) {
@@ -422,6 +477,7 @@ class HandlerTracer {
                             try {
                                 const modifiedMsg = JSON.parse(JSON.stringify(baseMsgData));
                                 this.setValueAtPath(modifiedMsg, field, payloadString);
+                                log.debug(`[generateFuzzingPayloads] DUMB Inject: Field="${field}", PayloadString="${payloadString.substring(0,50)}...", ResultingMsg:`, JSON.stringify(modifiedMsg));
                                 const isCallback = processedCallbackPayloads.includes(payloadString);
                                 let payloadType = 'dumb-json';
                                 if(isCallback) payloadType = 'dumb-json-callback';
@@ -432,12 +488,15 @@ class HandlerTracer {
                                     targetFlow: `JSON Field: ${field}`, description: `Dumb ${isCallback ? 'Callback' : 'XSS'} targeting string field ${field}`
                                 });
                                 handledPaths.add(field);
-                            } catch (e) {}
+                            } catch (e) {
+                                log.error(`[generateFuzzingPayloads] DUMB Error setting field "${field}":`, e);
+                            }
                         }
                     }
                 }
             }
             else if (typeof baseMsgData === 'string') {
+                log.debug(`[generateFuzzingPayloads] Processing raw string base message.`);
                 const originalString = baseMsgData;
                 const payloadsForString = shuffleArray(combinedPayloadStrings).slice(0, 15);
                 let payloadTypeBase = 'dumb-string';
@@ -447,6 +506,7 @@ class HandlerTracer {
                     if (generatedPayloads.length >= MAX_PAYLOADS_TOTAL) break stringLoop;
                     const isCallback = processedCallbackPayloads.includes(payloadString);
                     const currentTypeBase = isCallback ? 'dumb-string-callback' : payloadTypeBase;
+                    log.debug(`[generateFuzzingPayloads] RAW String Inject: TypeBase="${currentTypeBase}", PayloadString="${payloadString.substring(0,50)}..."`);
 
                     generatedPayloads.push({ type: `${currentTypeBase}-replace`, payload: payloadString, targetFlow: 'string replacement', description: `Dumb ${isCallback ? 'Callback' : 'XSS'} replacing original string`, original: originalString });
 
@@ -457,21 +517,25 @@ class HandlerTracer {
                         generatedPayloads.push({ type: `${currentTypeBase}-prepend`, payload: payloadString + originalString, targetFlow: 'string prepend', description: `Dumb ${isCallback ? 'Callback' : 'XSS'} prepending`, original: originalString });
                     }
                 }
+            } else {
+                log.debug(`[generateFuzzingPayloads] Base message data is not a plain object or processable string.`);
             }
         }
 
         if (generatedPayloads.length === 0 && uniqueStructures.length === 0) {
+            log.debug(`[generateFuzzingPayloads] No structures found, attempting fallback generation.`);
             const stringMessages = originalMessages.filter(msg => typeof msg?.data === 'string');
             if (stringMessages.length > 0) {
+                log.debug(`[generateFuzzingPayloads] Fallback using first raw string message.`);
                 const originalString = stringMessages[0].data;
                 const payloadsForString = shuffleArray(combinedPayloadStrings).slice(0, 15);
                 let payloadTypeBase = 'dumb-string';
                 if(customPayloadsActive) payloadTypeBase = 'custom-dumb-string';
-
                 stringLoopFallback: for (const payloadString of payloadsForString) {
                     if (generatedPayloads.length >= MAX_PAYLOADS_TOTAL) break stringLoopFallback;
                     const isCallback = processedCallbackPayloads.includes(payloadString);
                     const currentTypeBase = isCallback ? 'dumb-string-callback' : payloadTypeBase;
+                    log.debug(`[generateFuzzingPayloads] Fallback RAW String Inject: TypeBase="${currentTypeBase}", PayloadString="${payloadString.substring(0,50)}..."`);
 
                     generatedPayloads.push({ type: `${currentTypeBase}-replace`, payload: payloadString, targetFlow: 'string replacement fallback', description: `Dumb ${isCallback ? 'Callback' : 'XSS'} replacing original string`, original: originalString });
                     if (generatedPayloads.length < MAX_PAYLOADS_TOTAL) {
@@ -482,18 +546,21 @@ class HandlerTracer {
                     }
                 }
             } else {
+                log.debug(`[generateFuzzingPayloads] Fallback using generic payloads.`);
                 let payloadType = 'dumb-generic';
                 if(customPayloadsActive) payloadType = 'custom-dumb-generic';
                 shuffleArray(combinedPayloadStrings).slice(0, 10).forEach(p => {
                     if (generatedPayloads.length < MAX_PAYLOADS_TOTAL) {
                         const isCallback = processedCallbackPayloads.includes(p);
                         const currentType = isCallback ? 'dumb-generic-callback' : payloadType;
+                        log.debug(`[generateFuzzingPayloads] Fallback Generic Inject: Type="${currentType}", PayloadString="${p.substring(0,50)}..."`);
                         generatedPayloads.push({ type: currentType, payload: p, targetFlow: 'generic string', description: `Generic ${isCallback ? 'Callback' : 'XSS'} payload (no structure/string)` });
                     }
                 });
             }
         }
 
+        log.debug(`[generateFuzzingPayloads] Finished generation. Total payloads: ${generatedPayloads.length}`);
         return generatedPayloads.slice(0, MAX_PAYLOADS_TOTAL);
     }
 
@@ -1025,8 +1092,8 @@ details[open] .toggle-icon { transform: rotate(90deg); }
 .report-table { width: 100%; border-collapse: collapse; margin: 15px 0; background-color: #22252a; }
 .report-table th, .report-table td { padding: 10px 12px; text-align: left; border: 1px solid #3a3f44; font-size: 13px; color: #d0d8e8; }
 .report-table th { background-color: #2c313a; font-weight: bold; color: #fff; }
-.report-table td code { font-size: 12px; color: #a8b3cf; background-color: #111316; padding: 2px 4px; border-radius: 3px;}
-.report-table .context-snippet { max-width: 400px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: inline-block; vertical-align: middle; }
+.report-table td code { font-size: 12px; color: #a8b3cf; background-color: #111316; padding: 2px 4px; border-radius: 3px; white-space: pre-wrap; word-break: break-all; }
+.report-table .context-snippet { max-width: 400px; white-space: pre-wrap; word-break: break-all; display: inline-block; vertical-align: middle; }
 .severity-badge { display: inline-block; padding: 3px 8px; border-radius: 12px; font-size: 11px; font-weight: bold; text-transform: uppercase; }
 .severity-critical { background-color: #e74c3c; color: white; }
 .severity-high { background-color: #e67e22; color: white; }
@@ -1053,6 +1120,15 @@ details[open] .toggle-icon { transform: rotate(90deg); }
 .control-button { }
 .secondary-button { }
 .error-message { color: #e74c3c; font-weight: bold; padding: 15px; background-color: rgba(231, 76, 60, 0.1); border: 1px solid #e74c3c; border-radius: 4px; }
+
+span.highlight-finding {
+  background-color: rgba(255, 0, 0, 0.3);
+  color: #ffdddd;
+  font-weight: bold;
+  padding: 1px 2px;
+  border-radius: 2px;
+  border: 1px solid rgba(255, 100, 100, 0.5);
+}
 `;
 
 const progressStyles = `
@@ -1223,7 +1299,7 @@ async function handleTraceButton(endpoint, traceButton) {
             window.log.handler("[Trace] Messages found. Using standard message-based payload generation.");
             uniqueStructures = window.handlerTracer.analyzeJsonStructures(relevantMessages);
             window.log.handler(`[Trace] Found ${uniqueStructures.length} unique structures from messages.`);
-            payloads = window.handlerTracer.generateFuzzingPayloads(
+            payloads = await window.handlerTracer.generateFuzzingPayloads(
                 uniqueStructures,
                 vulnAnalysis,
                 relevantMessages
@@ -1231,7 +1307,7 @@ async function handleTraceButton(endpoint, traceButton) {
         } else {
             window.log.handler("[Trace] No messages found (Silent Listener). Attempting AST-based payload generation.");
             if (staticAnalysisData && (staticAnalysisData.accessedEventDataPaths?.size > 0 || staticAnalysisData.dataFlows?.length > 0)) {
-                payloads = window.handlerTracer.generateAstBasedPayloads(
+                payloads = await window.handlerTracer.generateAstBasedPayloads(
                     staticAnalysisData,
                     vulnAnalysis
                 );
