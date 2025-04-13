@@ -100,7 +100,6 @@ function sanitizeString(str) {
     const xssPatterns = [
         /<\s*script/i, /<\s*img[^>]+onerror/i, /javascript\s*:/i,
         /on\w+\s*=/i, /<\s*iframe/i, /<\s*svg[^>]+on\w+/i,
-        /alert\s*\(/i, /console\.log\s*\(/i, /eval\s*\(/i, // Simplified regex slightly
         /Function\s*\(/i, /setTimeout\s*\(/i, /setInterval\s*\(/i,
         /document\.domain/i, /document\.location/i, /location\.href/i
     ];
@@ -170,26 +169,37 @@ function isValidUrl(url) {
 function normalizeEndpointUrl(url) {
     try {
         if (!url || typeof url !== 'string' || ['access-denied-or-invalid', 'unknown-origin', 'null'].includes(url)) {
+            log.debug(`[Normalize URL] Returning early for invalid/unsupported input:`, url);
             return { normalized: url, components: null, key: url };
         }
-        let absoluteUrlStr = url;
-        if (!url.includes('://') && !url.startsWith('//')) { absoluteUrlStr = 'https:' + url; }
-        else if (url.startsWith('//')) { absoluteUrlStr = 'https:' + url; }
-        const urlObj = new URL(absoluteUrlStr);
-        if (['about:', 'chrome:', 'moz-extension:', 'chrome-extension:', 'blob:', 'data:'].includes(urlObj.protocol)) {
+        if (!url.includes('://') && !url.startsWith('//')) {
+            log.debug(`[Normalize URL] Added scheme:`, {original: url, modified: absUrl});
+        } else if (url.startsWith('//')) {
+            log.debug(`[Normalize URL] Handled protocol-relative:`, {original: url, modified: absUrl});
+        } else {
+            absUrl = url;
+        }
+
+        if (['about:', 'chrome:', 'moz-extension:', 'chrome-extension:', 'blob:', 'data:'].includes(obj.protocol)) {
+            log.debug(`[Normalize URL] Returning early for unsupported protocol (${obj.protocol}):`, url);
             return { normalized: url, components: null, key: url };
         }
-        const key = urlObj.origin + urlObj.pathname + urlObj.search;
+        const origin = obj.origin || '';
+        const pathname = obj.pathname || '';
+        const search = obj.search || '';
+        const key = origin + pathname + search;
+
         return {
             normalized: key,
-            components: { origin: urlObj.origin, path: urlObj.pathname, query: urlObj.search, hash: urlObj.hash },
+            components: { origin: origin, path: pathname, query: search, hash: obj.hash || '' },
             key: key
         };
     } catch (e) {
-        log.handler(`[Normalize URL] Error: ${e.message}`, url);
-        return { normalized: url, components: null, key: url };
+        log.error(`[Normalize URL] Error constructing URL: "${e.message}".`, {
+        });
     }
 }
+
 window.normalizeEndpointUrl = normalizeEndpointUrl;
 
 function getStorageKeyForUrl(url) {
@@ -932,7 +942,6 @@ function initializeMessageHandling() {
                     }
                     break;
                 case "forwardedPostMessage":
-                    // No UI update needed
                     break;
             }
 
@@ -1130,20 +1139,68 @@ function clearCustomPayloads() {
 
 async function launchFuzzerEnvironment(endpoint, testData) {
     try {
-        let traceReport = null; const endpointKey = window.getStorageKeyForUrl(endpoint); let analysisKeyToUse = endpointKey;
-        try { const traceInfoKey = `trace-info-${endpointKey}`; const traceInfo = await new Promise(resolve => chrome.storage.local.get(traceInfoKey, result => resolve(result[traceInfoKey]))); if (traceInfo?.analysisStorageKey) analysisKeyToUse = traceInfo.analysisStorageKey; else if (traceInfo?.analyzedUrl) analysisKeyToUse = window.getStorageKeyForUrl(traceInfo.analyzedUrl); window.log.handler(`[Launch] Using analysis key: ${analysisKeyToUse}`); traceReport = await window.traceReportStorage.getTraceReport(analysisKeyToUse); } catch (e) {}
-        if (!traceReport) { window.log.warning(`[Launch] Trace report not found for key ${analysisKeyToUse}, trying original key ${endpointKey}`); traceReport = await window.traceReportStorage.getTraceReport(endpointKey); if (traceReport) analysisKeyToUse = endpointKey; else throw new Error('No trace report found. Run Play & Trace first.'); }
+        let traceReport = null;
+        const endpointKey = window.getStorageKeyForUrl(endpoint);
+        let analysisKeyToUse = endpointKey;
+        try {
+            const traceInfoKey = `trace-info-${endpointKey}`;
+            const traceInfo = await new Promise(resolve => chrome.storage.local.get(traceInfoKey, result => resolve(result[traceInfoKey])));
+            if (traceInfo?.analysisStorageKey) {
+                analysisKeyToUse = traceInfo.analysisStorageKey;
+            } else if (traceInfo?.analyzedUrl) {
+                analysisKeyToUse = window.getStorageKeyForUrl(traceInfo.analyzedUrl);
+            }
+            traceReport = await window.traceReportStorage.getTraceReport(analysisKeyToUse);
+        } catch (e) {}
 
-        const handlerCode = traceReport?.analyzedHandler?.handler || traceReport?.analyzedHandler?.code || testData?.handler; if (!handlerCode) throw new Error('No handler code found. Run Play first.');
-        let payloads = []; try { payloads = await window.traceReportStorage.getReportPayloads(analysisKeyToUse); } catch {} if (payloads.length === 0 && traceReport?.details?.payloads?.length > 0) payloads = traceReport.details.payloads; else if (payloads.length === 0 && traceReport?.payloads?.length > 0) payloads = traceReport.payloads; else if (payloads.length === 0 && testData?.payloads?.length > 0) payloads = testData.payloads; if (payloads.length === 0) window.log.warning('[Launch] No specific payloads found.');
-        let messages = testData?.originalMessages || await window.retrieveMessagesWithFallbacks(endpointKey); if (messages.length === 0 && traceReport?.details?.uniqueStructures?.length > 0) messages = traceReport.details.uniqueStructures.flatMap(s => s.examples || []) || [];
+        if (!traceReport) {
+            traceReport = await window.traceReportStorage.getTraceReport(endpointKey);
+            if (traceReport) {
+                analysisKeyToUse = endpointKey;
+            } else {
+                throw new Error('No trace report. Run Play & Trace.');
+            }
+        }
 
-        await chrome.runtime.sendMessage({ action: "startServer" }); await new Promise(resolve => setTimeout(resolve, 1500));
-        let serverStarted = false; let attempts = 0; const maxAttempts = 3; while (!serverStarted && attempts < maxAttempts) { attempts++; try { const health = await fetch('http://127.0.0.1:1337/health', { method: 'GET', cache: 'no-store', signal: AbortSignal.timeout(800) }); if (health.ok) serverStarted = true; } catch { await new Promise(r => setTimeout(r, 700)); } } if (!serverStarted) throw new Error("Fuzzer server did not start.");
-        const storageData = await chrome.storage.session.get([CALLBACK_URL_STORAGE_KEY]); const currentCallbackUrl = storageData[CALLBACK_URL_STORAGE_KEY] || null; const customPayloadsResult = await new Promise(resolve => chrome.storage.session.get('customXssPayloads', result => resolve(result.customXssPayloads))); const useCustomPayloads = customPayloadsResult && customPayloadsResult.length > 0;
+        const handlerCode = traceReport?.analyzedHandler?.handler || traceReport?.analyzedHandler?.code || testData?.handler;
+        if (!handlerCode) {
+            throw new Error('No handler code. Run Play.');
+        }
+
+        let payloads = [];
+        try { payloads = await window.traceReportStorage.getReportPayloads(analysisKeyToUse); } catch {}
+        if (payloads.length === 0 && traceReport?.details?.payloads?.length > 0) payloads = traceReport.details.payloads;
+        else if (payloads.length === 0 && traceReport?.payloads?.length > 0) payloads = traceReport.payloads;
+        else if (payloads.length === 0 && testData?.payloads?.length > 0) payloads = testData.payloads;
+        if (payloads.length === 0) window.log.warning('[Launch] No specific payloads found.');
+
+        let messages = testData?.originalMessages || await window.retrieveMessagesWithFallbacks(endpointKey);
+        if (messages.length === 0 && traceReport?.details?.uniqueStructures?.length > 0) {
+            messages = traceReport.details.uniqueStructures.flatMap(s => s.examples || []) || [];
+        }
+
+        await chrome.runtime.sendMessage({ action: "startServer" });
+        await new Promise(resolve => setTimeout(resolve, 1500));
+        let serverStarted = false; let attempts = 0;
+        while (!serverStarted && attempts < 3) {
+            attempts++;
+            try {
+                const health = await fetch('http://127.0.0.1:1337/health', { method: 'GET', cache: 'no-store', signal: AbortSignal.timeout(800) });
+                if (health.ok) serverStarted = true;
+            } catch { await new Promise(r => setTimeout(r, 700)); }
+        }
+        if (!serverStarted) throw new Error("Fuzzer server did not start.");
+
+        const storageData = await chrome.storage.session.get([CALLBACK_URL_STORAGE_KEY]);
+        const currentCallbackUrl = storageData[CALLBACK_URL_STORAGE_KEY] || null;
+        const customPayloadsResult = await new Promise(resolve => chrome.storage.session.get('customXssPayloads', result => resolve(result.customXssPayloads)));
+        const useCustomPayloads = customPayloadsResult && customPayloadsResult.length > 0;
 
         const config = {
-            target: traceReport.endpoint || endpoint, messages: messages, handler: handlerCode, payloads: payloads,
+            target: traceReport.endpoint || endpoint,
+            messages: messages,
+            handler: handlerCode,
+            payloads: payloads,
             traceData: {
                 ...(traceReport || {}),
                 details: {
@@ -1152,12 +1209,32 @@ async function launchFuzzerEnvironment(endpoint, testData) {
                 }
             },
             callbackUrl: currentCallbackUrl,
-            fuzzerOptions: { autoStart: true, useCustomPayloads: useCustomPayloads, enableCallbackFuzzing: !!currentCallbackUrl, /* other defaults */ }
+            fuzzerOptions: {
+                autoStart: true,
+                useCustomPayloads: useCustomPayloads,
+                enableCallbackFuzzing: !!currentCallbackUrl
+            }
         };
 
-        const response = await fetch('http://127.0.0.1:1337/current-config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(config), signal: AbortSignal.timeout(5000) }); if (!response.ok) throw new Error(`Config update failed: ${response.statusText}`);
-        const tab = await chrome.tabs.create({ url: 'http://127.0.0.1:1337/' }); const cleanupListener = (tabId) => { if (tabId === tab.id) { chrome.runtime.sendMessage({ action: "stopServer" }); chrome.tabs.onRemoved.removeListener(cleanupListener); } }; chrome.tabs.onRemoved.addListener(cleanupListener); return true;
-    } catch (error) { alert(`Fuzzer Launch Failed: ${error.message}`); window.log.error("[Launch Fuzzer Env]", error); try { await chrome.runtime.sendMessage({ action: "stopServer" }); } catch {} return false; }
+        const response = await fetch('http://127.0.0.1:1337/current-config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(config), signal: AbortSignal.timeout(5000) });
+        if (!response.ok) {
+            throw new Error(`Config update failed: ${response.statusText}`);
+        }
+        const tab = await chrome.tabs.create({ url: 'http://127.0.0.1:1337/' });
+        const cleanupListener = (tabId) => {
+            if (tabId === tab.id) {
+                chrome.runtime.sendMessage({ action: "stopServer" });
+                chrome.tabs.onRemoved.removeListener(cleanupListener);
+            }
+        };
+        chrome.tabs.onRemoved.addListener(cleanupListener);
+        return true;
+    } catch (error) {
+        alert(`Fuzzer Launch Failed: ${error.message}`);
+        window.log.error("[Launch Fuzzer Env]", error);
+        try { await chrome.runtime.sendMessage({ action: "stopServer" }); } catch {}
+        return false;
+    }
 }
 
 
@@ -1383,35 +1460,215 @@ function attachReportEventListeners(panel, reportData) {
 
 
 function displayReport(reportData, panel) {
-    try { panel.innerHTML = ''; } catch { panel.innerHTML = '<p class="error-message">Error clearing report panel.</p>'; return; }
-    let content; try { content = document.createElement('div'); content.className = 'trace-results-content'; panel.appendChild(content); } catch { panel.innerHTML = '<p class="error-message">Error creating report content area.</p>'; return; }
-    if (!reportData || typeof reportData !== 'object') { content.innerHTML = '<p class="error-message">Error: Invalid report data.</p>'; return; }
     try {
-        const details = reportData.details || {}; const summary = reportData.summary || {}; const bestHandler = details.bestHandler || reportData.bestHandler || reportData.analyzedHandler; const vulnerabilities = [...(details.sinks || []), ...(reportData.vulnerabilities || [])]; const securityIssues = [...(details.securityIssues || []), ...(reportData.securityIssues || [])]; const dataFlows = details.dataFlows || []; const payloads = details.payloads || []; const structures = details.uniqueStructures || []; const endpointDisplay = reportData.endpoint || reportData.originalEndpointKey || 'Unknown Endpoint'; const originChecks = details.originValidationChecks || [];
-        const safeEscape = (str) => { try { return window.escapeHTML(String(str)); } catch{ return '[Error]'; }}; const safeGetRisk = (score) => { try { return getRiskLevelAndColor(score); } catch{ return { riskLevel: 'Error', riskColor: 'critical' }; }}; const safeGetRec = (score, data) => { try { return getRecommendationText(score, data); } catch{ return 'Error generating recommendation.'; }}; const safeRenderPayload = (p, i) => { try { return renderPayloadItem(p, i); } catch{ return '<p class="error-message">Error rendering payload item.</p>'; }}; const safeRenderStructure = (s, i) => { try { return renderStructureItem(s, i); } catch{ return '<p class="error-message">Error rendering structure item.</p>'; }};
-        const uniqueVulns = vulnerabilities.filter((v, i, a) => a.findIndex(t => t?.type === v?.type && t?.context === v?.context) === i); const uniqueIssues = securityIssues.filter((v, i, a) => a.findIndex(t => t?.type === v?.type && t?.context === v?.context) === i);
-        const score = reportData.securityScore ?? summary.securityScore ?? 100; const { riskLevel, riskColor } = safeGetRisk(score);
-        const summarySection = document.createElement('div'); summarySection.className = 'report-section report-summary'; summarySection.innerHTML = `<h4 class="report-section-title">Analysis Summary - <span class="report-endpoint-title">${safeEscape(endpointDisplay)}</span></h4><div class="summary-grid"><div class="security-score-container"><h5 class="risk-score-title">Risk Score:</h5><div class="security-score ${riskColor}" title="Risk Score: ${score} (${riskLevel})"><div class="security-score-value">${score}</div><div class="security-score-label">${riskLevel}</div></div></div><div class="summary-metrics"><div class="metric"><span class="metric-label">Msgs Analyzed</span><span class="metric-value">${summary.messagesAnalyzed ?? 'N/A'}</span></div><div class="metric"><span class="metric-label">Msg Structures</span><span class="metric-value">${structures?.length ?? 0}</span></div><div class="metric"><span class="metric-label">Sinks Found</span><span class="metric-value">${uniqueVulns?.length ?? 0}</span></div><div class="metric"><span class="metric-label">Sec. Issues</span><span class="metric-value">${uniqueIssues?.length ?? 0}</span></div><div class="metric"><span class="metric-label">Payloads Gen.</span><span class="metric-value">${payloads?.length ?? 0}</span></div></div></div><div class="recommendations"><h5 class="report-subsection-title">Recommendation</h5><p class="recommendation-text">${safeEscape(safeGetRec(score, reportData))}</p></div>`; content.appendChild(summarySection);
-        if (bestHandler?.handler) { const handlerSection = document.createElement('div'); handlerSection.className = 'report-section report-handler'; handlerSection.innerHTML = `<details class="report-details"><summary class="report-summary-toggle"><strong>Analyzed Handler</strong><span class="handler-meta">(Cat: ${safeEscape(bestHandler.category || 'N/A')} | Score: ${bestHandler.score?.toFixed(1) || 'N/A'})</span><span class="toggle-icon">▶</span></summary><div class="report-code-block handler-code"><pre><code>${safeEscape(bestHandler.handler)}</code></pre></div></details>`; content.appendChild(handlerSection); }
-        const findingsSection = document.createElement('div'); findingsSection.className = 'report-section report-findings'; let findingsHTML = '<h4 class="report-section-title">Findings</h4>';
+        panel.innerHTML = '';
+    } catch (clearError) {
+        panel.innerHTML = '<p class="error-message">Internal error clearing report panel.</p>';
+        console.error("Error clearing report panel:", clearError);
+        return;
+    }
+
+    let content;
+    try {
+        content = document.createElement('div');
+        content.className = 'trace-results-content';
+        panel.appendChild(content);
+    } catch (contentError) {
+        console.error("[displayReport] Error creating/adding content container:", contentError);
+        panel.innerHTML = '<p class="error-message">Internal error creating report content area.</p>';
+        return;
+    }
+
+    if (!reportData || typeof reportData !== 'object') {
+        console.error("[displayReport] Invalid or missing report data object.");
+        content.innerHTML = '<p class="error-message">Error: Invalid or missing report data.</p>';
+        return;
+    }
+
+    try {
+        const details = reportData.details || {};
+        const summary = reportData.summary || {};
+        const bestHandler = details.bestHandler || reportData.bestHandler || reportData.analyzedHandler;
+        const vulnerabilities = [...(details.sinks || []), ...(reportData.vulnerabilities || [])];
+        const securityIssues = [...(details.securityIssues || []), ...(reportData.securityIssues || [])];
+        const dataFlows = details.dataFlows || [];
+        const payloads = details.payloads || [];
+        const structures = details.uniqueStructures || [];
+        const endpointDisplay = reportData.endpoint || reportData.originalEndpointKey || 'Unknown Endpoint';
+        const originChecks = details.originValidationChecks || [];
+
+        const safeEscape = (str) => { try { return window.escapeHTML(String(str)); } catch(e){ console.error('escapeHTML failed:', e); return '[Error]'; }};
+        const safeGetRisk = (score) => { try { return getRiskLevelAndColor(score); } catch(e){ console.error('getRiskLevelAndColor failed:', e); return { riskLevel: 'Error', riskColor: 'critical' }; }};
+        const safeGetRec = (score, data) => { try { return getRecommendationText(score, data); } catch(e){ console.error('getRecommendationText failed:', e); return 'Error generating recommendation.'; }};
+        const safeRenderPayload = (p, i) => { try { return renderPayloadItem(p, i); } catch(e){ console.error('renderPayloadItem failed:', e); return '<p class="error-message">Error rendering payload item.</p>'; }};
+        const safeRenderStructure = (s, i) => { try { return renderStructureItem(s, i); } catch(e){ console.error('renderStructureItem failed:', e); return '<p class="error-message">Error rendering structure item.</p>'; }};
+
+        const uniqueVulns = vulnerabilities.filter((v, i, a) => a.findIndex(t => t?.type === v?.type && t?.context === v?.context) === i);
+        const uniqueIssues = securityIssues.filter((v, i, a) => a.findIndex(t => t?.type === v?.type && t?.context === v?.context) === i);
+
+        const score = reportData.securityScore ?? summary.securityScore ?? 100;
+        const { riskLevel, riskColor } = safeGetRisk(score);
+
+        const summarySection = document.createElement('div');
+        summarySection.className = 'report-section report-summary';
+        summarySection.innerHTML = `
+            <h4 class="report-section-title">Analysis Summary - <span class="report-endpoint-title">${safeEscape(endpointDisplay)}</span></h4>
+            <div class="summary-grid">
+                 <div class="security-score-container">
+                     <h5 class="risk-score-title">Risk Score:</h5>
+                     <div class="security-score ${riskColor}" title="Score: ${score} (${riskLevel})">
+                         <div class="security-score-value">${score}</div>
+                         <div class="security-score-label">${riskLevel}</div>
+                     </div>
+                 </div>
+                 <div class="summary-metrics">
+                     <div class="metric"><span class="metric-label">Msgs</span><span class="metric-value">${summary.messagesAnalyzed ?? 'N/A'}</span></div>
+                     <div class="metric"><span class="metric-label">Structs</span><span class="metric-value">${structures?.length ?? 0}</span></div>
+                     <div class="metric"><span class="metric-label">Sinks</span><span class="metric-value">${uniqueVulns?.length ?? 0}</span></div>
+                     <div class="metric"><span class="metric-label">Issues</span><span class="metric-value">${uniqueIssues?.length ?? 0}</span></div>
+                     <div class="metric"><span class="metric-label">Payloads</span><span class="metric-value">${payloads?.length ?? 0}</span></div>
+                 </div>
+            </div>
+            <div class="recommendations">
+                <h5 class="report-subsection-title">Recommendation</h5>
+                <p class="recommendation-text">${safeEscape(safeGetRec(score, reportData))}</p>
+            </div>
+        `;
+        content.appendChild(summarySection);
+
+        if (bestHandler?.handler) {
+            const handlerSection = document.createElement('div');
+            handlerSection.className = 'report-section report-handler';
+            handlerSection.innerHTML = `
+                <details class="report-details">
+                    <summary class="report-summary-toggle">
+                        <strong>Analyzed Handler</strong>
+                        <span class="handler-meta">(Cat: ${safeEscape(bestHandler.category || 'N/A')} | Score: ${bestHandler.score?.toFixed(1) || 'N/A'})</span>
+                        <span class="toggle-icon">▶</span>
+                    </summary>
+                    <div class="report-code-block handler-code">
+                        <pre><code>${safeEscape(bestHandler.handler)}</code></pre>
+                    </div>
+                </details>`;
+            content.appendChild(handlerSection);
+        }
+
+        const findingsSection = document.createElement('div');
+        findingsSection.className = 'report-section report-findings';
+        let findingsHTML = '<h4 class="report-section-title">Findings</h4>';
+
         if (originChecks.length > 0) {
             findingsHTML += `<div class="subsection"><h5 class="report-subsection-title">Origin Validation (${originChecks.length})</h5><table class="report-table"><thead><tr><th>Check Type</th><th>Strength</th><th>Compared Value</th><th>Snippet</th></tr></thead><tbody>`;
             originChecks.forEach(check => {
-                const type = check?.type || '?'; const strength = check?.strength || 'N/A'; const value = check?.value !== null && check?.value !== undefined ? String(check.value).substring(0, 100) : 'N/A'; const snippetHTML = check?.snippet ? `<code class="context-snippet">${safeEscape(check.snippet)}</code>` : 'N/A';
-                let strengthClass = strength.toLowerCase(); if(strength === 'Missing') strengthClass = 'critical'; else if(strength === 'Weak') strengthClass = 'high'; else if(strength === 'Medium') strengthClass = 'medium'; else if(strength === 'Strong') strengthClass = 'negligible'; else strengthClass='low';
+                const type = check?.type || '?'; const strength = check?.strength || 'N/A'; const value = check?.value !== null && check?.value !== undefined ? String(check.value).substring(0, 100) : 'N/A'; const snippetHTML = check?.snippet ? `<code class="context-snippet">${safeEscape(check.snippet)}</code>` : 'N/A'; let strengthClass = strength.toLowerCase(); if(strength === 'Missing') strengthClass = 'critical'; else if(strength === 'Weak') strengthClass = 'high'; else if(strength === 'Medium') strengthClass = 'medium'; else if(strength === 'Strong') strengthClass = 'negligible'; else strengthClass='low';
                 findingsHTML += `<tr class="severity-row-${strengthClass}"><td>${safeEscape(type)}</td><td><span class="severity-badge severity-${strengthClass}">${safeEscape(strength)}</span></td><td><code>${safeEscape(value)}</code></td><td>${snippetHTML}</td></tr>`;
             });
             findingsHTML += `</tbody></table></div>`;
-        } else { findingsHTML += `<p class="no-findings-text">No specific origin checks identified via static analysis.</p>`; }
-        if (uniqueVulns.length > 0) { findingsHTML += `<div class="subsection"><h5 class="report-subsection-title">DOM XSS Sinks Detected (${uniqueVulns.length})</h5><table class="report-table"><thead><tr><th>Sink</th><th>Severity</th><th>Context Snippet</th></tr></thead><tbody>`; uniqueVulns.forEach(vuln => { const type = vuln?.type || '?'; const severity = vuln?.severity || 'N/A'; const contextHTML = vuln?.context || ''; findingsHTML += `<tr class="severity-row-${severity.toLowerCase()}"><td>${safeEscape(type)}</td><td><span class="severity-badge severity-${severity.toLowerCase()}">${safeEscape(severity)}</span></td><td class="context-snippet-cell">${contextHTML}</td></tr>`; }); findingsHTML += `</tbody></table></div>`; } else { findingsHTML += `<p class="no-findings-text">No direct DOM XSS sinks found.</p>`; }
-        if (uniqueIssues.length > 0) { findingsHTML += `<div class="subsection"><h5 class="report-subsection-title">Other Security Issues (${uniqueIssues.length})</h5><table class="report-table"><thead><tr><th>Issue</th><th>Severity</th><th>Context Snippet</th></tr></thead><tbody>`; uniqueIssues.forEach(issue => { const type = issue?.type || '?'; const severity = issue?.severity || 'N/A'; const contextHTML = issue?.context || ''; findingsHTML += `<tr class="severity-row-${severity.toLowerCase()}"><td>${safeEscape(type)}</td><td><span class="severity-badge severity-${severity.toLowerCase()}">${safeEscape(severity)}</span></td><td class="context-snippet-cell">${contextHTML}</td></tr>`; }); findingsHTML += `</tbody></table></div>`; } else { findingsHTML += `<p class="no-findings-text">No other security issues found.</p>`; }
-        findingsSection.innerHTML = findingsHTML; content.appendChild(findingsSection);
-        if (dataFlows?.length > 0) { const flowSection = document.createElement('div'); flowSection.className = 'report-section report-dataflow'; flowSection.innerHTML = `<h4 class="report-section-title">Data Flow (Message Data → Sink)</h4><table class="report-table dataflow-table"><thead><tr><th>Source Property</th><th>Sink Function</th><th>Context Snippet</th></tr></thead><tbody>`; dataFlows.forEach(flow => { const prop = flow?.property || flow?.sourcePath || '?'; const sink = flow?.destinationContext || '?'; const context = flow?.fullCodeSnippet || flow?.taintedNodeSnippet || ''; flowSection.innerHTML += `<tr><td><code>event.data.${safeEscape(prop)}</code></td><td>${safeEscape(sink)}</td><td><code class="context-snippet">${safeEscape(context)}</code></td></tr>`; }); flowSection.innerHTML += `</tbody></table>`; content.appendChild(flowSection); }
-        if (payloads?.length > 0) { const payloadSection = document.createElement('div'); payloadSection.className = 'report-section report-payloads'; payloadSection.innerHTML = `<h4 class="report-section-title">Generated Payloads (${payloads.length})</h4><div id="payloads-list" class="payloads-list report-list">${payloads.slice(0, 10).map((p, index) => safeRenderPayload(p, index)).join('')}</div>${payloads.length > 10 ? `<button id="showAllPayloadsBtn" class="control-button secondary-button show-more-btn">Show All ${payloads.length}</button>` : ''}`; content.appendChild(payloadSection); } else { const payloadSection = document.createElement('div'); payloadSection.className = 'report-section report-payloads'; payloadSection.innerHTML = `<h4 class="report-section-title">Generated Payloads (0)</h4><p class="no-findings-text">No specific payloads generated.</p>`; content.appendChild(payloadSection); }
-        if (structures?.length > 0) { const structureSection = document.createElement('div'); structureSection.className = 'report-section report-structures'; let structuresHTML = `<h4 class="report-section-title">Unique Message Structures (${structures.length})</h4><div class="structures-list report-list">`; structures.slice(0, 3).forEach((s, index) => { structuresHTML += safeRenderStructure(s, index); }); structuresHTML += `</div>`; if (structures.length > 3) { structuresHTML += `<button id="showAllStructuresBtn" class="control-button secondary-button show-more-btn">Show All ${structures.length}</button>`; } structureSection.innerHTML = structuresHTML; content.appendChild(structureSection); } else { const structureSection = document.createElement('div'); structureSection.className = 'report-section report-structures'; structureSection.innerHTML = `<h4 class="report-section-title">Unique Message Structures (0)</h4><p class="no-findings-text">No distinct message structures analyzed.</p>`; content.appendChild(structureSection); }
-        const closeBtnInside = document.createElement('button'); closeBtnInside.textContent = 'Close Report'; closeBtnInside.className = 'control-button secondary-button'; closeBtnInside.style.marginTop = '20px'; closeBtnInside.style.display = 'block'; closeBtnInside.style.marginLeft = 'auto'; closeBtnInside.style.marginRight = 'auto'; closeBtnInside.onclick = () => { document.querySelector('.trace-panel-backdrop')?.remove(); panel.remove(); }; content.appendChild(closeBtnInside);
+        }
+
+        if (uniqueVulns.length > 0) {
+            findingsHTML += `<div class="subsection"><h5 class="report-subsection-title">DOM XSS Sinks Detected (${uniqueVulns.length})</h5><table class="report-table"><thead><tr><th>Sink</th><th>Severity</th><th>Context Snippet</th></tr></thead><tbody>`;
+            uniqueVulns.forEach(vuln => { const type = vuln?.type || '?'; const severity = vuln?.severity || 'N/A'; const contextHTML = vuln?.context || ''; findingsHTML += `<tr class="severity-row-${severity.toLowerCase()}"><td>${safeEscape(type)}</td><td><span class="severity-badge severity-${severity.toLowerCase()}">${safeEscape(severity)}</span></td><td class="context-snippet-cell">${contextHTML}</td></tr>`; });
+            findingsHTML += `</tbody></table></div>`;
+        }
+
+        if (uniqueIssues.length > 0) {
+            findingsHTML += `<div class="subsection"><h5 class="report-subsection-title">Other Security Issues (${uniqueIssues.length})</h5><table class="report-table"><thead><tr><th>Issue</th><th>Severity</th><th>Context Snippet</th></tr></thead><tbody>`;
+            uniqueIssues.forEach(issue => { const type = issue?.type || '?'; const severity = issue?.severity || 'N/A'; const contextHTML = issue?.context || ''; findingsHTML += `<tr class="severity-row-${severity.toLowerCase()}"><td>${safeEscape(type)}</td><td><span class="severity-badge severity-${severity.toLowerCase()}">${safeEscape(severity)}</span></td><td class="context-snippet-cell">${contextHTML}</td></tr>`; });
+            findingsHTML += `</tbody></table></div>`;
+        }
+
+        if (!originChecks.length && !uniqueVulns.length && !uniqueIssues.length) {
+            findingsHTML += '<p class="no-findings-text">No significant findings detected.</p>';
+        }
+        findingsSection.innerHTML = findingsHTML;
+        content.appendChild(findingsSection);
+
+        if (dataFlows?.length > 0) {
+            const flowSection = document.createElement('div');
+            flowSection.className = 'report-section report-dataflow';
+            flowSection.innerHTML = `
+                <h4 class="report-section-title">Data Flow</h4>
+                <table class="report-table dataflow-table">
+                    <thead>
+                        <tr>
+                            <th>Source Property</th>
+                            <th>Sink / Target</th>
+                            <th>Conditions</th>
+                            <th>Code Snippet</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        </tbody>
+                </table>`;
+
+            const tbody = flowSection.querySelector('tbody');
+
+            if (tbody) {
+                dataFlows.forEach(flow => {
+                    const prop = flow?.sourcePath || '?';
+                    const sink = flow?.destinationContext || '?';
+                    const context = flow?.fullCodeSnippet || flow?.taintedNodeSnippet || '';
+                    const displayProp = prop === '(root)' ? '(root data)' : `event.data.${safeEscape(prop)}`;
+                    const conditions = flow?.requiredConditionsForFlow || [];
+                    let conditionsHtml = 'None';
+
+                    if (conditions.length > 0) {
+                        conditionsHtml = conditions.map(c => {
+                            let valStr = safeEscape(String(c.value));
+                            if (typeof c.value === 'string') valStr = `'${valStr}'`;
+                            return `<code>${safeEscape(c.path)} ${safeEscape(c.op)} ${valStr}</code>`;
+                        }).join('<br>');
+                    }
+
+                    const rowHtml = `
+                        <tr>
+                            <td><code>${displayProp}</code></td>
+                            <td>${safeEscape(sink)}</td>
+                            <td>${conditionsHtml}</td>
+                            <td><code class="context-snippet">${safeEscape(context)}</code></td>
+                        </tr>`;
+                    tbody.insertAdjacentHTML('beforeend', rowHtml);
+                });
+            } else {
+                console.error("Could not find tbody to append data flow rows.");
+                flowSection.innerHTML += '<p class="error-message">Error rendering data flow table body.</p>';
+            }
+            content.appendChild(flowSection);
+        }
+
+
+        if (payloads?.length > 0) {
+            const payloadSection = document.createElement('div');
+            payloadSection.className = 'report-section report-payloads';
+            payloadSection.innerHTML = `<h4 class="report-section-title">Generated Payloads (${payloads.length})</h4><div id="payloads-list" class="payloads-list report-list">${payloads.slice(0, 10).map((p, i) => safeRenderPayload(p, i)).join('')}</div>${payloads.length > 10 ? `<button id="showAllPayloadsBtn" class="control-button secondary-button show-more-btn">Show All ${payloads.length}</button>` : ''}`;
+            content.appendChild(payloadSection);
+        }
+
+        if (structures?.length > 0) {
+            const structureSection = document.createElement('div');
+            structureSection.className = 'report-section report-structures';
+            let structuresHTML = `<h4 class="report-section-title">Unique Msg Structures (${structures.length})</h4><div class="structures-list report-list">`;
+            structures.slice(0, 3).forEach((s, i) => { structuresHTML += safeRenderStructure(s, i); });
+            structuresHTML += `</div>`;
+            if (structures.length > 3) { structuresHTML += `<button id="showAllStructuresBtn" class="control-button secondary-button show-more-btn">Show All ${structures.length}</button>`; }
+            structureSection.innerHTML = structuresHTML;
+            content.appendChild(structureSection);
+        }
+
+        const closeBtnInside = document.createElement('button');
+        closeBtnInside.textContent = 'Close Report';
+        closeBtnInside.className = 'control-button secondary-button';
+        closeBtnInside.style.cssText = 'margin-top:20px;display:block;margin-left:auto;margin-right:auto;';
+        closeBtnInside.onclick = () => { document.querySelector('.trace-panel-backdrop')?.remove(); panel.remove(); };
+        content.appendChild(closeBtnInside);
+
         attachReportEventListeners(panel, reportData);
-    } catch (renderError) { content.innerHTML = `<p class="error-message">Error rendering report details: ${renderError.message}</p>`; window.log.error("Display Report Error", renderError); }
+
+    } catch (renderError) {
+        content.innerHTML = `<p class="error-message">Error rendering report details: ${renderError.message}</p>`;
+        window.log.error("Display Report Error", renderError);
+    }
 }
 
 
