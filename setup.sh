@@ -122,10 +122,6 @@ cd "$SERVER_DIR"
 npm install express cors body-parser
 echo "✅ Dependencies installed."
 
-# ========== STEP 9: Save extension ID for reference ==========
-echo "$EXTENSION_ID" > "$FROGPOST_REPO/extension_id.txt"
-echo "💾 Extension ID saved to: $FROGPOST_REPO/extension_id.txt"
-
 # ========== COMPLETE ==========
 echo ""
 echo "🎉 All done!"
