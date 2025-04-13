@@ -3134,7 +3134,6 @@ function renderPayloadItem(payloadItem, index) {
 
     return `<div class="payload-item" data-payload-index="${index}">
                 <pre><code>${safeEscapeHTML(displayString)}</code></pre>
-                <button class="view-full-payload-btn control-button secondary-button" style="font-size:10px; padding: 2px 5px; margin-top: 5px;">View Full</button>
             </div>`;
 }
 
