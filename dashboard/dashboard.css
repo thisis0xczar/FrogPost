@@ -1,8 +1,5 @@
-/* dashboard.css - Fully Updated - Monday, April 7, 2025 - Final */
-
 /* General Styles */
 :root {
-    /* Theme: Softer Elegant Dark */
     --bg-primary: #262626;
     --bg-secondary: #313131;
     --card-bg: #313131;
@@ -20,7 +17,6 @@
     --scrollbar-track: #313131;
     --link-hover: var(--accent-primary-hover);
 
-    /* Fonts */
     --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
     --font-mono: 'SF Mono', 'Fira Code', 'Fira Mono', 'Roboto Mono', monospace;
 }
@@ -648,4 +644,24 @@ body {
     margin-bottom: 8px;        /* Space between label and circle */
     text-transform: uppercase; /* Optional: match metric style */
     letter-spacing: 0.5px;     /* Optional: match metric style */
+}
+
+.highlight-finding {
+    background-color: rgba(255, 0, 0, 0.3); /* Light red background */
+    color: #ffdddd; /* Lighter red text for dark background */
+    font-weight: bold;
+    padding: 1px 2px;
+    border-radius: 2px;
+    border: 1px solid rgba(255, 100, 100, 0.5);
+}
+
+.report-table td.context-snippet-cell {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    white-space: pre-wrap; /* Allow wrapping */
+    word-break: break-all; /* Break long words */
+    vertical-align: middle;
+    /* Apply background if needed, formerly on code */
+    /* background-color: var(--code-bg); */
+    /* padding: 2px 4px; */ /* Adjust padding if needed */
 }
