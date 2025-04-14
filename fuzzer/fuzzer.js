@@ -418,6 +418,7 @@
 
             console.log("openPocWindow: Writing HTML content to window");
             pocWindow.document.open();
+            const chunkSize = 65536;
 
             for (let i = 0; i < htmlContent.length; i += chunkSize) {
                 const chunk = htmlContent.substring(i, i + chunkSize);
