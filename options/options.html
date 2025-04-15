@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>FrogPost Options</title>
+  <link rel="stylesheet" href="options.css">
+</head>
+<body>
+<h1>FrogPost Options</h1>
+
+<div id="statusMessage" class="status"></div>
+
+<section>
+  <h2>Custom Sinks</h2>
+  <p>Define custom sink patterns (Regex) FrogPost should look for.</p>
+  <form id="addSinkForm">
+    <div class="form-grid">
+      <label for="sinkName">Name:</label>
+      <input type="text" id="sinkName" placeholder="e.g., AppSpecificEval" required>
+
+      <label for="sinkPattern">Regex Pattern:</label>
+      <input type="text" id="sinkPattern" placeholder="e\.dangerousFunc\(" required>
+
+      <label for="sinkSeverity">Severity:</label>
+      <select id="sinkSeverity" required>
+        <option value="Critical">Critical</option>
+        <option value="High" selected>High</option>
+        <option value="Medium">Medium</option>
+        <option value="Low">Low</option>
+      </select>
+
+      <label for="sinkCategory">Category:</label>
+      <input type="text" id="sinkCategory" placeholder="e.g., custom-eval (optional)">
+    </div>
+    <button type="submit">Add Custom Sink</button>
+  </form>
+
+  <h3>Saved Custom Sinks</h3>
+  <table id="customSinksTable">
+    <thead>
+    <tr>
+      <th>Name</th>
+      <th>Pattern (Regex)</th>
+      <th>Severity</th>
+      <th>Category</th>
+      <th>Action</th>
+    </tr>
+    </thead>
+    <tbody id="customSinksTableBody">
+    </tbody>
+  </table>
+</section>
+
+<hr>
+
+<section>
+  <h2>Custom Security Checks</h2>
+  <p>Define custom code patterns (Regex) FrogPost should flag as security issues.</p>
+  <form id="addCheckForm">
+    <div class="form-grid">
+      <label for="checkName">Name:</label>
+      <input type="text" id="checkName" placeholder="e.g., Insecure Data Logging" required>
+
+      <label for="checkPattern">Regex Pattern:</label>
+      <input type="text" id="checkPattern" placeholder="logger\.log\(sensitiveData" required>
+
+      <label for="checkSeverity">Severity:</label>
+      <select id="checkSeverity" required>
+        <option value="High">High</option>
+        <option value="Medium" selected>Medium</option>
+        <option value="Low">Low</option>
+      </select>
+    </div>
+    <button type="submit">Add Custom Check</button>
+  </form>
+
+  <h3>Saved Custom Checks</h3>
+  <table id="customChecksTable">
+    <thead>
+    <tr>
+      <th>Name</th>
+      <th>Pattern (Regex)</th>
+      <th>Severity</th>
+      <th>Action</th>
+    </tr>
+    </thead>
+    <tbody id="customChecksTableBody">
+    </tbody>
+  </table>
+</section>
+
+<script src="options.js"></script>
+</body>
+</html>

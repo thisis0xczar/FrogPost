@@ -1,0 +1,147 @@
+body {
+    font-family: sans-serif;
+    margin: 20px;
+    background-color: #f4f4f4;
+    color: #333;
+    padding: 15px;
+}
+
+h1, h2, h3 {
+    color: #1a1a1a;
+    border-bottom: 1px solid #ccc;
+    padding-bottom: 5px;
+}
+
+h1 {
+    text-align: center;
+    border-bottom-width: 2px;
+    margin-bottom: 30px;
+}
+
+h2 {
+    margin-top: 30px;
+}
+
+p {
+    color: #555;
+    font-size: 0.9em;
+    margin-bottom: 15px;
+}
+
+section {
+    background-color: #fff;
+    padding: 20px;
+    margin-bottom: 20px;
+    border-radius: 5px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+}
+
+hr {
+    border: none;
+    border-top: 1px solid #ddd;
+    margin: 30px 0;
+}
+
+form {
+    margin-bottom: 25px;
+}
+
+.form-grid {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 10px 15px;
+    align-items: center;
+    margin-bottom: 15px;
+    max-width: 600px;
+}
+
+label {
+    font-weight: bold;
+    text-align: right;
+}
+
+input[type="text"],
+select {
+    padding: 8px;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    font-size: 0.95em;
+    width: 100%;
+    box-sizing: border-box;
+}
+
+button {
+    padding: 8px 15px;
+    background-color: #4CAF50; /* Green */
+    color: white;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 1em;
+    transition: background-color 0.2s ease;
+}
+
+button:hover {
+    background-color: #45a049;
+}
+
+button.delete-btn {
+    background-color: #f44336; /* Red */
+    font-size: 0.85em;
+    padding: 4px 8px;
+}
+
+button.delete-btn:hover {
+    background-color: #da190b;
+}
+
+table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 15px;
+}
+
+th, td {
+    border: 1px solid #ddd;
+    padding: 10px;
+    text-align: left;
+    font-size: 0.9em;
+    word-break: break-all;
+}
+
+th {
+    background-color: #e9e9e9;
+    font-weight: bold;
+}
+
+tr:nth-child(even) {
+    background-color: #f9f9f9;
+}
+
+td:last-child {
+    text-align: center;
+    width: 80px; /* Adjust as needed */
+}
+
+.status {
+    padding: 10px;
+    margin-bottom: 15px;
+    border-radius: 4px;
+    font-weight: bold;
+    text-align: center;
+    display: none; /* Hidden by default */
+}
+
+.status.success {
+    background-color: #d4edda;
+    color: #155724;
+    border: 1px solid #c3e6cb;
+    display: block;
+}
+
+.status.error {
+    background-color: #f8d7da;
+    color: #721c24;
+    border: 1px solid #f5c6cb;
+    display: block;
+}

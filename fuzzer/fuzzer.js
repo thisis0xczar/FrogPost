@@ -1,7 +1,7 @@
 /**
  * FrogPost Extension
  * Originally Created by thisis0xczar/Lidor JFrog AppSec Team
- * Refined on: 2025-04-12
+ * Refined on: 2025-04-15
  */
 (function(global) {
     const JWT_REGEX = /eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g;
@@ -79,8 +79,20 @@
             else { if (typeof onCompleteCallback === 'function') onCompleteCallback(); if(typeof updateStatus === 'function') updateStatus('Error: No payloads.', true); }
         }
         stop() {
-            if (this.payloadIntervalId) { clearInterval(this.payloadIntervalId); this.payloadIntervalId = null; }
-            if (this.isExecutingPayloads) { this.isExecutingPayloads = false; if (typeof this._onCompleteCallback === 'function') this._onCompleteCallback(true); }
+            if (this.payloadIntervalId) {
+                clearInterval(this.payloadIntervalId);
+                this.payloadIntervalId = null;
+            }
+            const wasRunning = this.isExecutingPayloads;
+            this.isExecutingPayloads = false;
+            // Always call callback if defined, even if stopped manually or finished naturally
+            if (typeof this._onCompleteCallback === 'function') {
+                try {
+                    this._onCompleteCallback(wasRunning); // Pass true if manually stopped, false if finished? Or just call it. Let's just call it.
+                } catch(e) {
+                    console.error("Error in fuzzer completion callback:", e);
+                }
+            }
         }
         generatePayloads() {
             let basePayloads = []; let ranFallback = false;

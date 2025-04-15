@@ -12,6 +12,7 @@
     <script src="../static/handler-extractor.js"></script>
     <script src="../static/trace-report-storage.js"></script>
     <script src="../static/static-handler-analyzer.js"></script>
+
     <script type="module" src="../fuzzer/fuzzer.js"></script>
     <script type="module" src="../static/tracer.js"></script>
     <script type="module" src="./dashboard.js"></script>
@@ -26,8 +27,9 @@
         <div class="header-controls">
             <input type="file" id="customPayloadsFile" accept=".txt" style="display: none;">
             <span id="customPayloadStatus" style="font-size: 12px; margin-left: 10px;"></span>
-            <button id="uploadCustomPayloadsBtn" class="control-button secondary-button">Upload Payloads</button>
+            <button id="uploadCustomPayloadsBtn" class="control-button secondary">Upload Payloads</button>
             <button id="clearCustomPayloadsBtn" class="control-button secondary-button" style="display: none;">Clear Payloads</button>
+            <button id="openOptionsBtn" class="control-button secondary">Custom Rules / Settings</button>
             <button id="checkAll" class="control-button" aria-label="Check All Endpoints">Check All</button>
             <button id="clearMessages" class="control-button" aria-label="Clear Messages">Clear All</button>
             <button id="exportMessages" class="control-button" aria-label="Export Messages">Export</button>
@@ -82,5 +84,6 @@
     <div id="handlerDisplayModalContainer"></div>
 
 </div>
+
 </body>
 </html>

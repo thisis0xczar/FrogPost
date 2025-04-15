@@ -1,10 +1,8 @@
 /**
  * FrogPost Extension
  * Originally Created by thisis0xczar/Lidor JFrog AppSec Team
- * Refined on: 2025-04-14
- * Enhanced with Context-Aware Payload Generation & Debugging
+ * Refined on: 2025-04-15
  */
-
 if (typeof window.analyzeHandlerStatically === 'undefined') {
     console.error("Static Handler Analyzer not loaded. Payload generation will be limited.");
     window.analyzeHandlerStatically = () => ({ success: false, error: 'Analyzer not loaded.', analysis: null });
@@ -83,35 +81,282 @@ class HandlerTracer {
         this.MAX_PAYLOADS_TOTAL = 5000;
         this.MAX_PAYLOADS_PER_SINK_PATH = 30;
         this.MAX_PAYLOADS_PER_DUMB_FIELD = 15;
+        this.MAX_PAYLOADS_PER_TYPE_FIELD = 5;
         this.MAX_DUMB_FIELDS_TO_TARGET = 30;
+        this.MAX_TYPE_FIELDS_TO_TARGET = 50;
+        this.loadedCustomSinks = [];
+        this.loadedCustomChecks = [];
     }
 
     isPlainObject(obj) {
-        if (typeof obj !== 'object' || obj === null) return false; let proto = Object.getPrototypeOf(obj); if (proto === null) return true; let baseProto = proto; while (Object.getPrototypeOf(baseProto) !== null) baseProto = Object.getPrototypeOf(baseProto); return proto === baseProto;
+        if (typeof obj !== 'object' || obj === null) return false;
+        let proto = Object.getPrototypeOf(obj);
+        if (proto === null) return true;
+        let baseProto = proto;
+        while (Object.getPrototypeOf(baseProto) !== null) {
+            baseProto = Object.getPrototypeOf(baseProto);
+        }
+        return proto === baseProto;
     }
+
     analyzeJsonStructures(messages) {
-        const structureMap = new Map(); if (!messages || messages.length === 0) return [];
-        for (const message of messages) { if (!message) continue; try { let data = message.data; let dataType = typeof data; if (dataType === 'string') { if ((data.startsWith('{') && data.endsWith('}')) || (data.startsWith('[') && data.endsWith(']'))) { try { data = JSON.parse(data); dataType = typeof data; } catch {} } } if (this.isPlainObject(data)) { const structure = this.getJsonStructure(data); const hash = this.hashJsonStructure(structure); if (!structureMap.has(hash)) { const paths = this.identifyPathsToFuzz(structure); structureMap.set(hash, { structure: structure, examples: [message], pathsToFuzz: paths }); } else { const entry = structureMap.get(hash); if (entry.examples.length < 3) entry.examples.push(message); } } } catch {} } return Array.from(structureMap.values());
+        const structureMap = new Map();
+        if (!messages || messages.length === 0) return [];
+        for (const message of messages) {
+            if (!message) continue;
+            try {
+                let data = message.data;
+                let dataType = typeof data;
+                if (dataType === 'string') {
+                    if ((data.startsWith('{') && data.endsWith('}')) || (data.startsWith('[') && data.endsWith(']'))) {
+                        try {
+                            data = JSON.parse(data);
+                            dataType = typeof data;
+                        } catch {}
+                    }
+                }
+                if (this.isPlainObject(data)) {
+                    const structure = this.getJsonStructure(data);
+                    const hash = this.hashJsonStructure(structure);
+                    if (!structureMap.has(hash)) {
+                        const paths = this.identifyPathsToFuzz(structure);
+                        structureMap.set(hash, { structure: structure, examples: [message], pathsToFuzz: paths });
+                    } else {
+                        const entry = structureMap.get(hash);
+                        if (entry.examples.length < 3) {
+                            entry.examples.push(message);
+                        }
+                    }
+                }
+            } catch {}
+        }
+        return Array.from(structureMap.values());
     }
+
     getJsonStructure(obj, path = '') {
-        if (obj === null || obj === undefined) return { type: 'null', path }; const type = typeof obj; if (type !== 'object') return { type: type, path }; if (Array.isArray(obj)) { const itemStructure = obj.length > 0 ? this.getJsonStructure(obj[0], `${path}[0]`) : { type: 'empty', path: `${path}[0]` }; return { type: 'array', path, items: itemStructure }; } const structure = { type: 'object', path, properties: {} }; const keys = Object.keys(obj).sort(); for (const key of keys) { const newPath = path ? `${path}.${key}` : key; structure.properties[key] = this.getJsonStructure(obj[key], newPath); } return structure;
+        if (obj === null || obj === undefined) return { type: 'null', path };
+        const type = typeof obj;
+        if (type !== 'object') return { type: type, path };
+        if (Array.isArray(obj)) {
+            const itemStructure = obj.length > 0 ? this.getJsonStructure(obj[0], `${path}[0]`) : { type: 'empty', path: `${path}[0]` };
+            return { type: 'array', path, items: itemStructure };
+        }
+        const structure = { type: 'object', path, properties: {} };
+        const keys = Object.keys(obj).sort();
+        for (const key of keys) {
+            const newPath = path ? `${path}.${key}` : key;
+            structure.properties[key] = this.getJsonStructure(obj[key], newPath);
+        }
+        return structure;
     }
+
     hashJsonStructure(structure) {
-        if (!structure || !structure.type) return 'invalid'; if (structure.type === 'array') return `array[${this.hashJsonStructure(structure.items)}]`; if (structure.type !== 'object') return structure.type; const keys = Object.keys(structure.properties || {}).sort(); return keys.map(k => `${k}:${this.hashJsonStructure(structure.properties[k])}`).join(',');
+        if (!structure || !structure.type) return 'invalid';
+        if (structure.type === 'array') return `array[${this.hashJsonStructure(structure.items)}]`;
+        if (structure.type !== 'object') return structure.type;
+        const keys = Object.keys(structure.properties || {}).sort();
+        return keys.map(k => `${k}:${this.hashJsonStructure(structure.properties[k])}`).join(',');
     }
+
     identifyPathsToFuzz(structure, currentPath = '', paths = []) {
-        if (!structure) return paths; const nodePath = structure.path || currentPath; if (structure.type !== 'object' && structure.type !== 'array') { if (nodePath) paths.push({ path: nodePath, type: structure.type }); return paths; } if (structure.type === 'array' && structure.items) this.identifyPathsToFuzz(structure.items, '', paths); else if (structure.type === 'object' && structure.properties) for (const key of Object.keys(structure.properties)) this.identifyPathsToFuzz(structure.properties[key], '', paths); const uniquePaths = []; const seenPaths = new Set(); for (const p of paths) if (p.path && !seenPaths.has(p.path)) { seenPaths.add(p.path); uniquePaths.push(p); } return uniquePaths;
+        if (!structure) return paths;
+        const nodePath = structure.path || currentPath;
+        if (structure.type !== 'object' && structure.type !== 'array') {
+            if (nodePath) paths.push({ path: nodePath, type: structure.type });
+            return paths;
+        }
+        if (structure.type === 'array' && structure.items) {
+            this.identifyPathsToFuzz(structure.items, '', paths);
+        } else if (structure.type === 'object' && structure.properties) {
+            for (const key of Object.keys(structure.properties)) {
+                this.identifyPathsToFuzz(structure.properties[key], '', paths);
+            }
+        }
+        const uniquePaths = [];
+        const seenPaths = new Set();
+        for (const p of paths) {
+            if (p.path && !seenPaths.has(p.path)) {
+                seenPaths.add(p.path);
+                uniquePaths.push(p);
+            }
+        }
+        return uniquePaths;
     }
-    analyzeHandlerForVulnerabilities(handlerCode, staticAnalysisData = null) {
-        const vulnerabilities = { sinks: [], securityIssues: [], dataFlows: [] }; const foundSinks = new Map(); if (!handlerCode) { return vulnerabilities; } const escapeHTML = (str) => String(str || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-        this.domXssSinks.forEach(sink => { if (sink.methods.includes('regex')) { let match; const regex = new RegExp(sink.pattern.source, 'g' + (sink.pattern.flags || '')); while ((match = regex.exec(handlerCode)) !== null) { const exactMatchSnippet = match[0]; const key = `${sink.name || sink.type}#${exactMatchSnippet}`; if (!foundSinks.has(key)) { const rawContext = this.extractContext(handlerCode, match.index, exactMatchSnippet.length); let highlightedContextHTML = escapeHTML(rawContext); let highlightStartIndex = -1; let highlightEndIndex = -1; const matchIndexInRawContext = rawContext.indexOf(exactMatchSnippet); if (matchIndexInRawContext !== -1) { highlightStartIndex = matchIndexInRawContext; highlightEndIndex = highlightStartIndex + exactMatchSnippet.length; const partBefore = rawContext.substring(0, highlightStartIndex); const partMatch = rawContext.substring(highlightStartIndex, highlightEndIndex); const partAfter = rawContext.substring(highlightEndIndex); highlightedContextHTML = partBefore + '<span class="highlight-finding">' + escapeHTML(partMatch) + '</span>' + partAfter; } foundSinks.set(key, { type: sink.name || sink.type, severity: sink.severity, context: highlightedContextHTML, highlightStart: highlightStartIndex, highlightEnd: highlightEndIndex, method: 'regex', path: '', category: sink.category || 'generic' }); } } } });
-        if (staticAnalysisData?.dataFlows) { vulnerabilities.dataFlows = staticAnalysisData.dataFlows; (staticAnalysisData.dataFlows || []).forEach(flow => { this.domXssSinks.filter(p => p.methods.includes('ast')).forEach(sinkPattern => { let isMatch = false; if (sinkPattern.nodeType && sinkPattern.nodeType !== flow.nodeType) return; if (sinkPattern.argIndex !== undefined && sinkPattern.argIndex !== flow.argIndex) return; let contextToMatch = flow.destinationContext || ""; if(sinkPattern.pattern instanceof RegExp){ const testRegex = new RegExp(sinkPattern.pattern.source, sinkPattern.pattern.flags.replace('g', '')); isMatch = testRegex.test(contextToMatch); } else if(typeof sinkPattern.pattern === 'string'){ isMatch = contextToMatch.includes(sinkPattern.pattern); } if (isMatch) { const context = flow.fullCodeSnippet || flow.taintedNodeSnippet || ''; const key = `${sinkPattern.name || sinkPattern.type}#${context}`; if (!foundSinks.has(key)) { foundSinks.set(key, { type: sinkPattern.name || sinkPattern.type, severity: sinkPattern.severity, path: flow.sourcePath || '(root)', conditions: flow.requiredConditionsForFlow || [], context: escapeHTML(context), highlightStart: -1, highlightEnd: -1, method: 'ast', category: sinkPattern.category || 'generic' }); } } }); }); } vulnerabilities.sinks = Array.from(foundSinks.values());
-        const originChecks = staticAnalysisData?.originValidationChecks || []; const hasListener = staticAnalysisData?.hasListener || /addEventListener\s*\(\s*['"]message['"]/i.test(handlerCode) || /onmessage\s*=/i.test(handlerCode); let originCheckCoveredByStatic = false;
-        if (hasListener && originChecks.length > 0) { originChecks.forEach(check => { const severity = check.strength === 'Missing' || check.strength === 'Weak' ? 'Medium' : (check.strength === 'Medium' ? 'Medium' : 'Low'); const issueType = check.strength === 'Missing' ? 'Missing origin check' : `${check.strength} Origin Check`; const existing = vulnerabilities.securityIssues.find(iss => iss.type === issueType && iss.details === check.type); if (!existing) { vulnerabilities.securityIssues.push({ type: issueType, severity: severity, context: check.snippet || `Detected origin check type: ${check.type || 'Unknown'}`, details: check.type || 'N/A', strength: check.strength, highlightStart: -1, highlightEnd: -1 }); } }); originCheckCoveredByStatic = true; }
-        for (const check of this.securityChecks) { if (check.name.toLowerCase().includes('origin') && originCheckCoveredByStatic) { continue; } if (check.checkFunc && staticAnalysisData) { if (check.checkFunc(handlerCode, staticAnalysisData)) { if (!vulnerabilities.securityIssues.some(iss => iss.type === check.name)) { vulnerabilities.securityIssues.push({ type: check.name, severity: check.severity, context: `${check.name} condition met (via static analysis).`, highlightStart: -1, highlightEnd: -1 }); } } } else if (check.pattern) { let match; try { const flags = [...new Set(['g', 'm', 's', ...(check.pattern.flags?.split('') || [])])].join(''); const regex = new RegExp(check.pattern.source, flags); while ((match = regex.exec(handlerCode)) !== null) { const exactMatchSnippet = match[0]; const rawContext = this.extractContext(handlerCode, match.index, exactMatchSnippet.length); let highlightedContextHTML = escapeHTML(rawContext); let highlightStartIndex = -1; let highlightEndIndex = -1; const matchIndexInRawContext = rawContext.indexOf(exactMatchSnippet); if (matchIndexInRawContext !== -1) { highlightStartIndex = matchIndexInRawContext; highlightEndIndex = highlightStartIndex + exactMatchSnippet.length; const partBefore = rawContext.substring(0, highlightStartIndex); const partMatch = rawContext.substring(highlightStartIndex, highlightEndIndex); const partAfter = rawContext.substring(highlightEndIndex); highlightedContextHTML = partBefore + '<span class="highlight-finding">' + escapeHTML(partMatch) + '</span>' + partAfter; } if (!vulnerabilities.securityIssues.some(iss => iss.type === check.name && iss.context.includes(escapeHTML(exactMatchSnippet)))) { vulnerabilities.securityIssues.push({ type: check.name, severity: check.severity, context: highlightedContextHTML, highlightStart: highlightStartIndex, highlightEnd: highlightEndIndex }); } if (!regex.global) break; } } catch {} } }
-        if (originCheckCoveredByStatic) { vulnerabilities.securityIssues = vulnerabilities.securityIssues.filter(issue => { const isStaticOriginIssue = issue.strength && issue.type.toLowerCase().includes('origin check'); const isOldRegexOriginIssue = !issue.strength && issue.type.toLowerCase().includes('origin check'); return isStaticOriginIssue || !isOldRegexOriginIssue; }); }
+
+    async _loadCustomDefinitions() {
+        try {
+            const data = await chrome.storage.sync.get(['customSinks', 'customChecks']);
+            this.loadedCustomSinks = data.customSinks || [];
+            this.loadedCustomChecks = data.customChecks || [];
+            window.log.debug(`[Tracer] Loaded ${this.loadedCustomSinks.length} custom sinks, ${this.loadedCustomChecks.length} custom checks.`);
+        } catch (e) {
+            window.log.error("Failed to load custom definitions from storage", e);
+            this.loadedCustomSinks = [];
+            this.loadedCustomChecks = [];
+        }
+    }
+
+    async analyzeHandlerForVulnerabilities(handlerCode, staticAnalysisData = null) {
+        await this._loadCustomDefinitions();
+
+        const vulnerabilities = { sinks: [], securityIssues: [], dataFlows: [] };
+        const foundSinks = new Map();
+        if (!handlerCode) {
+            return vulnerabilities;
+        }
+        const escapeHTML = (str) => String(str || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        const allSinks = [...this.domXssSinks, ...this.loadedCustomSinks];
+
+        allSinks.forEach(sink => {
+            if (!sink.methods || sink.methods.includes('regex')) {
+                let regex;
+                try {
+                    regex = new RegExp(sink.pattern, 'g');
+                } catch (e) {
+                    if (!window[`_invalid_pattern_${sink.pattern}`]) {
+                        window.log.warn(`Skipping invalid custom sink pattern: ${sink.pattern}`, e);
+                        window[`_invalid_pattern_${sink.pattern}`] = true;
+                    }
+                    return;
+                }
+                let match;
+                while ((match = regex.exec(handlerCode)) !== null) {
+                    const exactMatchSnippet = match[0];
+                    const sinkType = sink.name || sink.type || 'custom-sink';
+                    const key = `${sinkType}#${exactMatchSnippet}`;
+                    if (!foundSinks.has(key)) {
+                        const rawContext = this.extractContext(handlerCode, match.index, exactMatchSnippet.length);
+                        let highlightedContextHTML = escapeHTML(rawContext);
+                        let highlightStartIndex = -1;
+                        let highlightEndIndex = -1;
+                        const matchIndexInRawContext = rawContext.indexOf(exactMatchSnippet);
+                        if (matchIndexInRawContext !== -1) {
+                            highlightStartIndex = matchIndexInRawContext;
+                            highlightEndIndex = highlightStartIndex + exactMatchSnippet.length;
+                            const partBefore = rawContext.substring(0, highlightStartIndex);
+                            const partMatch = rawContext.substring(highlightStartIndex, highlightEndIndex);
+                            const partAfter = rawContext.substring(highlightEndIndex);
+                            highlightedContextHTML = partBefore + '<span class="highlight-finding">' + escapeHTML(partMatch) + '</span>' + partAfter;
+                        }
+                        foundSinks.set(key, {
+                            type: sinkType, severity: sink.severity || 'Medium', context: highlightedContextHTML,
+                            highlightStart: highlightStartIndex, highlightEnd: highlightEndIndex, method: 'regex', path: '', category: sink.category || 'custom'
+                        });
+                    }
+                }
+            }
+        });
+
+        if (staticAnalysisData?.dataFlows) {
+            vulnerabilities.dataFlows = staticAnalysisData.dataFlows;
+            (staticAnalysisData.dataFlows || []).forEach(flow => {
+                this.domXssSinks.filter(p => p.methods.includes('ast')).forEach(sinkPattern => {
+                    let isMatch = false;
+                    if (sinkPattern.nodeType && sinkPattern.nodeType !== flow.nodeType) return;
+                    if (sinkPattern.argIndex !== undefined && sinkPattern.argIndex !== flow.argIndex) return;
+                    let contextToMatch = flow.destinationContext || "";
+                    if(sinkPattern.pattern instanceof RegExp){
+                        const testRegex = new RegExp(sinkPattern.pattern.source, sinkPattern.pattern.flags.replace('g', ''));
+                        isMatch = testRegex.test(contextToMatch);
+                    } else if(typeof sinkPattern.pattern === 'string'){
+                        isMatch = contextToMatch.includes(sinkPattern.pattern);
+                    }
+                    if (isMatch) {
+                        const context = flow.fullCodeSnippet || flow.taintedNodeSnippet || '';
+                        const sinkType = sinkPattern.name || sinkPattern.type;
+                        const key = `${sinkType}#${context}`;
+                        if (!foundSinks.has(key)) {
+                            foundSinks.set(key, {
+                                type: sinkType, severity: sinkPattern.severity, path: flow.sourcePath || '(root)',
+                                conditions: flow.requiredConditionsForFlow || [], context: escapeHTML(context),
+                                highlightStart: -1, highlightEnd: -1, method: 'ast',
+                                category: sinkPattern.category || 'generic'
+                            });
+                        }
+                    }
+                });
+            });
+        }
+        vulnerabilities.sinks = Array.from(foundSinks.values());
+
+        const originChecks = staticAnalysisData?.originValidationChecks || [];
+        const hasListener = staticAnalysisData?.hasListener || /addEventListener\s*\(\s*['"]message['"]/i.test(handlerCode) || /onmessage\s*=/i.test(handlerCode);
+        let originCheckCoveredByStatic = false;
+
+        if (hasListener && originChecks.length > 0) {
+            originChecks.forEach(check => {
+                const severity = check.strength === 'Missing' || check.strength === 'Weak' ? 'Medium' : (check.strength === 'Medium' ? 'Medium' : 'Low');
+                const issueType = check.strength === 'Missing' ? 'Missing origin check' : `${check.strength} Origin Check`;
+                const existing = vulnerabilities.securityIssues.find(iss => iss.type === issueType && iss.details === check.type);
+                if (!existing) {
+                    vulnerabilities.securityIssues.push({ type: issueType, severity: severity, context: check.snippet || `Detected origin check type: ${check.type || 'Unknown'}`, details: check.type || 'N/A', strength: check.strength, highlightStart: -1, highlightEnd: -1 });
+                }
+            });
+            originCheckCoveredByStatic = true;
+        }
+
+        const patternBasedChecks = this.securityChecks.filter(c => c.pattern);
+        const allPatternChecks = [...patternBasedChecks, ...this.loadedCustomChecks];
+
+        for (const check of allPatternChecks) {
+            if (check.name.toLowerCase().includes('origin') && originCheckCoveredByStatic) {
+                continue;
+            }
+            if (check.pattern) {
+                let regex;
+                try {
+                    const flags = [...new Set(['g', 'm', 's', ...(check.pattern.flags?.split('') || [])])].join('');
+                    regex = new RegExp(check.pattern, flags);
+                } catch (e) {
+                    if (!window[`_invalid_pattern_${check.pattern}`]) {
+                        window.log.warn(`Skipping invalid custom check pattern: ${check.pattern}`, e);
+                        window[`_invalid_pattern_${check.pattern}`] = true;
+                    }
+                    continue;
+                }
+                let match;
+                while ((match = regex.exec(handlerCode)) !== null) {
+                    const exactMatchSnippet = match[0];
+                    const rawContext = this.extractContext(handlerCode, match.index, exactMatchSnippet.length);
+                    let highlightedContextHTML = escapeHTML(rawContext);
+                    let highlightStartIndex = -1;
+                    let highlightEndIndex = -1;
+                    const matchIndexInRawContext = rawContext.indexOf(exactMatchSnippet);
+                    if (matchIndexInRawContext !== -1) {
+                        highlightStartIndex = matchIndexInRawContext;
+                        highlightEndIndex = highlightStartIndex + exactMatchSnippet.length;
+                        const partBefore = rawContext.substring(0, highlightStartIndex);
+                        const partMatch = rawContext.substring(highlightStartIndex, highlightEndIndex);
+                        const partAfter = rawContext.substring(highlightEndIndex);
+                        highlightedContextHTML = partBefore + '<span class="highlight-finding">' + escapeHTML(partMatch) + '</span>' + partAfter;
+                    }
+                    if (!vulnerabilities.securityIssues.some(iss => iss.type === check.name && iss.context.includes(escapeHTML(exactMatchSnippet)))) {
+                        vulnerabilities.securityIssues.push({ type: check.name, severity: check.severity, context: highlightedContextHTML, highlightStart: highlightStartIndex, highlightEnd: highlightEndIndex });
+                    }
+                    if (!regex.global) break;
+                }
+            }
+        }
+        this.securityChecks.forEach(check => {
+            if (check.checkFunc && staticAnalysisData) {
+                if (check.checkFunc(handlerCode, staticAnalysisData)) {
+                    if (!vulnerabilities.securityIssues.some(iss => iss.type === check.name)) {
+                        vulnerabilities.securityIssues.push({ type: check.name, severity: check.severity, context: `${check.name} condition met (via static analysis).`, highlightStart: -1, highlightEnd: -1 });
+                    }
+                }
+            }
+        });
+
+        if (originCheckCoveredByStatic) {
+            vulnerabilities.securityIssues = vulnerabilities.securityIssues.filter(issue => {
+                const isStaticOriginIssue = issue.strength && issue.type.toLowerCase().includes('origin check');
+                const isOldRegexOriginIssue = !issue.strength && issue.type.toLowerCase().includes('origin check');
+                return isStaticOriginIssue || !isOldRegexOriginIssue;
+            });
+        }
         return vulnerabilities;
     }
+
     extractContext(codeToSearchIn, index, length) {
         const before = Math.max(0, index - 50); const after = Math.min(codeToSearchIn.length, index + length + 50); let context = codeToSearchIn.substring(before, after); context = context.replace(/\n|\r/g, "↵").trim(); return context;
     }
@@ -195,31 +440,37 @@ class HandlerTracer {
         } catch (e) {
             console.error("[PayloadGen] Error fetching session storage for payloads/callback:", e);
         }
-        const baseFuzzingPayloads = window.FuzzingPayloads || { XSS: [], SINK_SPECIFIC: {} };
+
+        const baseFuzzingPayloads = window.FuzzingPayloads || { XSS: [], SINK_SPECIFIC: {}, TYPE_FUZZ: [], PROTOTYPE_POLLUTION: [], ENCODING: [] };
         const activeXssPayloads = customPayloadsActive ? customXssPayloads : (baseFuzzingPayloads.XSS || []);
+        const encodingPayloads = baseFuzzingPayloads.ENCODING || [];
+        const typeFuzzPayloads = baseFuzzingPayloads.TYPE_FUZZ || [null, true, false, 0, -1, 1.23, 9999999999999999, [], {}];
+        const combinedXss = [...new Set([...activeXssPayloads, ...encodingPayloads])].map(p => String(p));
+
         const sinkCategoryToPayloadMap = {
-            'eval': baseFuzzingPayloads.SINK_SPECIFIC?.eval || activeXssPayloads,
-            'setTimeout': baseFuzzingPayloads.SINK_SPECIFIC?.setTimeout || activeXssPayloads,
-            'setInterval': baseFuzzingPayloads.SINK_SPECIFIC?.setInterval || activeXssPayloads,
-            'innerHTML': baseFuzzingPayloads.SINK_SPECIFIC?.innerHTML || activeXssPayloads,
-            'script_manipulation': activeXssPayloads,
-            'src_manipulation': [...activeXssPayloads, ...processedCallbackPayloads],
-            'location_href': baseFuzzingPayloads.SINK_SPECIFIC?.location_href || [...activeXssPayloads, ...processedCallbackPayloads],
-            'event_handler': activeXssPayloads,
-            'dom_manipulation': activeXssPayloads,
-            'generic': [...activeXssPayloads, ...processedCallbackPayloads],
-            'default': [...activeXssPayloads, ...processedCallbackPayloads]
+            'eval': baseFuzzingPayloads.SINK_SPECIFIC?.eval || combinedXss,
+            'setTimeout': baseFuzzingPayloads.SINK_SPECIFIC?.setTimeout || combinedXss,
+            'setInterval': baseFuzzingPayloads.SINK_SPECIFIC?.setInterval || combinedXss,
+            'innerHTML': baseFuzzingPayloads.SINK_SPECIFIC?.innerHTML || combinedXss,
+            'script_manipulation': combinedXss,
+            'src_manipulation': [...combinedXss, ...processedCallbackPayloads],
+            'location_href': baseFuzzingPayloads.SINK_SPECIFIC?.location_href || [...combinedXss, ...processedCallbackPayloads],
+            'event_handler': combinedXss,
+            'dom_manipulation': combinedXss,
+            'generic': [...combinedXss, ...processedCallbackPayloads],
+            'default': [...combinedXss, ...processedCallbackPayloads]
         };
         for (const key in sinkCategoryToPayloadMap) {
-            if (Array.isArray(sinkCategoryToPayloadMap[key])) {
-                sinkCategoryToPayloadMap[key] = sinkCategoryToPayloadMap[key].map(p => String(p));
+            if (!Array.isArray(sinkCategoryToPayloadMap[key])) {
+                sinkCategoryToPayloadMap[key] = [...combinedXss, ...processedCallbackPayloads].map(p => String(p));
             } else {
-                sinkCategoryToPayloadMap[key] = [...activeXssPayloads, ...processedCallbackPayloads].map(p => String(p));
+                sinkCategoryToPayloadMap[key] = sinkCategoryToPayloadMap[key].map(p => String(p));
             }
         }
-        window.log.debug(`[PayloadGen] Loaded payload lists. Custom Active: ${customPayloadsActive}. XSS Count: ${activeXssPayloads.length}. Callback Count: ${processedCallbackPayloads.length}`);
-        return { sinkCategoryToPayloadMap, customPayloadsActive, allCallbackPayloads: processedCallbackPayloads };
+        window.log.debug(`[PayloadGen] Loaded payload lists. Custom Active: ${customPayloadsActive}. XSS/Encoding Count: ${combinedXss.length}. Callback Count: ${processedCallbackPayloads.length}. Type Count: ${typeFuzzPayloads.length}.`);
+        return { sinkCategoryToPayloadMap, customPayloadsActive, allCallbackPayloads: processedCallbackPayloads, typeFuzzPayloads };
     }
+
 
     async generateContextAwarePayloads(context) {
         const {
@@ -234,17 +485,18 @@ class HandlerTracer {
         const accessedEventDataPaths = safeStaticData.accessedEventDataPaths instanceof Set
             ? safeStaticData.accessedEventDataPaths
             : new Set();
-        const originValidationChecks = safeStaticData.originValidationChecks || [];
         const requiredConditions = safeStaticData.requiredConditions || {};
+        const conditionPaths = new Set(Object.keys(requiredConditions));
 
         window.log.debug("[PayloadGen] Starting generation. Context received. Static Analysis available:", !!staticAnalysisData);
 
         const generatedPayloads = [];
         const handledSinkPaths = new Set();
         const handledDumbPaths = new Set();
+        const handledTypePaths = new Set();
         const shuffleArray = arr => [...arr].sort(() => 0.5 - Math.random());
 
-        const { sinkCategoryToPayloadMap, customPayloadsActive, allCallbackPayloads } = await this._getPayloadLists();
+        const { sinkCategoryToPayloadMap, customPayloadsActive, allCallbackPayloads, typeFuzzPayloads } = await this._getPayloadLists();
 
         let baseMessageStructures = [];
         let objectStructures = [];
@@ -252,7 +504,7 @@ class HandlerTracer {
             objectStructures = uniqueStructures.map(s => ({
                 source: 'message', structure: s, baseObject: s.examples?.[0]?.data !== undefined ? s.examples[0].data : s.original,
                 paths: s.pathsToFuzz || []
-            })).filter(s => s.baseObject !== undefined && typeof s.baseObject === 'object');
+            })).filter(s => s.baseObject !== undefined && typeof s.baseObject === 'object' && s.baseObject !== null);
             window.log.debug(`[PayloadGen] Found ${objectStructures.length} object structures from messages.`);
             baseMessageStructures.push(...objectStructures);
         }
@@ -268,7 +520,7 @@ class HandlerTracer {
                 const syntheticStructures = this.createSyntheticStructureFromPaths(accessedEventDataPaths);
                 baseMessageStructures = syntheticStructures.map(s => ({
                     source: 'static-analysis', structure: s, baseObject: s.original, paths: s.pathsToFuzz || []
-                })).filter(s => s.baseObject !== undefined && typeof s.baseObject === 'object');
+                })).filter(s => s.baseObject !== undefined && typeof s.baseObject === 'object' && s.baseObject !== null);
                 if(baseMessageStructures.length > 0) window.log.debug(`[PayloadGen] Using ${baseMessageStructures.length} structures synthesized from static analysis.`);
             } catch(e) { console.error("[PayloadGen] Error creating synthetic structures:", e); }
         }
@@ -349,24 +601,19 @@ class HandlerTracer {
         for (const baseStructInfo of baseMessageStructures) {
             if (generatedPayloads.length >= this.MAX_PAYLOADS_TOTAL) break;
             if (baseStructInfo.source === 'raw-string') continue;
-
             const baseObject = baseStructInfo.baseObject;
             if(typeof baseObject !== 'object' || baseObject === null) continue;
-
             const structurePaths = new Set((baseStructInfo.paths || []).map(p => p.path));
-            window.log.debug(`[PayloadGen] Processing base structure. Source: ${baseStructInfo.source}. Paths in structure: ${structurePaths.size}`);
+            window.log.debug(`[PayloadGen] Processing base structure (Smart). Source: ${baseStructInfo.source}. Paths: ${structurePaths.size}`);
 
             for (const targetPath of prioritizedPaths) {
                 if (generatedPayloads.length >= this.MAX_PAYLOADS_TOTAL) break;
                 if (!structurePaths.has(targetPath) && !Array.from(structurePaths).some(sp => targetPath.startsWith(sp + '.') || targetPath.startsWith(sp + '['))) {
                     if (baseStructInfo.source !== 'static-analysis' && !targetPath.includes('__proto__')) {
-                        window.log.debug(`[PayloadGen] Skipping path ${targetPath} for base structure from ${baseStructInfo.source} as it does not seem relevant.`);
                         continue;
-                    } else {
-                        window.log.debug(`[PayloadGen] Path ${targetPath} not directly in structure, but proceeding for static-analysis base or __proto__.`);
                     }
                 }
-                if (handledSinkPaths.has(targetPath)) continue;
+                if (handledSinkPaths.has(targetPath + baseStructInfo.source)) continue;
 
                 const analysisInfo = pathToAnalysisInfoMap.get(targetPath);
                 if (!analysisInfo) continue;
@@ -395,19 +642,21 @@ class HandlerTracer {
                         const finalMessage = this._deepCopy(conditionSatisfiedBase);
                         this.setNestedValue(finalMessage, targetPath, payload);
                         const isCallback = allCallbackPayloads.includes(payload);
+                        const isEncoding = (window.FuzzingPayloads?.ENCODING || []).includes(payload);
                         const payloadBaseType = sink ? 'smart-sink' : 'smart-flow';
                         let pType = customPayloadsActive ? `custom-${payloadBaseType}` : payloadBaseType;
                         if (isCallback) pType += '-callback';
+                        else if (isEncoding) pType += '-encoding';
+                        else pType += '-xss';
+
                         generatedPayloads.push({
                             type: pType, payload: finalMessage, targetPath: targetPath, sinkType: sink?.name || 'N/A (Flow Target)',
-                            sinkSeverity: sinkSeverity, description: `Targeted ${isCallback ? 'Callback' : 'XSS'} for ${targetPath} -> ${sink?.name || 'Flow'}`, baseSource: baseStructInfo.source
+                            sinkSeverity: sinkSeverity, description: `Targeted ${isCallback ? 'Callback' : (isEncoding ? 'Encoding/Bypass' : 'XSS')} for ${targetPath} -> ${sink?.name || 'Flow'}`, baseSource: baseStructInfo.source
                         });
                         window.log.debug(`[PayloadGen] Added ${pType} payload for path ${targetPath}. Total: ${generatedPayloads.length}`);
-                    } catch (e) {
-                        window.log.warn(`[PayloadGen] Error injecting payload for ${targetPath}: ${e.message}`);
-                    }
+                    } catch (e) { window.log.warn(`[PayloadGen] Error injecting payload for ${targetPath}: ${e.message}`); }
                 }
-                handledSinkPaths.add(targetPath);
+                handledSinkPaths.add(targetPath + baseStructInfo.source);
             }
             if (generatedPayloads.length >= this.MAX_PAYLOADS_TOTAL) break;
         }
@@ -417,15 +666,17 @@ class HandlerTracer {
         baseMessageStructures.forEach(bs => {
             if (bs.source !== 'raw-string' && bs.paths) {
                 bs.paths.forEach(p => {
-                    if (p.type === 'string' && !handledSinkPaths.has(p.path) && !handledDumbPaths.has(p.path)) {
+                    if (p.type === 'string' &&
+                        !handledSinkPaths.has(p.path + bs.source) &&
+                        !handledDumbPaths.has(p.path + bs.source) &&
+                        !conditionPaths.has(p.path)) {
                         potentialDumbPaths.add(p.path);
                     }
                 });
             }
         });
         const dumbPathsToTarget = shuffleArray(Array.from(potentialDumbPaths)).slice(0, this.MAX_DUMB_FIELDS_TO_TARGET);
-        window.log.debug(`[PayloadGen] Identified ${potentialDumbPaths.size} potential paths for dumb fuzzing. Targeting ${dumbPathsToTarget.length}.`);
-
+        window.log.debug(`[PayloadGen] Identified ${potentialDumbPaths.size} potential paths for dumb string fuzzing (excluding condition paths). Targeting ${dumbPathsToTarget.length}.`);
         if (dumbPathsToTarget.length > 0) {
             for (const baseStructInfo of baseMessageStructures) {
                 if (generatedPayloads.length >= this.MAX_PAYLOADS_TOTAL) break;
@@ -434,7 +685,7 @@ class HandlerTracer {
                 if(typeof baseObject !== 'object' || baseObject === null) continue;
 
                 for (const targetPath of dumbPathsToTarget) {
-                    if (!baseStructInfo.paths?.some(p => p.path === targetPath) || handledSinkPaths.has(targetPath) || handledDumbPaths.has(targetPath)) {
+                    if (!baseStructInfo.paths?.some(p => p.path === targetPath) || handledSinkPaths.has(targetPath + baseStructInfo.source) || handledDumbPaths.has(targetPath + baseStructInfo.source)) {
                         continue;
                     }
                     if (generatedPayloads.length >= this.MAX_PAYLOADS_TOTAL) break;
@@ -449,23 +700,72 @@ class HandlerTracer {
                             const finalMessage = this._deepCopy(baseCopy);
                             this.setNestedValue(finalMessage, targetPath, payload);
                             const isCallback = allCallbackPayloads.includes(payload);
+                            const isEncoding = (window.FuzzingPayloads?.ENCODING || []).includes(payload);
                             let pType = customPayloadsActive ? 'custom-dumb' : 'dumb';
                             if (isCallback) pType += '-callback';
+                            else if(isEncoding) pType += '-encoding';
+                            else pType += '-xss';
                             generatedPayloads.push({
                                 type: pType, payload: finalMessage, targetPath: targetPath, sinkType: 'N/A (Dumb Fuzz)',
-                                sinkSeverity: 'Low', description: `Dumb ${isCallback ? 'Callback' : 'XSS'} for field ${targetPath}`, baseSource: baseStructInfo.source
+                                sinkSeverity: 'Low', description: `Dumb ${isCallback ? 'Callback' : (isEncoding ? 'Encoding' : 'XSS')} for field ${targetPath}`, baseSource: baseStructInfo.source
                             });
                             dumbFuzzedCount++;
-                        } catch (e) {
-                            window.log.warn(`[PayloadGen] Error injecting dumb payload for ${targetPath}: ${e.message}`);
-                        }
+                        } catch (e) { window.log.warn(`[PayloadGen] Error injecting dumb payload for ${targetPath}: ${e.message}`); }
                     }
-                    handledDumbPaths.add(targetPath);
+                    handledDumbPaths.add(targetPath + baseStructInfo.source);
                 }
                 if (generatedPayloads.length >= this.MAX_PAYLOADS_TOTAL) break;
             }
         }
-        if (dumbFuzzedCount > 0) window.log.debug(`[PayloadGen] Added ${dumbFuzzedCount} dumb fuzzing payloads.`);
+        if (dumbFuzzedCount > 0) window.log.debug(`[PayloadGen] Added ${dumbFuzzedCount} dumb XSS/Callback/Encoding payloads.`);
+
+        let typeFuzzedCount = 0;
+        const potentialTypePaths = new Set();
+        baseMessageStructures.forEach(bs => {
+            if (bs.source !== 'raw-string' && bs.paths) {
+                bs.paths.forEach(p => {
+                    if (!handledTypePaths.has(p.path + bs.source)) {
+                        potentialTypePaths.add(p.path);
+                    }
+                });
+            }
+        });
+        const typePathsToTarget = shuffleArray(Array.from(potentialTypePaths)).slice(0, this.MAX_TYPE_FIELDS_TO_TARGET);
+        window.log.debug(`[PayloadGen] Identified ${potentialTypePaths.size} potential paths for type fuzzing. Targeting ${typePathsToTarget.length}.`);
+        if (typePathsToTarget.length > 0 && typeFuzzPayloads.length > 0) {
+            for (const baseStructInfo of baseMessageStructures) {
+                if (generatedPayloads.length >= this.MAX_PAYLOADS_TOTAL) break;
+                if (baseStructInfo.source === 'raw-string') continue;
+                const baseObject = baseStructInfo.baseObject;
+                if(typeof baseObject !== 'object' || baseObject === null) continue;
+                const baseCopy = this._deepCopy(baseObject);
+
+                for (const targetPath of typePathsToTarget) {
+                    if (!baseStructInfo.paths?.some(p => p.path === targetPath) || handledTypePaths.has(targetPath + baseStructInfo.source)) {
+                        continue;
+                    }
+                    if (generatedPayloads.length >= this.MAX_PAYLOADS_TOTAL) break;
+
+                    const limitedPayloads = typeFuzzPayloads.slice(0, this.MAX_PAYLOADS_PER_TYPE_FIELD);
+
+                    for (const payload of limitedPayloads) {
+                        if (generatedPayloads.length >= this.MAX_PAYLOADS_TOTAL) break;
+                        try {
+                            const finalMessage = this._deepCopy(baseCopy);
+                            this.setNestedValue(finalMessage, targetPath, payload);
+                            generatedPayloads.push({
+                                type: 'type-fuzz', payload: finalMessage, targetPath: targetPath, sinkType: 'N/A (Type Fuzz)',
+                                sinkSeverity: 'Low', description: `Type fuzz (${typeof payload}) for field ${targetPath}`, baseSource: baseStructInfo.source
+                            });
+                            typeFuzzedCount++;
+                        } catch(e) { window.log.warn(`[PayloadGen] Error injecting type fuzz payload for ${targetPath}: ${e.message}`); }
+                    }
+                    handledTypePaths.add(targetPath + baseStructInfo.source);
+                }
+                if (generatedPayloads.length >= this.MAX_PAYLOADS_TOTAL) break;
+            }
+        }
+        if(typeFuzzedCount > 0) window.log.debug(`[PayloadGen] Added ${typeFuzzedCount} type fuzz payloads.`);
 
         const rawStringBases = baseMessageStructures.filter(b => b.source === 'raw-string');
         if (!addedRawStringBases && rawStringMessages.length > 0) {
@@ -474,12 +774,11 @@ class HandlerTracer {
                     rawStringBases.push({ source: 'raw-string', structure: null, baseObject: msg.data, paths: [] });
                 }
             });
-            if (rawStringBases.length > 0) window.log.debug(`[PayloadGen] Added ${rawStringBases.length} raw string bases for final processing.`);
         }
         if (rawStringBases.length > 0) {
-            const payloadList = sinkCategoryToPayloadMap['default'] || [];
+            const payloadList = [...new Set([...(sinkCategoryToPayloadMap['default'] || []), ...typeFuzzPayloads])];
             const limitedPayloads = shuffleArray(payloadList).slice(0, this.MAX_PAYLOADS_PER_SINK_PATH);
-            window.log.debug(`[PayloadGen] Processing ${rawStringBases.length} raw string bases with ${limitedPayloads.length} payloads each.`);
+            window.log.debug(`[PayloadGen] Processing ${rawStringBases.length} raw string bases with ${limitedPayloads.length} diverse payloads each.`);
 
             for (const baseStructInfo of rawStringBases) {
                 if (generatedPayloads.length >= this.MAX_PAYLOADS_TOTAL) break;
@@ -488,22 +787,30 @@ class HandlerTracer {
                 for (const payload of limitedPayloads) {
                     if (generatedPayloads.length >= this.MAX_PAYLOADS_TOTAL) break;
                     const isCallback = allCallbackPayloads.includes(payload);
+                    const isTypeFuzz = typeFuzzPayloads.includes(payload);
+
                     let pTypeBase = customPayloadsActive ? 'custom-raw' : 'raw';
                     if (isCallback) pTypeBase += '-callback';
+                    else if (isTypeFuzz) pTypeBase += '-type';
+                    else pTypeBase += '-xss';
+
                     generatedPayloads.push({
                         type: `${pTypeBase}-replace`, payload: payload, targetPath: 'raw', sinkType: 'unknown',
-                        description: `Raw Replace ${isCallback ? 'Callback' : 'XSS'}`, baseSource: 'raw-string', original: originalString
+                        description: `Raw Replace (${typeof payload})`, baseSource: 'raw-string', original: originalString
                     });
                     if (generatedPayloads.length >= this.MAX_PAYLOADS_TOTAL) break;
-                    generatedPayloads.push({
-                        type: `${pTypeBase}-append`, payload: originalString + payload, targetPath: 'raw', sinkType: 'unknown',
-                        description: `Raw Append ${isCallback ? 'Callback' : 'XSS'}`, baseSource: 'raw-string', original: originalString
-                    });
-                    if (generatedPayloads.length >= this.MAX_PAYLOADS_TOTAL) break;
-                    generatedPayloads.push({
-                        type: `${pTypeBase}-prepend`, payload: payload + originalString, targetPath: 'raw', sinkType: 'unknown',
-                        description: `Raw Prepend ${isCallback ? 'Callback' : 'XSS'}`, baseSource: 'raw-string', original: originalString
-                    });
+
+                    if(typeof payload === 'string') {
+                        generatedPayloads.push({
+                            type: `${pTypeBase}-append`, payload: originalString + payload, targetPath: 'raw', sinkType: 'unknown',
+                            description: `Raw Append`, baseSource: 'raw-string', original: originalString
+                        });
+                        if (generatedPayloads.length >= this.MAX_PAYLOADS_TOTAL) break;
+                        generatedPayloads.push({
+                            type: `${pTypeBase}-prepend`, payload: payload + originalString, targetPath: 'raw', sinkType: 'unknown',
+                            description: `Raw Prepend`, baseSource: 'raw-string', original: originalString
+                        });
+                    }
                 }
             }
         }
@@ -513,7 +820,6 @@ class HandlerTracer {
     }
 }
 window.HandlerTracer = HandlerTracer;
-
 
 async function handleTraceButton(endpoint, traceButton) {
     const originalFullEndpoint = endpoint;
@@ -593,7 +899,6 @@ async function handleTraceButton(endpoint, traceButton) {
 
         if (window.analyzeHandlerStatically && handlerCode) {
             try {
-                log.debug(handlerCode)
                 const staticResults = window.analyzeHandlerStatically(handlerCode);
                 if (staticResults?.success && staticResults.analysis) {
                     staticAnalysisData = staticResults.analysis;
@@ -611,7 +916,7 @@ async function handleTraceButton(endpoint, traceButton) {
             staticAnalysisData = null;
         }
 
-        vulnAnalysis = window.handlerTracer.analyzeHandlerForVulnerabilities(handlerCode, staticAnalysisData);
+        vulnAnalysis = await window.handlerTracer.analyzeHandlerForVulnerabilities(handlerCode, staticAnalysisData);
         hasCriticalSinks = vulnAnalysis.sinks?.some(s => ['Critical', 'High'].includes(s.severity)) || false;
 
         updatePhase('structure');
@@ -706,10 +1011,13 @@ async function handleTraceButton(endpoint, traceButton) {
         const errorLabel = progressContainer?.querySelector('.phase[data-phase="error"] .label'); if(errorLabel) errorLabel.textContent = `Error: ${error.message.substring(0, 50)}...`;
 
     } finally {
-        setTimeout(() => { progressContainer?.remove(); }, 3000);
+        setTimeout(() => {
+            progressContainer?.remove();
+        }, 3000);
         sessionStorage.removeItem(traceInProgressKey);
         window.log.handler(`[Trace] Finished attempt for endpoint key: ${endpointKey}`);
-        setTimeout(() => requestAnimationFrame(window.updateDashboardUI), 100);
+        // *** MODIFIED LINE ***
+        setTimeout(window.requestUiUpdate, 100); // Use the globally exposed debounced update
     }
 }
 window.handleTraceButton = handleTraceButton;
