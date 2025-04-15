@@ -146,6 +146,7 @@ Use FrogPost **ethically and legally** — only test applications you own or hav
 
     ```bash
     SERVER_JS="/Users/[USER_NAME]/Library/Application Support/NodeServerStarter/server.js"
+    LOG_FILE="/Users/[USER_NAME]/Library/Application Support/NodeServerStarter/node-finder.log
     ```
 
 6. Copy files to system paths:
