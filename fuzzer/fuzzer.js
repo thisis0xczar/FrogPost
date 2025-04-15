@@ -90,6 +90,7 @@
             if (basePayloads.length === 0) { ranFallback = true; this.fuzzer.initialize( this.config?.messages || [], this.config?.handler || '', this.config?.sinks || [], this.config?.target, this.config?.callbackUrl, this.config?.originValidationChecks || [] ); if (this.config?.fuzzerOptions) this.fuzzer.initializeWithConfig(this.config.fuzzerOptions); this.fuzzer.runPayloadGeneration(); basePayloads = this.fuzzer.payloads; }
             return basePayloads;
         }
+
         executeFuzzing(payloads) {
             if (!payloads || payloads.length === 0) { this.isExecutingPayloads = false; if (typeof this._onCompleteCallback === 'function') this._onCompleteCallback(); return; }
             if (this.isExecutingPayloads) return;
@@ -111,8 +112,9 @@
                     if (typeof window.sendToFrame === 'function') window.sendToFrame(processed);
                     else iframe.contentWindow.postMessage(processed, '*');
                 } catch (error) { console.error(`[Fuzzer] Error sending payload index ${msgIdx - 1}:`, error); }
-            }, 200);
+            }, 100);
         }
+
         replaceJwtTokens(payload) {
             if (typeof payload === 'string') return payload.replace(JWT_REGEX, ADMIN_JWT);
             if (!payload || typeof payload !== 'object') return payload;
