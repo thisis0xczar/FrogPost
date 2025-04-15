@@ -2,7 +2,7 @@
 
 FrogPost is a powerful Chrome extension for testing and analyzing the security of `postMessage` communications between iframes. It helps developers and security professionals identify vulnerabilities in message-handling implementations.
 
-#### Current Version: FrogPost v1.0.5
+#### Current Version: FrogPost v1.0.6
 
 <p align="center" width="100%">
     <img width="15%" src="frog-logo.png">
