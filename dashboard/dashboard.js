@@ -1,7 +1,7 @@
 /**
  * FrogPost Extension
  * Originally Created by thisis0xczar/Lidor JFrog AppSec Team
- * Refined on: 2025-04-12
+ * Refined on: 2025-04-15
  */
 window.frogPostState = {
     frameConnections: new Map(),
@@ -93,6 +93,8 @@ let callbackUrl = null;
 const CALLBACK_URL_STORAGE_KEY = 'callback_url';
 const modifiedEndpoints = new Map();
 const launchInProgressEndpoints = new Set();
+let uiUpdateTimer = null;
+const DEBOUNCE_DELAY = 150;
 
 
 function sanitizeString(str) {
@@ -904,7 +906,13 @@ function updateDashboardUI() {
     updateEndpointCounts();
     highlightActiveEndpoint();
 }
-window.updateDashboardUI = updateDashboardUI;
+window.updateDashboardUI = updateDashboardUI; // Keep if needed globally
+
+function requestUiUpdate() {
+    clearTimeout(uiUpdateTimer);
+    uiUpdateTimer = setTimeout(updateDashboardUI, DEBOUNCE_DELAY);
+}
+window.requestUiUpdate = requestUiUpdate;
 
 function updateEndpointCounts() {
     try {
@@ -921,7 +929,6 @@ function updateEndpointCounts() {
 function initializeMessageHandling() {
     chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         if (!message?.type) return false;
-
         let needsUiUpdate = false;
         try {
             switch (message.type) {
@@ -954,7 +961,8 @@ function initializeMessageHandling() {
             }
 
             if (needsUiUpdate) {
-                requestAnimationFrame(updateDashboardUI);
+                // requestAnimationFrame(updateDashboardUI); // REMOVED
+                requestUiUpdate(); // ADDED
             }
             if (sendResponse) sendResponse({ success: true });
 
@@ -977,7 +985,7 @@ function initializeMessageHandling() {
                         endpointsWithHandlers.add(key);
                     });
                 }
-                updateDashboardUI();
+                updateDashboardUI(); // Keep initial update direct
             } else { log.error("Failed to fetch initial state:", response?.error); }
         });
     });
@@ -1081,7 +1089,7 @@ function setupUIControls() {
         activeEndpoint = null; endpointsWithHandlers.clear(); knownHandlerEndpoints.clear(); modifiedEndpoints.clear(); launchInProgressEndpoints.clear();
         chrome.storage.local.clear(() => log.info("Local storage cleared."));
         chrome.runtime.sendMessage({ type: "resetState" }, (response) => log.info("Background reset:", response));
-        updateDashboardUI();
+        requestUiUpdate();
     });
     document.getElementById("exportMessages")?.addEventListener("click", () => {
         const sanitizedMessages = messages.map(msg => ({ origin: msg.origin, destinationUrl: msg.destinationUrl, timestamp: msg.timestamp, data: sanitizeMessageData(msg.data), messageType: msg.messageType, messageId: msg.messageId }));
@@ -1090,10 +1098,27 @@ function setupUIControls() {
     document.getElementById("checkAll")?.addEventListener("click", checkAllEndpoints);
     const debugButton = document.getElementById("debugToggle");
     if (debugButton) { debugButton.addEventListener("click", toggleDebugMode); debugButton.textContent = debugMode ? 'Debug: ON' : 'Debug: OFF'; debugButton.className = debugMode ? 'control-button debug-on' : 'control-button debug-off'; }
-    document.getElementById("refreshMessages")?.addEventListener("click", () => { chrome.runtime.sendMessage({ type: "fetchInitialState" }, (response) => { if (response?.success) { if (response.messages) { messages.length = 0; messages.push(...response.messages); } if (response.handlerEndpointKeys) { knownHandlerEndpoints.clear(); endpointsWithHandlers.clear(); response.handlerEndpointKeys.forEach(key => { knownHandlerEndpoints.add(key); endpointsWithHandlers.add(key); }); } log.info("Dashboard refreshed."); updateDashboardUI(); } else { log.error("Failed refresh:", response?.error); } }); });
+    document.getElementById("refreshMessages")?.addEventListener("click", () => {
+        chrome.runtime.sendMessage({ type: "fetchInitialState" }, (response) => {
+            if (response?.success) {
+                if (response.messages) { messages.length = 0; messages.push(...response.messages); }
+                if (response.handlerEndpointKeys) { knownHandlerEndpoints.clear(); endpointsWithHandlers.clear(); response.handlerEndpointKeys.forEach(key => { knownHandlerEndpoints.add(key); endpointsWithHandlers.add(key); }); }
+                log.info("Dashboard refreshed.");
+                // updateDashboardUI(); // REMOVED
+                requestUiUpdate(); // ADDED
+            } else { log.error("Failed refresh:", response?.error); }
+        });
+    });
     const uploadPayloadsButton = document.getElementById("uploadCustomPayloadsBtn"); const payloadFileInput = document.getElementById("customPayloadsFile"); if(uploadPayloadsButton && payloadFileInput){ uploadPayloadsButton.addEventListener('click', () => payloadFileInput.click()); payloadFileInput.addEventListener('change', handlePayloadFileSelect); }
     document.getElementById("clearCustomPayloadsBtn")?.addEventListener('click', clearCustomPayloads);
     setupCallbackUrl(); updatePayloadStatus();
+    document.getElementById("openOptionsBtn")?.addEventListener("click", () => {
+        if (chrome.runtime.openOptionsPage) {
+            chrome.runtime.openOptionsPage();
+        } else {
+            window.open(chrome.runtime.getURL("../options/options.html"));
+        }
+    });
 }
 
 async function handlePayloadFileSelect(event) {
@@ -1429,7 +1454,9 @@ async function handlePlayButton(endpoint, button, skipCheck = false) {
     } catch (error) {
         if (error.message === "User cancelled") { log.info(`Play cancelled for key ${endpointKey}.`); const currentState = buttonStates.get(endpointKey)?.state || 'start'; if (['start', 'csp', 'analyze', 'checking', 'default'].includes(currentState)) updateButton(button, 'start'); }
         else { log.error(`[Play Button Error] for key ${endpointKey}:`, error.message); showToastNotification(`Error: ${error.message.substring(0, 150)}`, 'error'); updateButton(button, 'error', { errorMessage: 'An error occurred' }); if (traceButton) updateTraceButton(traceButton, 'disabled'); if (reportButton) updateReportButton(reportButton, 'disabled', originalFullEndpoint); }
-    } finally { launchInProgressEndpoints.delete(endpointKey); setTimeout(() => requestAnimationFrame(updateDashboardUI), 150); }
+    } finally { launchInProgressEndpoints.delete(endpointKey);
+        setTimeout(requestUiUpdate, 150);
+         }
 }
 
 function getRiskLevelAndColor(score) {
@@ -1503,6 +1530,7 @@ function displayReport(reportData, panel) {
         const payloads = details.payloads || [];
         const structures = details.uniqueStructures || [];
         const endpointDisplay = reportData.endpoint || reportData.originalEndpointKey || 'Unknown Endpoint';
+        const analysisStorageKey = reportData.analysisStorageKey || 'report'; // Used for filename
         const originChecks = details.originValidationChecks || [];
 
         const safeEscape = (str) => { try { return window.escapeHTML(String(str)); } catch(e){ console.error('escapeHTML failed:', e); return '[Error]'; }};
@@ -1564,87 +1592,34 @@ function displayReport(reportData, panel) {
         const findingsSection = document.createElement('div');
         findingsSection.className = 'report-section report-findings';
         let findingsHTML = '<h4 class="report-section-title">Findings</h4>';
-
         if (originChecks.length > 0) {
             findingsHTML += `<div class="subsection"><h5 class="report-subsection-title">Origin Validation (${originChecks.length})</h5><table class="report-table"><thead><tr><th>Check Type</th><th>Strength</th><th>Compared Value</th><th>Snippet</th></tr></thead><tbody>`;
-            originChecks.forEach(check => {
-                const type = check?.type || '?'; const strength = check?.strength || 'N/A'; const value = check?.value !== null && check?.value !== undefined ? String(check.value).substring(0, 100) : 'N/A'; const snippetHTML = check?.snippet ? `<code class="context-snippet">${safeEscape(check.snippet)}</code>` : 'N/A'; let strengthClass = strength.toLowerCase(); if(strength === 'Missing') strengthClass = 'critical'; else if(strength === 'Weak') strengthClass = 'high'; else if(strength === 'Medium') strengthClass = 'medium'; else if(strength === 'Strong') strengthClass = 'negligible'; else strengthClass='low';
-                findingsHTML += `<tr class="severity-row-${strengthClass}"><td>${safeEscape(type)}</td><td><span class="severity-badge severity-${strengthClass}">${safeEscape(strength)}</span></td><td><code>${safeEscape(value)}</code></td><td>${snippetHTML}</td></tr>`;
-            });
+            originChecks.forEach(check => { const type = check?.type || '?'; const strength = check?.strength || 'N/A'; const value = check?.value !== null && check?.value !== undefined ? String(check.value).substring(0, 100) : 'N/A'; const snippetHTML = check?.snippet ? `<code class="context-snippet">${safeEscape(check.snippet)}</code>` : 'N/A'; let strengthClass = strength.toLowerCase(); if(strength === 'Missing') strengthClass = 'critical'; else if(strength === 'Weak') strengthClass = 'high'; else if(strength === 'Medium') strengthClass = 'medium'; else if(strength === 'Strong') strengthClass = 'negligible'; else strengthClass='low'; findingsHTML += `<tr class="severity-row-${strengthClass}"><td>${safeEscape(type)}</td><td><span class="severity-badge severity-${strengthClass}">${safeEscape(strength)}</span></td><td><code>${safeEscape(value)}</code></td><td>${snippetHTML}</td></tr>`; });
             findingsHTML += `</tbody></table></div>`;
         }
-
         if (uniqueVulns.length > 0) {
             findingsHTML += `<div class="subsection"><h5 class="report-subsection-title">DOM XSS Sinks Detected (${uniqueVulns.length})</h5><table class="report-table"><thead><tr><th>Sink</th><th>Severity</th><th>Context Snippet</th></tr></thead><tbody>`;
             uniqueVulns.forEach(vuln => { const type = vuln?.type || '?'; const severity = vuln?.severity || 'N/A'; const contextHTML = vuln?.context || ''; findingsHTML += `<tr class="severity-row-${severity.toLowerCase()}"><td>${safeEscape(type)}</td><td><span class="severity-badge severity-${severity.toLowerCase()}">${safeEscape(severity)}</span></td><td class="context-snippet-cell">${contextHTML}</td></tr>`; });
             findingsHTML += `</tbody></table></div>`;
         }
-
         if (uniqueIssues.length > 0) {
             findingsHTML += `<div class="subsection"><h5 class="report-subsection-title">Other Security Issues (${uniqueIssues.length})</h5><table class="report-table"><thead><tr><th>Issue</th><th>Severity</th><th>Context Snippet</th></tr></thead><tbody>`;
             uniqueIssues.forEach(issue => { const type = issue?.type || '?'; const severity = issue?.severity || 'N/A'; const contextHTML = issue?.context || ''; findingsHTML += `<tr class="severity-row-${severity.toLowerCase()}"><td>${safeEscape(type)}</td><td><span class="severity-badge severity-${severity.toLowerCase()}">${safeEscape(severity)}</span></td><td class="context-snippet-cell">${contextHTML}</td></tr>`; });
             findingsHTML += `</tbody></table></div>`;
         }
-
-        if (!originChecks.length && !uniqueVulns.length && !uniqueIssues.length) {
-            findingsHTML += '<p class="no-findings-text">No significant findings detected.</p>';
-        }
+        if (!originChecks.length && !uniqueVulns.length && !uniqueIssues.length) { findingsHTML += '<p class="no-findings-text">No significant findings detected.</p>'; }
         findingsSection.innerHTML = findingsHTML;
         content.appendChild(findingsSection);
 
         if (dataFlows?.length > 0) {
             const flowSection = document.createElement('div');
             flowSection.className = 'report-section report-dataflow';
-            flowSection.innerHTML = `
-                <h4 class="report-section-title">Data Flow</h4>
-                <table class="report-table dataflow-table">
-                    <thead>
-                        <tr>
-                            <th>Source Property</th>
-                            <th>Sink / Target</th>
-                            <th>Conditions</th>
-                            <th>Code Snippet</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        </tbody>
-                </table>`;
-
+            flowSection.innerHTML = ` <h4 class="report-section-title">Data Flow</h4> <table class="report-table dataflow-table"> <thead> <tr> <th>Source Property</th> <th>Sink / Target</th> <th>Conditions</th> <th>Code Snippet</th> </tr> </thead> <tbody> </tbody> </table>`;
             const tbody = flowSection.querySelector('tbody');
-
-            if (tbody) {
-                dataFlows.forEach(flow => {
-                    const prop = flow?.sourcePath || '?';
-                    const sink = flow?.destinationContext || '?';
-                    const context = flow?.fullCodeSnippet || flow?.taintedNodeSnippet || '';
-                    const displayProp = prop === '(root)' ? '(root data)' : `event.data.${safeEscape(prop)}`;
-                    const conditions = flow?.requiredConditionsForFlow || [];
-                    let conditionsHtml = 'None';
-
-                    if (conditions.length > 0) {
-                        conditionsHtml = conditions.map(c => {
-                            let valStr = safeEscape(String(c.value));
-                            if (typeof c.value === 'string') valStr = `'${valStr}'`;
-                            return `<code>${safeEscape(c.path)} ${safeEscape(c.op)} ${valStr}</code>`;
-                        }).join('<br>');
-                    }
-
-                    const rowHtml = `
-                        <tr>
-                            <td><code>${displayProp}</code></td>
-                            <td>${safeEscape(sink)}</td>
-                            <td>${conditionsHtml}</td>
-                            <td><code class="context-snippet">${safeEscape(context)}</code></td>
-                        </tr>`;
-                    tbody.insertAdjacentHTML('beforeend', rowHtml);
-                });
-            } else {
-                console.error("Could not find tbody to append data flow rows.");
-                flowSection.innerHTML += '<p class="error-message">Error rendering data flow table body.</p>';
-            }
+            if (tbody) { dataFlows.forEach(flow => { const prop = flow?.sourcePath || '?'; const sink = flow?.destinationContext || '?'; const context = flow?.fullCodeSnippet || flow?.taintedNodeSnippet || ''; const displayProp = prop === '(root)' ? '(root data)' : `event.data.${safeEscape(prop)}`; const conditions = flow?.requiredConditionsForFlow || []; let conditionsHtml = 'None'; if (conditions.length > 0) { conditionsHtml = conditions.map(c => { let valStr = safeEscape(String(c.value)); if (typeof c.value === 'string') valStr = `'${valStr}'`; return `<code>${safeEscape(c.path)} ${safeEscape(c.op)} ${valStr}</code>`; }).join('<br>'); } const rowHtml = ` <tr> <td><code>${displayProp}</code></td> <td>${safeEscape(sink)}</td> <td>${conditionsHtml}</td> <td><code class="context-snippet">${safeEscape(context)}</code></td> </tr>`; tbody.insertAdjacentHTML('beforeend', rowHtml); }); }
+            else { console.error("Could not find tbody to append data flow rows."); flowSection.innerHTML += '<p class="error-message">Error rendering data flow table body.</p>'; }
             content.appendChild(flowSection);
         }
-
 
         if (payloads?.length > 0) {
             const payloadSection = document.createElement('div');
@@ -1656,21 +1631,44 @@ function displayReport(reportData, panel) {
         if (structures?.length > 0) {
             const structureSection = document.createElement('div');
             structureSection.className = 'report-section report-structures';
-            let structuresHTML = `<h4 class="report-section-title">Unique Msg Structures (${structures.length})</h4><div class="structures-list report-list">`;
-            structures.slice(0, 3).forEach((s, i) => { structuresHTML += safeRenderStructure(s, i); });
-            structuresHTML += `</div>`;
-            if (structures.length > 3) { structuresHTML += `<button id="showAllStructuresBtn" class="control-button secondary-button show-more-btn">Show All ${structures.length}</button>`; }
-            structureSection.innerHTML = structuresHTML;
+            let structuresHTML = `<h4 class="report-section-title">Unique Msg Structures (${structures.length})</h4><div class="structures-list report-list">`; structures.slice(0, 3).forEach((s, i) => { structuresHTML += safeRenderStructure(s, i); }); structuresHTML += `</div>`; if (structures.length > 3) { structuresHTML += `<button id="showAllStructuresBtn" class="control-button secondary-button show-more-btn">Show All ${structures.length}</button>`; } structureSection.innerHTML = structuresHTML;
             content.appendChild(structureSection);
         }
+
+        const buttonContainer = document.createElement('div');
+        buttonContainer.style.cssText = 'margin-top:20px; display: flex; justify-content: center; gap: 15px;';
+
+        const exportJsonBtn = document.createElement('button');
+        exportJsonBtn.textContent = 'Export JSON';
+        exportJsonBtn.className = 'control-button secondary-button';
+        exportJsonBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            try {
+                const jsonData = JSON.stringify(reportData, null, 2);
+                const blob = new Blob([jsonData], { type: 'application/json' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                const safeFilename = (analysisStorageKey || 'frogpost_report').replace(/[^a-z0-9_\-.]/gi, '_');
+                a.href = url;
+                a.download = `${safeFilename}.json`;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+                log.success("Report exported as JSON.");
+            } catch (exportError) {
+                log.error("Failed to export report as JSON", exportError);
+                alert("Failed to export report as JSON. See console for details.");
+            }
+        });
 
         const closeBtnInside = document.createElement('button');
         closeBtnInside.textContent = 'Close Report';
         closeBtnInside.className = 'control-button secondary-button';
-        closeBtnInside.style.cssText = 'margin-top:20px;display:block;margin-left:auto;margin-right:auto;';
         closeBtnInside.onclick = () => { document.querySelector('.trace-panel-backdrop')?.remove(); panel.remove(); };
-        content.appendChild(closeBtnInside);
-
+        buttonContainer.appendChild(exportJsonBtn);
+        buttonContainer.appendChild(closeBtnInside);
+        content.appendChild(buttonContainer);
         attachReportEventListeners(panel, reportData);
 
     } catch (renderError) {
@@ -1740,17 +1738,14 @@ async function populateInitialHandlerStates() {
         const allData = await chrome.storage.local.get(null);
         endpointsWithHandlers.clear();
         for (const key in allData) {
-            if (key.startsWith('runtime-listeners-')) {
-                if (Array.isArray(allData[key]) && allData[key].length > 0) {
-                    endpointsWithHandlers.add(key.substring('runtime-listeners-'.length));
-                }
-            } else if (key.startsWith('best-handler-')) {
-                endpointsWithHandlers.add(key.substring('best-handler-'.length));
-            }
+            if (key.startsWith('runtime-listeners-')) { /* ... */ }
+            else if (key.startsWith('best-handler-')) { /* ... */ }
         }
         log.debug(`Initial handler states populated. Count: ${endpointsWithHandlers.size}`);
     } catch (error) { log.error("Error populating initial handler states:", error); }
-    finally { updateDashboardUI(); }
+    finally {
+        requestUiUpdate();
+    }
 }
 
 const traceReportStyles = `

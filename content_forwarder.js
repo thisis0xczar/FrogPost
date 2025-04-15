@@ -1,7 +1,7 @@
 /**
  * FrogPost Extension
  * Originally Created by thisis0xczar/Lidor JFrog AppSec Team
- * Refined on: 2025-04-12
+ * Refined on: 2025-04-15
  */
 (() => {
     const FORWARDER_FLAG = '__frogPostForwarderInjected_v2';
@@ -9,7 +9,9 @@
     window[FORWARDER_FLAG] = true;
 
     function safeGetLocation(win) {
-        try { if (win?.location?.href) return win.location.href; } catch (e) {}
+        try {
+            if (win?.location?.href) return win.location.href;
+        } catch (e) {}
         return 'access-denied-or-invalid';
     }
 
@@ -17,18 +19,18 @@
         if (event.source === window && event.data?.type === 'frogPostAgent->ForwardToBackground') {
             if (chrome?.runtime?.id && chrome.runtime.sendMessage) {
                 try {
-                    chrome.runtime.sendMessage({
-                        type: "runtimeListenerCaptured",
-                        payload: event.data.payload
-                    }, (response) => {
-                        if (chrome.runtime.lastError) {} else {}
-                    });
+                    chrome.runtime.sendMessage({ type: "runtimeListenerCaptured", payload: event.data.payload }, (response) => { if (chrome.runtime.lastError) {} else {} });
                 } catch (e) {}
             }
-        }
-        else {
-            if (event.data?.type?.startsWith('frogPostAgent')) return;
-            if (!event.data || !event.source) return;
+        } else if (event.data && event.data.type === '__FROGPOST_SET_INDEX__') {
+            return;
+        } else {
+            const messageInternalType = event.data?.type;
+            if (typeof messageInternalType === 'string' && messageInternalType.startsWith('frogPostAgent')) {
+                return;
+            }
+            if (!event.source) return;
+
             try {
                 let messageType = 'unknown';
                 const data = event.data;
@@ -59,8 +61,7 @@
     });
 
     if(chrome?.runtime?.id) {
-        chrome.runtime.sendMessage({ type: "contentScriptReady", url: window.location.href })
-            .catch(error => {});
+        chrome.runtime.sendMessage({ type: "contentScriptReady", url: window.location.href }).catch(error => {});
     }
 
 })();

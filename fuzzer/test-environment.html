@@ -8,10 +8,13 @@
       --bg-primary: #1e1e1e; --bg-secondary: #2a2a2a; --card-bg: #2a2a2a;
       --code-bg: #252525; --text-primary: #e0e0e0; --text-secondary: #aaaaaa;
       --text-muted: #777777; --accent-primary: #4dd051; --accent-primary-hover: #5edc61;
-      --accent-secondary: #f07178; --accent-info: #82aaff; --border-color: #424242;
+      --accent-secondary: #f07178; --accent-info: #82aaff; --accent-mutation: #ffeb3b; --accent-success: #69f0ae; --border-color: #424242;
       --scrollbar-track: #2a2a2a; --scrollbar-thumb: #555;
       --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
       --font-mono: 'SF Mono', 'Fira Code', 'Fira Mono', 'Roboto Mono', monospace;
+      --accent-mutation-light: rgba(255, 235, 59, 0.15);
+      --accent-success-light: rgba(105, 240, 174, 0.1);
+      --accent-success-border: #00bfa5;
     }
     body { font-family: var(--font-sans); margin: 0; padding: 0; background-color: var(--bg-primary); color: var(--text-primary); display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
     .header { background-color: var(--bg-secondary); padding: 10px 25px; box-shadow: 0 1px 2px rgba(0,0,0,.25); display: flex; justify-content: space-between; align-items: center; color: var(--text-primary); border-bottom: 1px solid var(--border-color); flex-shrink: 0; }
@@ -25,14 +28,22 @@
     .main-layout { display: flex; flex-grow: 1; overflow: hidden; }
     #payloadContainer { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; padding: 15px; flex-grow: 1; overflow: hidden; }
     #targetFrameContainer, #payloadLogContainer { background: var(--card-bg); border-radius: 5px; border: 1px solid var(--border-color); box-shadow: 0 2px 4px rgba(0,0,0,.15); padding: 0; display: flex; flex-direction: column; overflow: hidden; }
-    #targetFrameContainer h3, #payloadLogContainer h3 { margin: 0; padding: 10px 15px; border-bottom: 1px solid var(--border-color); color: var(--text-primary); font-size: 14px; font-weight: 600; flex-shrink: 0; background-color: var(--bg-secondary); font-family: var(--font-sans); }
+    #targetFrameContainer h3, #payloadLogContainer h3 { margin: 0; padding: 10px 15px; border-bottom: 1px solid var(--border-color); color: var(--text-primary); font-size: 14px; font-weight: 600; flex-shrink: 0; background-color: var(--bg-secondary); font-family: var(--font-sans); display: flex; align-items: center; }
     #targetFrame { flex-grow: 1; border: none; display: block; margin: 0; padding: 0; background-color: #fff; width: 100%; height: 100%; }
     #payloadLog { padding: 15px; overflow-y: auto; flex-grow: 1; scrollbar-width: thin; scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track); background-color: var(--bg-primary); }
     #payloadLog::-webkit-scrollbar { width: 8px; } #payloadLog::-webkit-scrollbar-track { background: var(--scrollbar-track); } #payloadLog::-webkit-scrollbar-thumb { background-color: var(--scrollbar-thumb); border-radius: 4px; border: 2px solid var(--scrollbar-track); }
-    .payload-entry { margin-bottom: 10px; padding: 10px 12px; background: var(--bg-secondary); border-radius: 4px; border: 1px solid var(--border-color); border-left-width: 3px; border-left-color: var(--text-muted); }
-    .payload-entry.sent { border-left-color: var(--accent-primary); } .payload-entry.received { border-left-color: var(--accent-info); }
+    .payload-entry { margin-bottom: 10px; padding: 10px 12px; background: var(--bg-secondary); border-radius: 4px; border: 1px solid var(--border-color); border-left-width: 3px; border-left-color: var(--text-muted); transition: background-color 0.3s ease, border-color 0.3s ease; }
+    .payload-entry.sent { border-left-color: var(--accent-primary); }
+    .payload-entry.received { border-left-color: var(--accent-info); }
+    .payload-entry.mutation { border-left-color: var(--accent-mutation); background-color: var(--accent-mutation-light); border-color: var(--accent-mutation); }
+    .payload-entry.success { border-left-color: var(--accent-success); background-color: var(--accent-success-light); border-color: var(--accent-success-border); }
+    /* Removed triggered-* classes */
     .payload-info { margin-bottom: 8px; font-size: 11px; color: var(--text-secondary); display: flex; justify-content: space-between; text-transform: uppercase; font-family: var(--font-mono); }
-    .payload-info span:first-child { font-weight: 600; } .payload-info span:first-child.sent { color: var(--accent-primary); } .payload-info span:first-child.received { color: var(--accent-info); }
+    .payload-info span:first-child { font-weight: 600; }
+    .payload-info span:first-child.sent { color: var(--accent-primary); }
+    .payload-info span:first-child.received { color: var(--accent-info); }
+    .payload-info span:first-child.mutation { color: var(--accent-mutation); }
+    .payload-info span:first-child.success { color: var(--accent-success); }
     .payload-data { font-family: var(--font-mono); white-space: pre-wrap; word-break: break-all; background: var(--code-bg); color: var(--text-primary); padding: 10px; border-radius: 4px; max-height: 180px; overflow-y: auto; font-size: 12px; border: 1px solid var(--border-color); scrollbar-width: thin; scrollbar-color: var(--scrollbar-thumb) var(--code-bg); }
     .payload-data::-webkit-scrollbar { width: 6px; } .payload-data::-webkit-scrollbar-track { background: var(--code-bg); } .payload-data::-webkit-scrollbar-thumb { background-color: var(--scrollbar-thumb); border-radius: 3px; border: 1px solid var(--code-bg); }
     .control-sidebar { width: 280px; height: 100%; background-color: var(--bg-secondary); box-shadow: -1px 0 4px rgba(0,0,0,.2); z-index: 5; display: flex; flex-direction: column; border-left: 1px solid var(--border-color); padding: 20px; flex-shrink: 0; box-sizing: border-box; overflow-y: auto; }
@@ -50,6 +61,8 @@
     .callback-url-container input { flex-grow: 1; padding: 9px 12px; border: 1px solid var(--border-color); border-radius: 4px; font-size: 13px; background-color: var(--bg-primary); color: var(--text-primary); font-family: var(--font-mono); }
     .callback-url-container input:focus { outline: none; border-color: var(--accent-primary); box-shadow: 0 0 0 2px rgba(77,208,81,.2); }
     .callback-url-container button { padding: 9px 16px; margin-top: 5px; }
+    /* Badge CSS Removed */
+    /* Animation keyframes removed */
     @media screen and (max-width:1000px){.main-layout{flex-direction:column}#payloadContainer{grid-template-columns:1fr;padding-bottom:0}.control-sidebar{width:100%;height:auto;position:relative;border-left:none;border-top:1px solid var(--border-color);box-shadow:none;flex-direction:row;flex-wrap:wrap;align-items:center;padding:15px}.callback-url-container{flex-direction:row;flex-grow:1;margin-bottom:0;margin-right:15px;align-items:center}.callback-url-container input{width:auto}.callback-url-container label{margin-bottom:0;margin-right:5px}.sidebar-controls{flex-direction:row}#targetFrameContainer,#payloadLogContainer{min-height:400px}}
     @media screen and (max-width:600px){.control-sidebar{flex-direction:column;align-items:stretch}.callback-url-container{flex-direction:column;align-items:stretch;margin-right:0;margin-bottom:10px}.sidebar-controls{flex-direction:column;align-items:stretch}.fuzzer-title{font-size:18px}.fuzzer-badge{font-size:12px;padding:2px 6px;margin-left:8px}.header{padding:8px 15px}}
   </style>
@@ -94,6 +107,10 @@
 <script>
   let currentFuzzerInstance = null;
   let isFuzzingRunning = false;
+  let lastSentPayloadIndex = -1;
+  let fuzzerPayloads = [];
+  // Removed mutationCount, successCount, devtoolsPort
+
   function updateStatus(message, isError = false) {
     const statusElement = document.getElementById('fuzzerStatus');
     if (statusElement) {
@@ -105,11 +122,20 @@
     else { console.log(`[Test Env Status] ${message}`); }
   }
 
-  function logMessage(data, type) {
+  function escapeHTML(str) {
+    if (str === undefined || str === null) return '';
+    return String(str).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
+  }
+
+  function logMessage(data, type, index = -1) {
     const logElement = document.getElementById('payloadLog');
     if (!logElement) return;
     const entry = document.createElement('div');
+    // Remove special handling for 'mutation' or 'success' types here for now
     entry.className = `payload-entry ${type}`;
+    if (type === 'sent' && index !== -1) {
+      entry.setAttribute('data-payload-log-index', index);
+    }
     const info = document.createElement('div');
     info.className = 'payload-info';
     const typeSpan = document.createElement('span');
@@ -122,9 +148,16 @@
     content.className = 'payload-data';
     try {
       let displayData;
-      if (typeof data === 'object' && data !== null) { displayData = JSON.stringify(data, null, 2); }
-      else if (typeof data === 'string') { try { const parsed = JSON.parse(data); displayData = JSON.stringify(parsed, null, 2); } catch (e) { displayData = data; } }
-      else { displayData = String(data); }
+      if (typeof data === 'object' && data !== null) {
+        displayData = JSON.stringify(data, null, 2);
+      } else if (typeof data === 'string') {
+        try {
+          const parsed = JSON.parse(data);
+          displayData = JSON.stringify(parsed, null, 2);
+        } catch (e) { displayData = data; }
+      } else {
+        displayData = String(data);
+      }
       content.textContent = displayData;
     } catch (e) { content.textContent = `[Unable to display data: ${e.message}]`; console.warn("Error displaying message data:", data, e); }
     entry.appendChild(info); entry.appendChild(content);
@@ -134,8 +167,7 @@
       if (isScrolledToBottom) {
         logElement.scrollTo({ top: logElement.scrollHeight, behavior: 'smooth' });
       }
-    }
-    else { console.warn("Log element detached, cannot append message:", data); }
+    } else { console.warn("Log element detached, cannot append message:", data); }
   }
 
   function setButtonState(isRunning, disableAll = false) {
@@ -143,23 +175,31 @@
     const stopBtn = document.getElementById('stopFuzzing');
     const createPocBtn = document.getElementById('createPocButton');
     const clearLogBtn = document.getElementById('clearLog');
-
-    if (startBtn) startBtn.disabled = isRunning || disableAll;
+    if (startBtn) startBtn.disabled = isRunning || disableAll || fuzzerPayloads.length === 0;
     if (stopBtn) stopBtn.disabled = !isRunning || disableAll;
-    if (createPocBtn) createPocBtn.disabled = isRunning || disableAll;
+    if (createPocBtn) createPocBtn.disabled = isRunning || disableAll || fuzzerPayloads.length === 0;
     if (clearLogBtn) clearLogBtn.disabled = disableAll;
   }
+
+  // applyHighlight function removed
 
   function startFuzzing() {
     if (isFuzzingRunning) { updateStatus("Fuzzing already running."); return; }
     if (!currentFuzzerInstance) { updateStatus("Error: Fuzzer not initialized.", true); return; }
+    if(!fuzzerPayloads || fuzzerPayloads.length === 0) { updateStatus("Error: No payloads loaded/generated to execute.", true); return; }
+
+    // Remove badge reset logic
     updateStatus("Starting fuzzer execution...");
     setButtonState(true);
+    lastSentPayloadIndex = -1;
     try {
       currentFuzzerInstance.start(() => {
-        updateStatus("Fuzzing completed.");
+        // Completion callback
+        updateStatus("Fuzzing completed/stopped.");
         isFuzzingRunning = false;
         setButtonState(false);
+        // Remove post-run query logic
+        console.log("[Fuzzer UI] Fuzzing finished.");
       });
       isFuzzingRunning = true;
     } catch(startError) {
@@ -174,53 +214,57 @@
     if (!isFuzzingRunning) { updateStatus("Fuzzing is not running."); return; }
     if (currentFuzzerInstance && typeof currentFuzzerInstance.stop === 'function') {
       currentFuzzerInstance.stop();
-      updateStatus("Fuzzing stopped by user.");
-      isFuzzingRunning = false;
-      setButtonState(false);
+      // Status/button updates are now handled in the completion callback passed to start()
     } else {
       updateStatus("Error: Cannot stop fuzzer instance.", true);
+      // Manually update state if stop fails for some reason
+      isFuzzingRunning = false;
+      setButtonState(false);
+      lastSentPayloadIndex = -1;
     }
   }
 
   function clearLog() {
     const logElement = document.getElementById('payloadLog');
     if(logElement) { logElement.innerHTML = ''; }
+    // Remove badge reset logic
     updateStatus("Log cleared.");
   }
 
   window.addEventListener('DOMContentLoaded', async () => {
+    // Removed chrome.runtime.connect and related listeners
+
     try {
       updateStatus("Initializing fuzzer environment...");
-
       const response = await fetch('/current-config');
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`Error fetching config: ${response.status} - ${errorText || 'Server error'}`);
-      }
+      if (!response.ok) { const errorText = await response.text(); throw new Error(`Error fetching config: ${response.status} - ${errorText || 'Server error'}`); }
       const config = await response.json();
-      if (!config || !config.target || !config.payloads) {
-        throw new Error("Invalid or missing configuration from server (target/payloads).");
-      }
+      if (!config || !config.target) { throw new Error("Invalid or missing configuration from server (target missing)."); }
       window.fuzzerConfig = config;
-
-      updateStatus(`Loaded configuration for target: ${config.target}`);
-
+      fuzzerPayloads = config.payloads || [];
+      updateStatus(`Loaded configuration for target: ${config.target}. Payloads: ${fuzzerPayloads.length}`);
       const iframe = document.createElement('iframe');
       iframe.id = 'targetFrame';
       iframe.src = config.target;
       iframe.sandbox = "allow-scripts allow-modals allow-same-origin allow-popups allow-forms allow-top-navigation";
-
       const container = document.getElementById('targetFrameContainer');
       if (!container) throw new Error("Missing targetFrameContainer element");
-      while (container.firstChild && container.firstChild.nodeName !== 'H3') {
-        container.removeChild(container.firstChild);
-      }
+      while (container.firstChild && container.firstChild.nodeName !== 'H3') { container.removeChild(container.firstChild); }
       container.appendChild(iframe);
-      window.sendToFrame = function(message) {
+
+      window.sendToFrame = function(message, index) {
         const targetIframe = document.getElementById('targetFrame');
         if (targetIframe && targetIframe.contentWindow) {
-          logMessage(message, 'sent');
-          targetIframe.contentWindow.postMessage(message, '*');
+          try {
+            targetIframe.contentWindow.postMessage({ type: '__FROGPOST_SET_INDEX__', index: index }, '*');
+            logMessage(message, 'sent', index);
+            lastSentPayloadIndex = index;
+            targetIframe.contentWindow.postMessage(message, '*');
+          } catch(e) {
+            console.error(`[Fuzzer UI] Error sending postMessage for index ${index}:`, e);
+            updateStatus(`Error sending message to iframe (payload ${index + 1}). Target closed?`, true);
+            stopFuzzing();
+          }
         } else {
           console.warn("Target frame not available to send message:", message);
           updateStatus("Error: Target frame lost connection.", true);
@@ -230,47 +274,71 @@
 
       iframe.onload = () => {
         updateStatus(`Target iframe loaded. Initializing fuzzer class...`);
-
         if (typeof window.SinkAwarePostMessageFuzzer === 'undefined' || typeof window.SinkAwarePostMessageFuzzer.initialize !== 'function' || typeof generatePocHtml === 'undefined' || typeof openPocWindow === 'undefined') {
           updateStatus("Error: Fuzzer class or POC functions not found. Check script loading.", true);
-          console.error("Missing Fuzzer classes/functions. Ensure fuzzer.js is loaded correctly.", { SinkAwarePostMessageFuzzer: typeof window.SinkAwarePostMessageFuzzer, generatePocHtml: typeof generatePocHtml });
-          setButtonState(false, true);
-          return;
+          setButtonState(false, true); return;
         }
-
         try {
           currentFuzzerInstance = window.SinkAwarePostMessageFuzzer.initialize(config);
           if (!currentFuzzerInstance) { throw new Error("Fuzzer initialization returned null."); }
+          currentFuzzerInstance.executeFuzzing = function(payloadsToExecute) {
+            if (!payloadsToExecute || payloadsToExecute.length === 0) { this.isExecutingPayloads = false; if (typeof this._onCompleteCallback === 'function') this._onCompleteCallback(); return; }
+            if (this.isExecutingPayloads) return;
+            this.isExecutingPayloads = true; const sentPayloads = new Set(); let msgIdx = 0;
+            if (this.payloadIntervalId) clearInterval(this.payloadIntervalId);
+            this.payloadIntervalId = setInterval(() => {
+              if (!this.isExecutingPayloads || msgIdx >= payloadsToExecute.length) {
+                if(typeof updateStatus === 'function' && this.isExecutingPayloads && msgIdx >= payloadsToExecute.length) { updateStatus(`Finished. Sent ${msgIdx} payloads.`); }
+                this.stop();
+                return;
+              }
+              const progress = Math.round(((msgIdx + 1) / payloadsToExecute.length) * 100); if(typeof updateStatus === 'function') updateStatus(`Executing payload ${msgIdx + 1}/${payloadsToExecute.length} (${progress}%)`);
+              const fuzzerPayload = payloadsToExecute[msgIdx];
+              try {
+                const pId = typeof fuzzerPayload?.payload === 'string' ? `${fuzzerPayload.type || '?'}-${fuzzerPayload.payload.substring(0, 30)}` : `${fuzzerPayload?.type || '?'}-${msgIdx}`;
+                if (!sentPayloads.has(pId)) {
+                  sentPayloads.add(pId);
+                  let payloadToSend; const rawTypes = ['ast-raw', 'raw_string_replace', 'raw_string_inject', 'additional_raw', 'callback_url_raw', 'callback_url_combined', 'origin_fuzzing_raw', 'xss-raw-fallback', 'callback-raw-fallback', 'custom-raw-fallback', 'raw-type-replace', 'raw-type-append', 'raw-type-prepend'];
+                  if (fuzzerPayload?.isRawString || rawTypes.includes(fuzzerPayload?.type)) payloadToSend = fuzzerPayload.payload;
+                  else if (fuzzerPayload?.payload !== undefined) payloadToSend = fuzzerPayload.payload;
+                  else payloadToSend = fuzzerPayload;
+                  if (payloadToSend !== undefined && payloadToSend !== null) {
+                    const processed = this.replaceJwtTokens(payloadToSend);
+                    if (typeof window.sendToFrame === 'function') {
+                      window.sendToFrame(processed, msgIdx);
+                    }
+                  }
+                }
+              } catch (error) { console.error(`[Fuzzer] Error processing payload index ${msgIdx}:`, error); }
+              msgIdx++;
+            }, 100);
+          };
+          currentFuzzerInstance.stop = function() {
+            if (this.payloadIntervalId) { clearInterval(this.payloadIntervalId); this.payloadIntervalId = null; }
+            const wasRunning = this.isExecutingPayloads;
+            this.isExecutingPayloads = false;
+            if (typeof this._onCompleteCallback === 'function') { try { this._onCompleteCallback(wasRunning); } catch(e) { console.error("Error in fuzzer completion callback:", e); } }
+          };
 
           updateStatus("Fuzzer initialized. Ready.");
-          setButtonState(false);
+          setButtonState(false, fuzzerPayloads.length === 0);
+          if (fuzzerPayloads.length === 0) { updateStatus("Warning: No payloads loaded from trace report. Fuzzing disabled.", true); }
           document.getElementById('startFuzzingButton').addEventListener('click', startFuzzing);
           document.getElementById('stopFuzzing').addEventListener('click', stopFuzzing);
           document.getElementById('clearLog').addEventListener('click', clearLog);
           const createPocButton = document.getElementById('createPocButton');
           if (createPocButton) {
             createPocButton.addEventListener('click', () => {
-              if (window.fuzzerConfig && window.fuzzerConfig.target && window.fuzzerConfig.payloads) {
-                console.log('[Test Environment] Generating POC HTML...');
-                const pocHtml = generatePocHtml(window.fuzzerConfig.target, window.fuzzerConfig.payloads);
-                console.log('[Test Environment] Opening POC window...');
-                openPocWindow(pocHtml);
-              } else {
-                alert('Fuzzer configuration not fully loaded yet or missing data. Cannot create POC.');
-                console.error('Cannot create POC, fuzzerConfig:', window.fuzzerConfig);
-              }
+              if (window.fuzzerConfig && window.fuzzerConfig.target && fuzzerPayloads) { console.log('[Test Environment] Generating POC HTML...'); const pocHtml = generatePocHtml(window.fuzzerConfig.target, fuzzerPayloads); console.log('[Test Environment] Opening POC window...'); openPocWindow(pocHtml); }
+              else { alert('Fuzzer configuration or payloads not loaded. Cannot create POC.'); console.error('Cannot create POC, fuzzerConfig:', window.fuzzerConfig, 'Payloads:', fuzzerPayloads); }
             });
-          } else {
-            console.warn('Create POC button element not found!');
-          }
-
+          } else { console.warn('Create POC button element not found!'); }
         } catch(initError) {
           updateStatus(`Fuzzer initialization error: ${initError.message}`, true);
           console.error("Fuzzer init error:", initError);
           setButtonState(false, true);
         }
       };
-
       iframe.onerror = (error) => {
         updateStatus(`Error: Target iframe failed to load (${config.target}). Check network/console.`, true);
         console.error("Iframe load error:", error);
@@ -279,7 +347,9 @@
       window.addEventListener('message', event => {
         const targetIframe = document.getElementById('targetFrame');
         if (targetIframe && event.source === targetIframe.contentWindow) {
-          logMessage(event.data, 'received');
+          if(event.data?.type !== 'FROGPOST_MUTATION' && event.data?.type !== 'FROGPOST_CONSOLE_SUCCESS' && event.data?.type !== '__FROGPOST_SET_INDEX__') {
+            logMessage(event.data, 'received');
+          }
         }
       });
       window.addEventListener('message', event => {
@@ -287,11 +357,10 @@
           console.log("[Fuzzer Env] Received autoStart signal, ignoring. User must click 'Start Fuzzing'.");
           if (!isFuzzingRunning) {
             const startBtn = document.getElementById('startFuzzingButton');
-            if (startBtn) startBtn.disabled = false;
+            if (startBtn && fuzzerPayloads.length > 0) startBtn.disabled = false;
           }
         }
       });
-
     } catch (error) {
       updateStatus(`Fatal Error in Fuzzer Environment: ${error.message}`, true);
       console.error('Fatal Error in Fuzzer Environment:', error);

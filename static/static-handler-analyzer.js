@@ -1,7 +1,7 @@
 /**
  * FrogPost Extension
  * Originally Created by thisis0xczar/Lidor JFrog AppSec Team
- * Refined on: 2025-04-15 - Simplified Acorn wrapper
+ * Refined on: 2025-04-15
  */
 (function(global) {
     if (typeof global.acorn === 'undefined' || typeof global.acorn.parse !== 'function' || typeof global.acorn?.walk?.simple !== 'function' || typeof global.acorn?.walk?.ancestor !== 'function') {

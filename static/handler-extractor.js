@@ -1,9 +1,8 @@
 /**
  * FrogPost Extension
  * Originally Created by thisis0xczar/Lidor JFrog AppSec Team
- * Refined on: 2025-04-15 - Implemented AST-based Handler Extraction
+ * Refined on: 2025-04-15
  */
-
 if (typeof acorn === 'undefined' || typeof acorn.parse !== 'function' || typeof acorn.walk?.ancestor !== 'function') {
     console.error("Acorn library not available to HandlerExtractor. Extraction will be limited.");
 }
@@ -51,7 +50,7 @@ class HandlerExtractor {
             console.error('[HandlerExtractor] Error initializing with endpoint:', error);
         }
         this.handlers = [];
-        console.log(`[HandlerExtractor] Initialized for ${this.baseEndpoint}. Using ${this.messages.length} provided messages.`);
+        log.debug(`[HandlerExtractor] Initialized for ${this.baseEndpoint}. Using ${this.messages.length} provided messages.`);
         return this;
     }
 

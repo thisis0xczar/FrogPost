@@ -18,6 +18,7 @@
   "host_permissions": [
     "<all_urls>"
   ],
+  "options_page": "options/options.html",
   "background": {
     "service_worker": "background.js",
     "type": "module"
@@ -25,10 +26,13 @@
   "content_scripts": [
     {
       "matches": ["<all_urls>"],
-      "js": ["content_forwarder.js"],
+      "js": [
+        "content_forwarder.js",
+        "content_monitor.js"
+      ],
       "run_at": "document_start",
       "all_frames": true,
-      "match_origin_as_fallback": true
+      "match_about_blank": true
     }
   ],
   "web_accessible_resources": [
