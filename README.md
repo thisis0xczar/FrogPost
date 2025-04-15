@@ -23,21 +23,21 @@ Use FrogPost **ethically and legally** — only test applications you own or hav
 
 ## 🚀 Key Features
 
-- Live monitor of cross-origin `postMessage` traffic  
-- Automatic detection and analysis of message handlers  
-- Static and runtime analysis for DOM-based vulnerabilities  
-- Identification of missing origin checks and unsafe sinks  
-- Targeted fuzzing of insecure handlers  
-- Detailed security reports with payload suggestions  
+- Live monitor of cross-origin `postMessage` traffic
+- Automatic detection and analysis of message handlers
+- Static and runtime analysis for DOM-based vulnerabilities
+- Identification of missing origin checks and unsafe sinks
+- Targeted fuzzing of insecure handlers
+- Detailed security reports with payload suggestions
 
 ---
 
 ## 📌 Usage Highlights
 
-1. **Observe**: Load any site with iframes. FrogPost captures `postMessage` exchanges.  
-2. **Analyze**: Click ▶ to begin handler analysis. Static fallback analysis is applied if runtime fails.  
-3. **Trace**: Use ✨ to trace data flows, detect DOM sinks, and generate security payloads.  
-4. **Fuzz**: Launch 🚀 to test vulnerable endpoints using crafted fuzzing payloads.  
+1. **Observe**: Load any site with iframes. FrogPost captures `postMessage` exchanges.
+2. **Analyze**: Click ▶ to begin handler analysis. Static fallback analysis is applied if runtime fails.
+3. **Trace**: Use ✨ to trace data flows, detect DOM sinks, and generate security payloads.
+4. **Fuzz**: Launch 🚀 to test vulnerable endpoints using crafted fuzzing payloads.
 
 ---
 
@@ -45,31 +45,31 @@ Use FrogPost **ethically and legally** — only test applications you own or hav
 
 ### 🎯 Per-Iframe Controls
 
-- **▶ Play** – Start handler detection and capture  
-- **✨ Trace** – Static sink and flow analysis  
-- **📋 Report** – Show results & recommendations  
-- **🚀 Launch** – Begin fuzzing vulnerable handlers  
+- **▶ Play** – Start handler detection and capture
+- **✨ Trace** – Static sink and flow analysis
+- **📋 Report** – Show results & recommendations
+- **🚀 Launch** – Begin fuzzing vulnerable handlers
 
 ### 🛠️ General Controls
 
-- **Check All** – Analyze all endpoints  
-- **Clear Messages** – Reset state and logs  
-- **Export** – Download captured messages  
-- **Refresh** – Manually update messages  
-- **Debug Toggle** – Verbose logging in console  
+- **Check All** – Analyze all endpoints
+- **Clear Messages** – Reset state and logs
+- **Export** – Download captured messages
+- **Refresh** – Manually update messages
+- **Debug Toggle** – Verbose logging in console
 
 ### 💬 Message Controls
 
-- **→ Send to Origin** – Replay to sender  
-- **→ Send to Destination** – Replay to receiver  
+- **→ Send to Origin** – Replay to sender
+- **→ Send to Destination** – Replay to receiver
 
 ---
 
 ## 📊 Panels
 
-- **Hosts Panel** – Shows the main page and iframe connections  
-- **Messages Panel** – Intercepted `postMessage` traffic  
-- **Security Report** – DOM XSS and origin check findings  
+- **Hosts Panel** – Shows the main page and iframe connections
+- **Messages Panel** – Intercepted `postMessage` traffic
+- **Security Report** – DOM XSS and origin check findings
 
 ---
 
@@ -173,20 +173,20 @@ Use FrogPost **ethically and legally** — only test applications you own or hav
 
 ## 🧪 Troubleshooting
 
-- **Could not connect to fuzzer server**: Recheck file paths  
-- **Permission issues**: Run `chmod 755` on all scripts  
-- **Node not found**: Ensure it's installed and available in your `$PATH`  
-- **Extension not loading**: Use Chrome dev tools or reload  
+- **Could not connect to fuzzer server**: Recheck file paths
+- **Permission issues**: Run `chmod 755` on all scripts
+- **Node not found**: Ensure it's installed and available in your `$PATH`
+- **Extension not loading**: Use Chrome dev tools or reload
 
 ---
 
 ## 📅 Roadmap (TODO)
 
-- [x] Passive Listener Detection  
-- [x] Callback Integration Fix  
-- [x] XSS Payload Library  
-- [x] POC Builder  
-- [ ] AST Parsing for Generic Listeners  
+- [x] Passive Listener Detection
+- [x] Callback Integration Fix
+- [x] XSS Payload Library
+- [x] POC Builder
+- [ ] AST Parsing for Generic Listeners
 
 ---
 
@@ -196,10 +196,10 @@ FrogPost is licensed under the MIT License. See [LICENSE](LICENSE).
 
 **Third-party libraries used:**
 
-- **Acorn** (MIT License)  
-- **acorn-walk** (MIT License)  
+- **Acorn** (MIT License)
+- **acorn-walk** (MIT License)
 
-> © Marijn Haverbeke and contributors  
+> © Marijn Haverbeke and contributors
 
 See [`third_party_licenses.md`](third_party_licenses.md) for full license texts.
 
