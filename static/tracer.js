@@ -1,7 +1,7 @@
 /**
  * FrogPost Extension
  * Originally Created by thisis0xczar/Lidor JFrog AppSec Team
- * Refined on: 2025-04-15
+ * Refined on: 2025-04-17
  */
 if (typeof window.analyzeHandlerStatically === 'undefined') {
     console.error("Static Handler Analyzer not loaded. Payload generation will be limited.");
@@ -470,7 +470,6 @@ class HandlerTracer {
         window.log.debug(`[PayloadGen] Loaded payload lists. Custom Active: ${customPayloadsActive}. XSS/Encoding Count: ${combinedXss.length}. Callback Count: ${processedCallbackPayloads.length}. Type Count: ${typeFuzzPayloads.length}.`);
         return { sinkCategoryToPayloadMap, customPayloadsActive, allCallbackPayloads: processedCallbackPayloads, typeFuzzPayloads };
     }
-
 
     async generateContextAwarePayloads(context) {
         const {
@@ -1016,8 +1015,7 @@ async function handleTraceButton(endpoint, traceButton) {
         }, 3000);
         sessionStorage.removeItem(traceInProgressKey);
         window.log.handler(`[Trace] Finished attempt for endpoint key: ${endpointKey}`);
-        // *** MODIFIED LINE ***
-        setTimeout(window.requestUiUpdate, 100); // Use the globally exposed debounced update
+        setTimeout(window.requestUiUpdate, 100);
     }
 }
 window.handleTraceButton = handleTraceButton;

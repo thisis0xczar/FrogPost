@@ -1,8 +1,17 @@
 /**
  * FrogPost Extension
  * Originally Created by thisis0xczar/Lidor JFrog AppSec Team
- * Refined on: 2025-04-15
+ * Refined on: 2025-04-17
  */
+const log = {
+    debug: (...args) => console.debug("BG:", ...args),
+    info: (...args) => console.info("BG:", ...args),
+    warn: (...args) => console.warn("BG:", ...args),
+    error: (...args) => console.error("BG:", ...args),
+    handler: (...args) => console.log("BG HANDLER:", ...args), // Example if needed
+    scan: (...args) => console.log("BG SCAN:", ...args),      // Example if needed
+};
+
 let frameConnections = new Map();
 let messageBuffer;
 const injectedFramesAgents = new Map();
@@ -26,15 +35,15 @@ function normalizeEndpointUrl(url) { try { if (!url || typeof url !== 'string' |
 function getBaseUrl(url) { try { const norm = normalizeEndpointUrl(url); return norm?.components ? norm.components.origin + norm.components.path : null; } catch (e) { return null; } }
 function addFrameConnection(origin, destinationUrl) { let addedNew = false; try { const normalizedOrigin = normalizeEndpointUrl(origin)?.normalized; const normalizedDestination = normalizeEndpointUrl(destinationUrl)?.normalized; if (!normalizedOrigin || !normalizedDestination || normalizedOrigin === 'null' || normalizedDestination === 'null' || normalizedOrigin === 'access-denied-or-invalid' || normalizedDestination === 'access-denied-or-invalid' || normalizedOrigin === normalizedDestination ) { return false; } if (!frameConnections.has(normalizedOrigin)) { frameConnections.set(normalizedOrigin, new Set()); addedNew = true; } const destSet = frameConnections.get(normalizedOrigin); if (!destSet.has(normalizedDestination)) { destSet.add(normalizedDestination); addedNew = true; } } catch (e) {} return addedNew; }
 async function isDashboardOpen() { try { const dashboardUrl = chrome.runtime.getURL("dashboard/dashboard.html"); const tabs = await chrome.tabs.query({ url: dashboardUrl }); return tabs.length > 0; } catch (e) { return false; } }
-async function notifyDashboard(type, payload) { if (!(await isDashboardOpen())) return; try { let serializablePayload; try { JSON.stringify(payload); serializablePayload = payload; } catch (e) { if (payload instanceof Map) serializablePayload = Object.fromEntries(payload); else if (payload instanceof Set) serializablePayload = Array.from(payload); else serializablePayload = { error: "Payload not serializable", type: payload?.constructor?.name }; } if (chrome?.runtime?.id) { await chrome.runtime.sendMessage({ type: type, payload: serializablePayload }); } } catch (error) { if (!error.message?.includes("Receiving end does not exist") && !error.message?.includes("Could not establish connection")) { console.warn(`[notifyDashboard] Error sending message type ${type}:`, error.message); } } }
+async function notifyDashboard(type, payload) { if (!(await isDashboardOpen())) return; try { let serializablePayload; try { JSON.stringify(payload); serializablePayload = payload; } catch (e) { if (payload instanceof Map) serializablePayload = Object.fromEntries(payload); else if (payload instanceof Set) serializablePayload = Array.from(payload); else serializablePayload = { error: "Payload not serializable", type: payload?.constructor?.name }; } if (chrome?.runtime?.id) { await chrome.runtime.sendMessage({ type: type, payload: serializablePayload }); } } catch (error) { if (!error.message?.includes("Receiving end does not exist") && !error.message?.includes("Could not establish connection")) { log.warn(`[notifyDashboard] Error sending message type ${type}:`, error.message); } } }
 function agentFunctionToInject() { const AGENT_VERSION = 'v10_postMsg_inline'; const agentFlag = `__frogPostAgentInjected_${AGENT_VERSION}`; if (window[agentFlag]) return { success: true, alreadyInjected: true, message: `Agent ${AGENT_VERSION} already present.` }; window[agentFlag] = true; console.log(`[FrogPost Agent ${AGENT_VERSION}] EXECUTE in:`, window.location.href); let errors = []; const MAX_LISTENER_CODE_LENGTH = 15000; const originalWindowAddEventListener = window.addEventListener; const capturedListenerSources = new Set(); const safeToString = (func) => { try { return func.toString(); } catch (e) { return `[Error converting function: ${e?.message}]`; } }; const sendListenerToForwarder = (listenerCode, contextInfo, destinationUrl) => { try { const codeStr = typeof listenerCode === 'string' ? listenerCode : safeToString(listenerCode); if (!codeStr || codeStr.includes('[native code]') || codeStr.length < 25) { return; } const fingerprint = codeStr.replace(/\s+/g, '').substring(0, 250); if (capturedListenerSources.has(fingerprint)) { return; } capturedListenerSources.add(fingerprint); let stack = ''; try { throw new Error('CaptureStack'); } catch (e) { stack = e.stack || ''; } const payload = { listenerCode: codeStr.substring(0, MAX_LISTENER_CODE_LENGTH), stackTrace: stack, destinationUrl: destinationUrl || window.location.href, context: contextInfo }; window.postMessage({ type: 'frogPostAgent->ForwardToBackground', payload: payload }, window.location.origin || '*'); } catch (e) { errors.push(`sendListener Error (${contextInfo}): ${e.message}`); } }; try { window.addEventListener = function (type, listener, options) { if (type === 'message' && typeof listener === 'function') { sendListenerToForwarder(listener, 'window.addEventListener', window.location.href); } return originalWindowAddEventListener.apply(this, arguments); }; } catch (e) { errors.push(`addEventListener hook failed: ${e.message}`); window.addEventListener = originalWindowAddEventListener; } let _currentWindowOnmessage = window.onmessage; try { Object.defineProperty(window, 'onmessage', { set: function (listener) { _currentWindowOnmessage = listener; if (typeof listener === 'function') { sendListenerToForwarder(listener, 'window.onmessage_set', window.location.href); } }, get: function () { return _currentWindowOnmessage; }, configurable: true, enumerable: true }); if (typeof _currentWindowOnmessage === 'function') { sendListenerToForwarder(_currentWindowOnmessage, 'window.onmessage_initial', window.location.href); } } catch (e) { errors.push(`onmessage hook failed: ${e.message}`); } try { const originalPortAddEventListener = MessagePort.prototype.addEventListener; MessagePort.prototype.addEventListener = function (type, listener, options) { try { if (type === 'message' && typeof listener === 'function') { sendListenerToForwarder(listener, 'port.addEventListener', window.location.href); } } catch(e) { errors.push(`port.addEventListener inner: ${e.message}`); } return originalPortAddEventListener.apply(this, arguments); }; const portOnMessageDescriptor = Object.getOwnPropertyDescriptor(MessagePort.prototype, 'onmessage'); const originalPortSetter = portOnMessageDescriptor?.set; const originalPortGetter = portOnMessageDescriptor?.get; const portOnmessageTracker = new WeakMap(); Object.defineProperty(MessagePort.prototype, 'onmessage', { set: function(listener) { try { portOnmessageTracker.set(this, listener); if (typeof listener === 'function') { sendListenerToForwarder(listener, 'port.onmessage_set', window.location.href); } if (originalPortSetter) originalPortSetter.call(this, listener); } catch(e) { errors.push(`port.onmessage set inner: ${e.message}`); } }, get: function() { try { let value = portOnmessageTracker.get(this); if (value === undefined && originalPortGetter) value = originalPortGetter.call(this); return value; } catch(e) { errors.push(`port.onmessage get inner: ${e.message}`); return undefined; } }, configurable: true, enumerable: true }); } catch (e) { errors.push(`MessagePort hook failed: ${e.message}`); } return { success: errors.length === 0, alreadyInjected: false, errors: errors, logsAdded: true }; }
-async function loadHandlerEndpoints() { try { const result = await chrome.storage.session.get([HANDLER_ENDPOINT_KEYS_STORAGE_KEY]); if (result[HANDLER_ENDPOINT_KEYS_STORAGE_KEY]) { endpointsWithDetectedHandlers = new Set(result[HANDLER_ENDPOINT_KEYS_STORAGE_KEY]); } else { endpointsWithDetectedHandlers = new Set(); } } catch (e) { console.error('[BG] Error loading handler endpoints:', e); endpointsWithDetectedHandlers = new Set(); } }
-async function saveHandlerEndpoints() { try { await chrome.storage.session.set({ [HANDLER_ENDPOINT_KEYS_STORAGE_KEY]: Array.from(endpointsWithDetectedHandlers) }); } catch (e) { console.error('[BG] Error saving handler endpoints:', e); } }
-function disconnectNativeHost() { if (nativePort) { console.log("Background: Disconnecting from native host."); nativePort.disconnect(); nativePort = null; } }
+async function loadHandlerEndpoints() { try { const result = await chrome.storage.session.get([HANDLER_ENDPOINT_KEYS_STORAGE_KEY]); if (result[HANDLER_ENDPOINT_KEYS_STORAGE_KEY]) { endpointsWithDetectedHandlers = new Set(result[HANDLER_ENDPOINT_KEYS_STORAGE_KEY]); } else { endpointsWithDetectedHandlers = new Set(); } } catch (e) { log.error('Error loading handler endpoints:', e); endpointsWithDetectedHandlers = new Set(); } }
+async function saveHandlerEndpoints() { try { await chrome.storage.session.set({ [HANDLER_ENDPOINT_KEYS_STORAGE_KEY]: Array.from(endpointsWithDetectedHandlers) }); } catch (e) { log.error('Error saving handler endpoints:', e); } }
+function disconnectNativeHost() { if (nativePort) { log.info("Disconnecting from native host."); nativePort.disconnect(); nativePort = null; } }
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => { if (changeInfo.status === 'loading' && tabId) { injectedFramesAgents.delete(tabId); } });
 chrome.tabs.onRemoved.addListener(tabId => { injectedFramesAgents.delete(tabId); });
-chrome.webNavigation.onCommitted.addListener(async (details) => { if (!details.url || (!details.url.startsWith('http:') && !details.url.startsWith('https://')) || details.transitionType === 'server_redirect') { return; } const tabFrames = injectedFramesAgents.get(details.tabId); if (tabFrames?.has(details.frameId)) { return; } try { const results = await chrome.scripting.executeScript({ target: { tabId: details.tabId, frameIds: [details.frameId] }, func: agentFunctionToInject, injectImmediately: true, world: 'MAIN' }); let injectionStatus = { success: false, alreadyInjected: false, errors: ["No result from executeScript"] }; if (results?.[0]?.result) { injectionStatus = results[0].result; } else if (results?.[0]?.error) { injectionStatus.errors = [`executeScript framework error: ${results[0].error.message || results[0].error}`]; } if (injectionStatus.success || injectionStatus.alreadyInjected) { if (!injectedFramesAgents.has(details.tabId)) { injectedFramesAgents.set(details.tabId, new Set()); } injectedFramesAgents.get(details.tabId).add(details.frameId); } } catch (error) { if (!error.message?.includes("Cannot access") && !error.message?.includes("No frame with id") && !error.message?.includes("target frame detached") && !error.message?.includes("The frame was removed") && !error.message?.includes("Could not establish connection") && !error.message?.includes("No tab with id")) { console.warn(`[BG WebNav] executeScript error T:${details.tabId}/F:${details.frameId}:`, error.message); } const tf = injectedFramesAgents.get(details.tabId); if (tf) { tf.delete(details.frameId); } } }, { url: [{ schemes: ["http", "https"] }] });
+chrome.webNavigation.onCommitted.addListener(async (details) => { if (!details.url || (!details.url.startsWith('http:') && !details.url.startsWith('https://')) || details.transitionType === 'server_redirect') { return; } const tabFrames = injectedFramesAgents.get(details.tabId); if (tabFrames?.has(details.frameId)) { return; } try { const results = await chrome.scripting.executeScript({ target: { tabId: details.tabId, frameIds: [details.frameId] }, func: agentFunctionToInject, injectImmediately: true, world: 'MAIN' }); let injectionStatus = { success: false, alreadyInjected: false, errors: ["No result from executeScript"] }; if (results?.[0]?.result) { injectionStatus = results[0].result; } else if (results?.[0]?.error) { injectionStatus.errors = [`executeScript framework error: ${results[0].error.message || results[0].error}`]; } if (injectionStatus.success || injectionStatus.alreadyInjected) { if (!injectedFramesAgents.has(details.tabId)) { injectedFramesAgents.set(details.tabId, new Set()); } injectedFramesAgents.get(details.tabId).add(details.frameId); } } catch (error) { if (!error.message?.includes("Cannot access") && !error.message?.includes("No frame with id") && !error.message?.includes("target frame detached") && !error.message?.includes("The frame was removed") && !error.message?.includes("Could not establish connection") && !error.message?.includes("No tab with id")) { log.warn(`[WebNav] executeScript error T:${details.tabId}/F:${details.frameId}:`, error.message); } const tf = injectedFramesAgents.get(details.tabId); if (tf) { tf.delete(details.frameId); } } }, { url: [{ schemes: ["http", "https"] }] });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     let isAsync = false;
@@ -87,7 +96,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                                 if (needsHandlerUpdateNotification) { notifyDashboard("handlerCapturedForEndpoint", { endpointKey: storageIdentifier }); }
                             } catch (error) {
                                 response = { success: false, error: error.message };
-                                console.error(`[BG Save Err] Storage operation failed for ${storageKey}:`, error);
+                                log.error(`Storage operation failed for ${storageKey}:`, error);
                             } finally {
                                 if (responseFunction && !responseSent) { try { responseFunction(response); responseSent = true; } catch (e) {} }
                             }
@@ -115,15 +124,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                         if ((finalData.startsWith('{') && finalData.endsWith('}')) || (finalData.startsWith('[') && finalData.endsWith(']'))) {
                             try {
                                 const parsedData = JSON.parse(finalData);
-                                finalData = parsedData; // Use the parsed object/array
+                                finalData = parsedData;
                                 if (Array.isArray(finalData)) calculatedMessageType = "array";
                                 else if (typeof finalData === 'object' && finalData !== null && finalData.constructor === Object) calculatedMessageType = "object";
-                                else calculatedMessageType = "string"; // Parsed but wasn't plain object/array? Treat as string.
+                                else calculatedMessageType = "string";
                             } catch (e) {
-                                calculatedMessageType = "string"; // Failed to parse, remains a string
+                                calculatedMessageType = "string";
                             }
                         } else {
-                            calculatedMessageType = "string"; // Doesn't look like JSON
+                            calculatedMessageType = "string";
                         }
                     }
                     else calculatedMessageType = typeof finalData;
@@ -132,8 +141,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                     const messageData = {
                         origin: origin || sender.origin || sender.tab?.url || 'unknown',
                         destinationUrl: destUrlStr,
-                        data: finalData, // Use potentially parsed data
-                        messageType: calculatedMessageType, // Use the refined type
+                        data: finalData,
+                        messageType: calculatedMessageType,
                         timestamp: timestamp || new Date().toISOString(),
                         messageId: `${timestamp || Date.now()}-${Math.random().toString(16).slice(2)}`
                     };
@@ -147,7 +156,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             case "FROGPOST_MUTATION":
                 return false;
             case "FROGPOST_CONSOLE_SUCCESS":
-                console.log("%c[BACKGROUND] Console Marker Detected:", "color:lightgreen;font-weight:bold;", `(Payload Index Hint: ${payloadIndex ?? 'N/A'})`, detail);
+                log.info("[BACKGROUND] Console Marker Detected:", `(Payload Index Hint: ${payloadIndex ?? 'N/A'})`, detail);
                 if (payloadIndex !== undefined && payloadIndex !== -1) {
                     if (!consoleSuccessIndices.includes(payloadIndex)) {
                         consoleSuccessIndices.push(payloadIndex);
@@ -166,16 +175,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             case "resetState":
                 messageBuffer.clear(); frameConnections.clear(); injectedFramesAgents.clear(); endpointsWithDetectedHandlers.clear(); consoleSuccessIndices = [];
                 isAsync = true;
-                (async () => { let response = { success: true, message: "State reset" }; try { const allData = await chrome.storage.local.get(null); const keysToRemove = Object.keys(allData).filter(key => key.startsWith('runtime-listeners-') || key.startsWith('best-handler-') || key.startsWith('saved-messages-') || key.startsWith('trace-info-') || key.startsWith('analyzed-url-for-') || key.startsWith('analysis-storage-key-for-')); if (keysToRemove.length > 0) { await chrome.storage.local.remove(keysToRemove); } await chrome.storage.session.remove(HANDLER_ENDPOINT_KEYS_STORAGE_KEY); if (self.traceReportStorage && typeof self.traceReportStorage.clearAllReports === 'function') { await self.traceReportStorage.clearAllReports(); } } catch(storageError) { console.error("[BG Reset] Error clearing storage:", storageError); response = { success: false, message: "Error clearing storage", error: storageError.message }; } finally { if (responseFunction) { try { responseFunction(response); } catch(e) {} } } })();
+                (async () => { let response = { success: true, message: "State reset" }; try { const allData = await chrome.storage.local.get(null); const keysToRemove = Object.keys(allData).filter(key => key.startsWith('runtime-listeners-') || key.startsWith('best-handler-') || key.startsWith('saved-messages-') || key.startsWith('trace-info-') || key.startsWith('analyzed-url-for-') || key.startsWith('analysis-storage-key-for-')); if (keysToRemove.length > 0) { await chrome.storage.local.remove(keysToRemove); } await chrome.storage.session.remove(HANDLER_ENDPOINT_KEYS_STORAGE_KEY); if (self.traceReportStorage && typeof self.traceReportStorage.clearAllReports === 'function') { await self.traceReportStorage.clearAllReports(); } } catch(storageError) { log.error("Error clearing storage:", storageError); response = { success: false, message: "Error clearing storage", error: storageError.message }; } finally { if (responseFunction) { try { responseFunction(response); } catch(e) {} } } })();
                 notifyDashboard('stateReset', {});
                 return true;
             case 'startServer':
-                console.log(`Background: Received startServer from ${senderTabId || 'unknown sender'}`);
+                log.info(`Received startServer from ${senderTabId || 'unknown sender'}`);
                 isAsync = true;
                 chrome.runtime.sendNativeMessage( NATIVE_HOST_NAME, { action: 'startServer', data: JSON.stringify(message.data), options: { port: 1337, maxRetries: 3, timeout: 5000 } }, (response) => { if (chrome.runtime.lastError) { if (responseFunction) try { responseFunction({success: false, error: chrome.runtime.lastError.message}); } catch(e){} } else if (response?.success) { setTimeout(() => { if (responseFunction) try { responseFunction({success: true}); } catch(e){} }, 2000); } else { if (responseFunction) try { responseFunction({success: false, error: response?.error || "Failed to start server"}); } catch(e){} } } );
                 return true;
             case 'stopServer':
-                console.log(`Background: Received stopServer from ${senderTabId || 'unknown sender'}`);
+                log.info(`Received stopServer from ${senderTabId || 'unknown sender'}`);
                 isAsync = true;
                 chrome.runtime.sendNativeMessage(NATIVE_HOST_NAME, { action: 'stopServer' }, (response) => { if (responseFunction) { try { responseFunction({ success: !chrome.runtime.lastError && response?.success, error: chrome.runtime.lastError?.message || response?.error }); } catch(e){} } });
                 disconnectNativeHost();
@@ -186,7 +195,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 break;
         }
     } catch (error) {
-        console.error("[Background] Top-level error processing message:", error, message);
+        log.error("Top-level error processing message:", error, message);
         if (responseFunction) try { responseFunction({ success: false, error: "Handler error" }); } catch (e) {}
     }
     return isAsync;

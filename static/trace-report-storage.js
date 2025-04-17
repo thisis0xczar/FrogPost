@@ -1,7 +1,7 @@
 /**
  * FrogPost Extension
  * Originally Created by thisis0xczar/Lidor JFrog AppSec Team
- * Refined on: 2025-04-12
+ * Refined on: 2025-04-17
  */
 class TraceReportStorage {
     constructor() {
@@ -70,7 +70,7 @@ class TraceReportStorage {
                 const transaction = this.db.transaction(['payloads'], 'readwrite');
                 const store = transaction.objectStore('payloads');
                 const payloadData = { endpoint: endpoint, payloads: payloads };
-                const request = store.put(payloadData); // <<< The error occurs here
+                const request = store.put(payloadData);
                 request.onsuccess = () => resolve(true);
                 request.onerror = (event) => { console.error('Error saving payloads:', event.target.error); reject(false); };
             } catch (err) { console.error("Error creating save transaction for payloads:", err); reject(false); }

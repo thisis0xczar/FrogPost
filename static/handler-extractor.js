@@ -1,402 +1,421 @@
 /**
  * FrogPost Extension
  * Originally Created by thisis0xczar/Lidor JFrog AppSec Team
- * Refined on: 2025-04-15
+ * Refined on: 2025-04-17
  */
-if (typeof acorn === 'undefined' || typeof acorn.parse !== 'function' || typeof acorn.walk?.ancestor !== 'function') {
-    console.error("Acorn library not available to HandlerExtractor. Extraction will be limited.");
-}
-
 class HandlerExtractor {
     constructor() {
-        this.handlers = [];
-        this.messages = [];
         this.endpoint = null;
-        this.baseEndpoint = null;
-        this.scoreWeights = {
-            'event.data': 8, 'e.data': 8, 'message.data': 8, 'msg.data': 8,
-            '.data': 3,
-            'event.origin': 10, 'e.origin': 10, 'message.origin': 10,
-            'origin': 2,
-            'event.source': 6, 'e.source': 6, 'message.source': 6,
-            'postMessage(': 15,
-            'targetOrigin': 8,
-            'origin ===': 15, '.origin ===': 15,
-            'trustedOrigins': 12, 'allowedOrigins': 12, 'parentOrigin': 10, 'checkOrigin': 10, 'validateOrigin': 10,
-            'JSON.parse': 3, 'JSON.stringify': 2,
-            'typeof': 3, 'instanceof': 2,
-            'try': 1, 'catch': 1,
-            'switch': 5, 'case': 4,
-            'messageType': 10, 'data.type': 9, 'message.type': 9, 'event.data.type': 9,
-            'action': 9, 'data.action': 9, 'kind': 9, 'data.kind': 9,
-            'window.addEventListener("message"': 20,
-            'addEventListener("message"': 15,
-            'onmessage': 8,
-            'window.parent': 5,
-            'response': 2, 'callback': 2, 'resolve': 1, 'send': 1,
-            'WORKER_ID': -15, 'self.onmessage': -20, 'importScripts': -20,
-            'ajax': -5, 'fetch': -5, '$': -2, 'jQuery': -3,
-        };
+        this.messages = [];
+        this.messageKeys = new Set();
+        this.messageTypes = new Set();
+        this.functionDefinitions = new Map();
+        this.scriptContentCache = new Map();
+        this.fetchInProgress = new Map();
     }
 
+    /**
+     * Initializes the extractor with context.
+     * @param {string} endpoint - The URL of the target document.
+     * @param {Array<object>} [messages=[]] - Intercepted message objects.
+     * @returns {HandlerExtractor}
+     */
     initialize(endpoint, messages = []) {
         this.endpoint = endpoint;
-        this.messages = Array.isArray(messages) ? messages : [];
-        try {
-            if (typeof endpoint === 'string') {
-                this.baseEndpoint = this.getBaseUrl(endpoint);
-            }
-        } catch (error) {
-            console.error('[HandlerExtractor] Error initializing with endpoint:', error);
-        }
-        this.handlers = [];
-        log.debug(`[HandlerExtractor] Initialized for ${this.baseEndpoint}. Using ${this.messages.length} provided messages.`);
+        this.messages = messages || [];
+        this.messageKeys = this._extractKeysFromMessages(this.messages);
+        this.messageTypes = this._extractMessageTypes(this.messages);
+        this.functionDefinitions.clear();
+        log.debug(`[Extractor Init] Initialized for ${endpoint}. Message count: ${this.messages.length}, Keys: ${this.messageKeys.size}, Types: ${this.messageTypes.size}`);
         return this;
     }
 
-    getBaseUrl(url) {
-        try {
-            if (!url?.startsWith('http://') && !url?.startsWith('https://')) {
-                url = 'https://' + url;
+    _extractKeysFromMessages(messages) {
+        const keys = new Set();
+        (messages || []).forEach(msg => {
+            if (typeof msg.data === 'object' && msg.data !== null) {
+                Object.keys(msg.data).forEach(key => keys.add(key));
+                if (typeof msg.data.data === 'object' && msg.data.data !== null) {
+                    Object.keys(msg.data.data).forEach(key => keys.add(key));
+                }
             }
-            const urlObj = new URL(url);
-            urlObj.hash = '';
-            return urlObj.toString();
+        });
+        log.debug(`[Extractor Scoring Context] Extracted message keys:`, Array.from(keys));
+        return keys;
+    }
+
+    _extractMessageTypes(messages) {
+        const types = new Set();
+        (messages || []).forEach(msg => {
+            const kind = msg.data?.kind || msg.data?.messageType || msg.data?.type || msg.data?.action;
+            if (typeof kind === 'string') {
+                types.add(kind);
+            }
+        });
+        log.debug(`[Extractor Scoring Context] Extracted message types/kinds:`, Array.from(types));
+        return types;
+    }
+
+    async fetchScriptContent(url) {
+        if (this.scriptContentCache.has(url)) return this.scriptContentCache.get(url);
+        if (this.fetchInProgress.has(url)) return this.fetchInProgress.get(url);
+        log.debug(`[Extractor] Fetching script content for: ${url}`);
+        const promise = fetch(url)
+            .then(response => { if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`); return response.text(); })
+            .then(content => { this.scriptContentCache.set(url, content); this.fetchInProgress.delete(url); return content; })
+            .catch(error => { log.error(`[Extractor] Failed to fetch script ${url}:`, error); this.fetchInProgress.delete(url); this.scriptContentCache.set(url, null); return null; });
+        this.fetchInProgress.set(url, promise);
+        return promise;
+    }
+
+    /**
+     * Analyzes script content, attempts AST analysis, falls back to regex.
+     * @param {string} content - Script source code.
+     * @param {string} sourceIdentifier - Script URL or description.
+     * @returns {Array<object>} - Array of handler info objects { category, source, functionName, handlerNode, fullScriptContent, handler? }.
+     */
+    analyzeScriptContent(content, sourceIdentifier) {
+        const handlers = [];
+        if (!content || typeof content !== 'string' || content.length < 50) return handlers;
+        this.functionDefinitions.clear();
+        let ast;
+        try {
+            if (typeof acorn === 'undefined') throw new Error("Acorn not loaded");
+            log.debug(`[Extractor] Attempting AST parse for: ${sourceIdentifier}`);
+            ast = acorn.parse(content, { ecmaVersion: 'latest', silent: true, locations: true, sourceType: 'script' });
+            log.debug(`[Extractor] AST parsing SUCCESS for: ${sourceIdentifier}`);
+            this._mapFunctionDeclarations(ast);
+            this._mapPrototypeMethods(ast);
+            handlers.push(...this.analyzeAst(ast, content, sourceIdentifier));
         } catch (e) {
-            console.warn('[HandlerExtractor] Invalid URL:', url);
-            return url;
+            log.warn(`[Extractor] AST parsing FAILED for ${sourceIdentifier}: ${e.message}. Falling back to regex.`);
+            handlers.push(...this.analyzeWithRegex(content, sourceIdentifier));
         }
+        log.debug(`[Extractor] Found ${handlers.length} potential structures in ${sourceIdentifier} (before scoring).`);
+        return handlers;
     }
 
-    async findMatchingTabs() {
-        return new Promise((resolve) => {
-            chrome.tabs.query({}, (tabs) => {
-                if (!this.endpoint) { resolve([]); return; }
-                try {
-                    const endpointUrl = new URL(this.endpoint);
-                    const matchingTabs = tabs.filter(tab => { if (!tab.url) return false; try { return tab.url.includes(endpointUrl.hostname); } catch (e) { return false; } });
-                    resolve(matchingTabs);
-                } catch (error) { console.error('[HandlerExtractor] Error finding matching tabs:', error); resolve([]); }
+    /**
+     * Maps function declarations and variable assignments to functions.
+     * @param {object} ast - Acorn AST node.
+     */
+    _mapFunctionDeclarations(ast) {
+        if (!ast || typeof acorn === 'undefined' || typeof acorn.walk === 'undefined') return;
+        try {
+            acorn.walk.simple(ast, {
+                FunctionDeclaration: (node) => { if (node.id?.name) this.functionDefinitions.set(node.id.name, node); },
+                VariableDeclarator: (node) => { if (node.id?.name && (node.init?.type === 'FunctionExpression' || node.init?.type === 'ArrowFunctionExpression')) this.functionDefinitions.set(node.id.name, node.init); }
             });
-        });
+        } catch (e) { log.error("[Extractor] Error mapping function declarations:", e); }
     }
 
-    async extract() {
-        this.handlers = [];
-        const savedMessages = await this.getSavedMessages();
-        const allRelevantMessages = [...this.messages, ...savedMessages];
-        const strategies = [
-            { name: 'scripts', method: this.extractFromExternalScriptsAST.bind(this) },
-            { name: 'direct', method: this.extractDirectlyAST.bind(this) }, // Attempt AST on inline too
-            // { name: 'messages', method: this.extractFromMessages.bind(this) },
-        ];
-        const uniqueHandlerStrings = new Set();
-
-        for (const strategy of strategies) {
-            try {
-                const extractedHandlers = await strategy.method();
-                if (extractedHandlers && extractedHandlers.length > 0) {
-                    extractedHandlers.forEach(h => {
-                        if (h.handler && typeof h.handler === 'string' && !uniqueHandlerStrings.has(h.handler)) {
-                            if (typeof h.score !== 'number') {
-                                h.score = this.scoreHandler(h.handler, h.category, []);
-                            }
-                            if (h.score >= 0) { // Basic score check
-                                this.handlers.push(h);
-                                uniqueHandlerStrings.add(h.handler);
-                            }
-                        }
-                    });
-                }
-            } catch (error) {
-                console.error(`[HandlerExtractor] Error in ${strategy.name} extraction:`, error);
-            }
-        }
-
-        if (allRelevantMessages.length > 0 && this.handlers.length > 0) {
-            this.enhanceScores(allRelevantMessages);
-        }
-
-        const uniqueHandlers = this.deduplicateHandlers(); // Deduplicate again after scoring if needed
-
-        if (uniqueHandlers.length > 0) {
-            this.getBestHandler(uniqueHandlers);
-        } else {
-            console.log("[HandlerExtractor] No valid handlers found via AST or other methods.");
-            if (allRelevantMessages.length > 0) {
-                const syntheticHandler = this.generateSyntheticHandler(allRelevantMessages);
-                syntheticHandler.score = this.scoreHandler(syntheticHandler.handler, syntheticHandler.category, allRelevantMessages);
-                uniqueHandlers.push(syntheticHandler);
-                console.log("[HandlerExtractor] Generated synthetic handler as fallback.");
-            }
-        }
-
-        return uniqueHandlers;
-    }
-
-    async extractFromExternalScriptsAST() {
-        if (typeof acorn === 'undefined') return [];
-
-        let scriptContents = new Map();
+    /**
+     * Maps assignments to prototype methods (e.g., Class.prototype.method = function...).
+     * @param {object} ast - Acorn AST node.
+     */
+    _mapPrototypeMethods(ast) {
+        if (!ast || typeof acorn === 'undefined' || typeof acorn.walk === 'undefined') return;
         try {
-            const scriptUrls = new Set();
-            const processedUrls = new Set();
-            const urlObj = new URL(this.endpoint);
-            const tabs = await chrome.tabs.query({});
-            const matchingTabs = tabs.filter(tab => tab.url && tab.url.includes(urlObj.hostname));
-            let tabId;
-
-            if (matchingTabs.length > 0) { tabId = matchingTabs[0].id; }
-            else { return []; }
-
-            try { const perfResults = await chrome.scripting.executeScript({ target: { tabId }, func: () => performance.getEntriesByType("resource").filter(e => e.initiatorType === 'script' && e.name.endsWith('.js')).map(e => e.name) }); if (perfResults?.[0]?.result) perfResults[0].result.forEach(url => scriptUrls.add(url)); } catch (error) {}
-            try { const tagResults = await chrome.scripting.executeScript({ target: { tabId }, func: () => Array.from(document.querySelectorAll('script[src]')).map(s => s.src) }); if (tagResults?.[0]?.result) tagResults[0].result.forEach(url => scriptUrls.add(url)); } catch (error) {}
-
-
-            for (const url of Array.from(scriptUrls)) {
-                if (!url || !url.startsWith('http') || processedUrls.has(url)) continue;
-                processedUrls.add(url);
-                try {
-                    const response = await fetch(url, { credentials: 'omit', cache: 'force-cache' });
-                    if (!response.ok) continue;
-                    const content = await response.text();
-                    if (content && content.length > 10 && (content.includes('addEventListener') || content.includes('onmessage'))) { // Basic filter
-                        scriptContents.set(url, content);
+            acorn.walk.simple(ast, {
+                AssignmentExpression: (node) => {
+                    if (node.operator === '=' &&
+                        node.left.type === 'MemberExpression' &&                      // ...methodName
+                        node.left.object.type === 'MemberExpression' &&               // ...prototype
+                        node.left.object.property.name === 'prototype' &&
+                        node.left.object.object.type === 'Identifier' &&              // Class name
+                        (node.right.type === 'FunctionExpression' || node.right.type === 'ArrowFunctionExpression')) // = function...
+                    {
+                        const className = node.left.object.object.name;
+                        const methodName = node.left.property.name;
+                        const functionNode = node.right;
+                        const prototypeKey = `${className}.prototype.${methodName}`;
+                        this.functionDefinitions.set(prototypeKey, functionNode);
+                        log.debug(`[Extractor] Mapped prototype method: ${prototypeKey}`);
                     }
-                } catch (fetchError) { console.warn(`[HandlerExtractor] Failed to fetch script ${url}:`, fetchError); }
-            }
-        } catch (setupError) { console.error(`[HandlerExtractor] Error fetching script URLs:`, setupError); return []; }
-
-        const allFoundHandlers = [];
-        for (const [url, content] of scriptContents) {
-            try {
-                const handlersFromScript = this.extractHandlersFromAST(content, url);
-                allFoundHandlers.push(...handlersFromScript);
-            } catch (parseError) {
-                console.warn(`[HandlerExtractor] Failed to parse script ${url} with Acorn:`, parseError.message);
-            }
-        }
-        return allFoundHandlers;
-    }
-
-    async extractDirectlyAST() {
-        if (typeof acorn === 'undefined') return [];
-        let inlineHandlers = [];
-        try {
-            const matchingTabs = await this.findMatchingTabs();
-            if (matchingTabs.length === 0) return [];
-            const targetTab = matchingTabs[0];
-
-            const results = await chrome.scripting.executeScript({
-                target: { tabId: targetTab.id, allFrames: true },
-                func: () => {
-                    let scriptsContent = '';
-                    document.querySelectorAll('script:not([src])').forEach(script => {
-                        if(script.textContent) scriptsContent += script.textContent + ';\n'; // Add semicolon
-                    });
-                    let onMessageHandler = null;
-                    if(window.onmessage && typeof window.onmessage === 'function') {
-                        onMessageHandler = { handler: window.onmessage.toString(), category: 'onmessage-property', source: 'window.onmessage-direct' };
-                    }
-                    return { inlineScriptContent: scriptsContent, onMessageHandler: onMessageHandler };
                 }
             });
-
-            for (const frameResult of results) {
-                if (frameResult.result) {
-                    const { inlineScriptContent, onMessageHandler } = frameResult.result;
-                    if (onMessageHandler) {
-                        inlineHandlers.push(onMessageHandler);
-                    }
-                    if (inlineScriptContent) {
-                        try {
-                            const handlersFromInline = this.extractHandlersFromAST(inlineScriptContent, 'inline-script');
-                            inlineHandlers.push(...handlersFromInline);
-                        } catch (parseError) {
-                            console.warn(`[HandlerExtractor] Failed to parse inline script content:`, parseError.message);
-                        }
-                    }
-                }
-            }
-        } catch (error) { console.error(`[HandlerExtractor] Error in extractDirectlyAST:`, error); }
-        return inlineHandlers;
+        } catch (e) { log.error("[Extractor] Error mapping prototype methods:", e); }
     }
 
-    extractHandlersFromAST(scriptContent, sourceUrl) {
-        if (typeof acorn === 'undefined') return [];
+
+    /**
+     * Analyzes AST to find handlers, returns objects with AST nodes.
+     * @param {object} ast - Acorn AST node.
+     * @param {string} scriptContent - Full script source.
+     * @param {string} sourceUrl - Script identifier.
+     * @returns {Array<object>} - Array of handler info objects { category, source, functionName, handlerNode, fullScriptContent }.
+     */
+    analyzeAst(ast, scriptContent, sourceUrl) {
         const foundHandlers = [];
-        const ast = acorn.parse(scriptContent, {
-            ecmaVersion: 'latest',
-            locations: true, ranges: true, allowReturnOutsideFunction: true, allowAwaitOutsideFunction: true, allowHashBang: true,
-            tolerant: true // Use tolerant mode
-        });
-
-        const functionDeclarations = new Map();
-        const functionExpressions = new Map(); // For var x = function()...
-        acorn.walk.simple(ast, {
-            FunctionDeclaration(node) {
-                if (node.id?.name) {
-                    functionDeclarations.set(node.id.name, node);
-                }
-            },
-            VariableDeclarator(node) {
-                if (node.id?.name && node.init && (node.init.type === 'FunctionExpression' || node.init.type === 'ArrowFunctionExpression')) {
-                    functionExpressions.set(node.id.name, node.init);
-                }
-            },
-            AssignmentExpression(node) { // Handle assignments like handler = function() {}
-                if(node.left.type === 'Identifier' && (node.right.type === 'FunctionExpression' || node.right.type === 'ArrowFunctionExpression')) {
-                    functionExpressions.set(node.left.name, node.right);
-                } else if (node.left.type === 'MemberExpression' && node.left.property.type === 'Identifier' && (node.right.type === 'FunctionExpression' || node.right.type === 'ArrowFunctionExpression')) {
-                }
-            },
-            Property(node) {
-                if (node.key.type === 'Identifier' && (node.value.type === 'FunctionExpression' || node.value.type === 'ArrowFunctionExpression')) {
-                    functionExpressions.set(node.key.name, node.value);
-                }
-            }
-        });
-
-
-        acorn.walk.ancestor(ast, {
-            CallExpression: (node, ancestors) => {
-                let isAddEventListener = false;
-                if (node.callee.type === 'MemberExpression' && node.callee.property.type === 'Identifier' && node.callee.property.name === 'addEventListener') {
-                    isAddEventListener = true;
-                }
-                // Add checks for other potential listener registration functions if needed
-
-                if (isAddEventListener && node.arguments.length >= 2) {
-                    const eventNameNode = node.arguments[0];
-                    const handlerNode = node.arguments[1];
-
-                    if (eventNameNode.type === 'Literal' && eventNameNode.value === 'message') {
-                        let handlerCode = null;
-                        let category = 'unknown-ast';
-                        let resolvedFrom = null;
-
-                        if (handlerNode.type === 'FunctionExpression' || handlerNode.type === 'ArrowFunctionExpression') {
-                            handlerCode = scriptContent.substring(handlerNode.range[0], handlerNode.range[1]);
-                            category = handlerNode.type === 'ArrowFunctionExpression' ? 'ast-direct-arrow' : 'ast-direct-function';
-                        } else if (handlerNode.type === 'Identifier') {
-                            resolvedFrom = handlerNode.name;
-                            const funcDefNode = functionDeclarations.get(resolvedFrom) || functionExpressions.get(resolvedFrom);
-                            if (funcDefNode) {
-                                handlerCode = scriptContent.substring(funcDefNode.range[0], funcDefNode.range[1]);
-                                category = 'ast-reference';
-                            }
-                        } else if (handlerNode.type === 'CallExpression' && handlerNode.callee.type === 'MemberExpression' && handlerNode.callee.property.name === 'bind') {
-                            const boundFuncNode = handlerNode.callee.object;
-                            if (boundFuncNode.type === 'Identifier') {
-                                resolvedFrom = boundFuncNode.name;
-                                const funcDefNode = functionDeclarations.get(resolvedFrom) || functionExpressions.get(resolvedFrom);
-                                if (funcDefNode) {
-                                    handlerCode = scriptContent.substring(funcDefNode.range[0], funcDefNode.range[1]);
-                                    category = 'ast-bind-reference';
+        if (!ast || typeof acorn === 'undefined' || typeof acorn.walk === 'undefined') return foundHandlers;
+        try {
+            acorn.walk.simple(ast, {
+                AssignmentExpression: (node) => {
+                    if (node.operator === '=' && node.left.type === 'MemberExpression' && node.left.property.name === 'onmessage') {
+                        let funcNode = null; let category = 'ast-onmessage-assignment'; let functionName = null;
+                        if (node.right.type === 'FunctionExpression' || node.right.type === 'ArrowFunctionExpression') funcNode = node.right;
+                        else if (node.right.type === 'Identifier') { functionName = node.right.name; funcNode = this.functionDefinitions.get(functionName); if(funcNode) category += '-identifier'; }
+                        if (funcNode) {
+                            const codePreview = scriptContent.substring(funcNode.start, Math.min(funcNode.end, funcNode.start + 100));
+                            log.debug(`[Extractor AST Found] Category: ${category}, Source: ${sourceUrl}, FuncName: ${functionName || 'N/A'}, Preview: ${codePreview}...`);
+                            foundHandlers.push({ category, source: sourceUrl, functionName, handlerNode: funcNode, fullScriptContent: scriptContent });
+                        }
+                    }
+                },
+                CallExpression: (node) => {
+                    if (node.callee.type === 'MemberExpression' && node.callee.property.name === 'addEventListener' && node.arguments.length >= 2 && node.arguments[0].type === 'Literal' && node.arguments[0].value === 'message') {
+                        const handlerArg = node.arguments[1]; let funcNode = null; let category = 'ast-event-listener'; let functionName = null;
+                        if (handlerArg.type === 'FunctionExpression' || handlerArg.type === 'ArrowFunctionExpression') funcNode = handlerArg;
+                        else if (handlerArg.type === 'Identifier') { functionName = handlerArg.name; funcNode = this.functionDefinitions.get(functionName); if(funcNode) category += '-identifier'; }
+                        else if (handlerArg.type === 'MemberExpression') { // Handle instance.method or Class.prototype.method
+                            let lookupKey = null;
+                            if (handlerArg.object?.type === 'Identifier' && handlerArg.property?.name) {
+                                const methodKey = Array.from(this.functionDefinitions.keys()).find(key => key.endsWith(`.${handlerArg.property.name}`));
+                                if (methodKey) {
+                                    funcNode = this.functionDefinitions.get(methodKey);
+                                    functionName = handlerArg.property.name;
+                                    category += '-prototype-lookup';
+                                    log.debug(`[Extractor AST] Found prototype method ref for ${functionName} via heuristic.`);
                                 }
-                            } else if (boundFuncNode.type === 'FunctionExpression' || boundFuncNode.type === 'ArrowFunctionExpression') {
-                                handlerCode = scriptContent.substring(boundFuncNode.range[0], boundFuncNode.range[1]);
-                                category = 'ast-bind-inline';
                             }
                         }
+                        else if (handlerArg.type === 'CallExpression' && handlerArg.callee.type === 'MemberExpression' && handlerArg.callee.property.name === 'bind') {
+                            let boundFuncIdentifier = null;
+                            if (handlerArg.callee.object.type === 'Identifier') boundFuncIdentifier = handlerArg.callee.object.name;
+                            else if (handlerArg.callee.object.type === 'MemberExpression' && handlerArg.callee.object.property?.name) boundFuncIdentifier = handlerArg.callee.object.property.name;
+                            else if (handlerArg.callee.object.type === 'FunctionExpression') { funcNode = handlerArg.callee.object; category += '-bind-inline'; } // Bound inline function
 
-                        if (handlerCode && handlerCode.length > 20) {
-                            if (!handlerCode.includes('chrome.runtime.sendMessage') && !handlerCode.includes('[PostMessage Monitor]') && !handlerCode.includes('handlePostMessageCapture')) {
-                                foundHandlers.push({ handler: handlerCode, category, score: 15, source: sourceUrl, resolvedFrom });
+                            if(boundFuncIdentifier) {
+                                functionName = boundFuncIdentifier;
+                                funcNode = this.functionDefinitions.get(functionName) || Array.from(this.functionDefinitions.entries()).find(([key, node]) => key.endsWith(`.${functionName}`))?.[1];
+                                if(funcNode) category += '-bind-identifier';
                             }
+                        }
+                        if (funcNode) {
+                            const codePreview = scriptContent.substring(funcNode.start, Math.min(funcNode.end, funcNode.start + 100));
+                            log.debug(`[Extractor AST Found] Category: ${category}, Source: ${sourceUrl}, FuncName: ${functionName || 'N/A'}, Preview: ${codePreview}...`);
+                            foundHandlers.push({ category, source: sourceUrl, functionName, handlerNode: funcNode, fullScriptContent: scriptContent });
                         }
                     }
                 }
-            },
-            AssignmentExpression: (node, ancestors) => {
-                if(node.left.type === 'MemberExpression' && node.left.property.name === 'onmessage') {
-                    const handlerNode = node.right;
-                    let handlerCode = null;
-                    let category = 'unknown-ast-onmessage';
-                    let resolvedFrom = null;
-
-                    if (handlerNode.type === 'FunctionExpression' || handlerNode.type === 'ArrowFunctionExpression') {
-                        handlerCode = scriptContent.substring(handlerNode.range[0], handlerNode.range[1]);
-                        category = 'ast-onmessage-inline';
-                    } else if (handlerNode.type === 'Identifier') {
-                        resolvedFrom = handlerNode.name;
-                        const funcDefNode = functionDeclarations.get(resolvedFrom) || functionExpressions.get(resolvedFrom);
-                        if (funcDefNode) {
-                            handlerCode = scriptContent.substring(funcDefNode.range[0], funcDefNode.range[1]);
-                            category = 'ast-onmessage-reference';
-                        }
-                    } else if (handlerNode.type === 'Literal' && handlerNode.value === null) {
-                        // Explicitly assigned null, ignore
-                    }
-
-                    if (handlerCode && handlerCode.length > 20) {
-                        if (!handlerCode.includes('chrome.runtime.sendMessage') && !handlerCode.includes('[PostMessage Monitor]') && !handlerCode.includes('handlePostMessageCapture')) {
-                            foundHandlers.push({ handler: handlerCode, category, score: 10, source: sourceUrl, resolvedFrom });
-                        }
-                    }
-                }
-            }
-        });
-
+            });
+        } catch (e) { log.error(`[Extractor] Error walking AST for ${sourceUrl}:`, e); }
         return foundHandlers;
     }
 
-    async getSavedMessages() {
-        if (!this.baseEndpoint) return [];
-        const storageKey = `saved-messages-${this.baseEndpoint}`;
-        try {
-            return new Promise(resolve => {
-                chrome.storage.local.get([storageKey], result => resolve(result[storageKey] || []));
-            });
-        } catch (error) { return []; }
-    }
-
-    enhanceScores(savedMessages) {
-        if (!savedMessages || savedMessages.length === 0) return;
-        this.handlers.forEach(handler => { handler.score = this.scoreHandler(handler.handler, handler.category, savedMessages); });
-        this.handlers.sort((a, b) => b.score - a.score);
-    }
-
-    generateSyntheticHandler(messages = []) {
-        let template = `function(event){if(!event||!event.data)return;console.log('Received:',event.data);try{const data=typeof event.data==='string'?JSON.parse(event.data):event.data;`;
-        const types = new Set(); const props = new Set(); const all = [...messages, ...this.messages];
-        all.forEach(m => { try { let d = m.data; if(typeof d==='string') try{d=JSON.parse(d);}catch{return;} if(typeof d==='object'&&d!==null){if(d.type)types.add(d.type);if(d.action)types.add(d.action);if(d.messageType)types.add(d.messageType);if(d.kind)types.add(d.kind);Object.keys(d).forEach(k=>{if(!['type','action','messageType','kind'].includes(k))props.add(k);});}} catch {} });
-        if (types.size > 0) { template += `const type=data.type||data.action||data.messageType||data.kind;switch(type){`; types.forEach(t => template += `case'${t}':console.log('Processing ${t}');break;`); template += `default:console.log('Unknown type:',type);break;}}`; }
-        else if (props.size > 0) { template += ``; Array.from(props).slice(0, 5).forEach(p => template += `if(data.${p}!==undefined)console.log('Processing ${p}:',data.${p});`); }
-        template += `if(event.source&&typeof event.source.postMessage==='function')event.source.postMessage({type:'response',status:'received',receivedData:data},event.origin);}catch(e){console.error('Error:',e);}}`;
-        return { handler: template, score: 5, category: 'synthetic', source: 'generated' };
-    }
-
-
-    scoreHandler(handlerStr, category = '', relevantMessages = []) {
-        if (!handlerStr || typeof handlerStr !== 'string') return 0;
-        let score = 0; const scoreDetails = { base: 0, keywordHits: {}, messageMatchBonus: 0, categoryBonus: 0, lengthPenalty: 0, miscPenalty: 0 };
-        Object.entries(this.scoreWeights).forEach(([feature, weight]) => { let regex; if (feature.match(/^[a-zA-Z0-9_$.]+$/) && !feature.includes('(') && !feature.includes('"')) regex = new RegExp(`\\b${feature.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'g'); else regex = new RegExp(feature.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'); try { const m = handlerStr.match(regex); if (m) { score += weight * m.length; scoreDetails.keywordHits[feature] = (scoreDetails.keywordHits[feature] || 0) + (weight * m.length); } } catch (e) { if (handlerStr.includes(feature)) { score += weight; scoreDetails.keywordHits[feature] = (scoreDetails.keywordHits[feature] || 0) + weight; } } });
-        scoreDetails.base = score; let msgBonus = 0; const MAX_BONUS = 25; if (relevantMessages.length > 0) { const keys = new Set(); const strings = new Set(); relevantMessages.forEach(m => { try { let d = m.data; if(typeof d==='string')try{d=JSON.parse(d);}catch{strings.add(d);return;} if(typeof d==='object'&&d!==null){Object.keys(d).forEach(k=>keys.add(k));Object.entries(d).forEach(([k,v])=>{if(typeof v==='string')strings.add(v);});} else if(typeof d==='string')strings.add(d); } catch {} }); keys.forEach(k => { if (new RegExp(`[.\\s\\[]['"]?${k}['"]?\\]?`, 'g').test(handlerStr)) msgBonus += 3; }); strings.forEach(v => { if (v && v.length>3 && v.length<50 && new RegExp(`['"\`]${v.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')}['"\`]`).test(handlerStr)) { msgBonus += 8; if (handlerStr.toLowerCase().includes('messagetype')||handlerStr.toLowerCase().includes('switch')||handlerStr.toLowerCase().includes('.type')||handlerStr.toLowerCase().includes('.action')) msgBonus += 5; } }); msgBonus = Math.min(msgBonus, MAX_BONUS); score += msgBonus; scoreDetails.messageMatchBonus = msgBonus; }
-        if (category.includes('window')||category.includes('direct-listener')) scoreDetails.categoryBonus += 8; if (category.includes('onmessage')) scoreDetails.categoryBonus -= 5; if (category.includes('runtime')) scoreDetails.categoryBonus += 15; if (category.includes('delegate')||category.includes('frame')) scoreDetails.categoryBonus += 10; if (category.includes('worker')||category.includes('synthetic')) scoreDetails.miscPenalty -= 15; score += scoreDetails.categoryBonus;
-        const len = handlerStr.length; if (len<100&&!category.includes('runtime')&&!category.includes('delegate')) scoreDetails.lengthPenalty -= 10; else if (len<50&&!category.includes('runtime')&&!category.includes('delegate')) scoreDetails.lengthPenalty -= 20; score += scoreDetails.lengthPenalty;
-        return Math.max(0, Math.round(score));
-    }
-
-    deduplicateHandlers() {
-        const unique = []; const seen = new Set();
-        const categoryPriority = [ 'runtime', 'ast-direct-function', 'ast-direct-arrow', 'ast-reference', 'ast-bind-reference', 'ast-onmessage-inline', 'ast-onmessage-reference', 'direct-listener-window', 'function-reference-window', 'direct-listener', 'onmessage-assignment', 'framework-heuristic', 'other', 'synthetic', 'worker' ];
-        const getPriority = (cat = '') => { const index = categoryPriority.findIndex(p => cat.includes(p)); return index === -1 ? 99 : index; };
-        const sorted = [...this.handlers].sort((a, b) => { if (b.score !== a.score) return b.score - a.score; return getPriority(a.category) - getPriority(b.category); });
-        for (const handler of sorted) {
-            const fingerprint = handler.handler.replace(/\s+/g, '').substring(0, 1000);
-            if (!fingerprint) continue;
-            if (!seen.has(fingerprint)) { seen.add(fingerprint); unique.push(handler); }
-            else { console.log(`[HandlerExtractor] Deduplicating handler starting with: ${fingerprint.substring(0,50)}...`);}
+    analyzeWithRegex(content, sourceUrl) {
+        const handlers = [];
+        const onMessageRegex = /\bonmessage\s*=\s*(function\s*\(.*?\)\s*\{[\s\S]*?\})/gi;
+        const addEventListenerRegex = /\.addEventListener\s*\(\s*["']message["']\s*,\s*(function\s*\(.*?\)\s*\{[\s\S]*?\})\s*,?/gi;
+        const addEventListenerIdentifierRegex = /\.addEventListener\s*\(\s*["']message["']\s*,\s*([a-zA-Z0-9_$]+)\s*,?/gi;
+        let match;
+        while ((match = onMessageRegex.exec(content)) !== null) handlers.push({ handler: match[1], category: 'regex-onmessage', source: sourceUrl });
+        while ((match = addEventListenerRegex.exec(content)) !== null) handlers.push({ handler: match[1], category: 'regex-event-listener-inline', source: sourceUrl });
+        while ((match = addEventListenerIdentifierRegex.exec(content)) !== null) {
+            const functionName = match[1]; const funcDefRegex = new RegExp(`(?:function\\s+${functionName}\\s*\\(|(?:var|let|const)\\s+${functionName}\\s*=\\s*function\\s*\\()(\\s*\\(.*?\\)\\s*\\{[\\s\\S]*?\\})`, 'i'); const funcMatch = content.match(funcDefRegex);
+            if (funcMatch?.[0]) { const firstParenIndex = funcMatch[0].indexOf('('); const functionSignatureAndBody = funcMatch[0].substring(firstParenIndex); const fullHandlerText = `function${functionSignatureAndBody}`; handlers.push({ handler: fullHandlerText, category: 'regex-event-listener-identifier', source: sourceUrl, functionName: functionName }); }
         }
-        return unique;
+        return handlers.map(h => ({ ...h, handlerNode: null, fullScriptContent: h.handler }));
     }
 
-    getBestHandler(uniqueHandlers = null) {
-        const handlersToConsider = uniqueHandlers || this.deduplicateHandlers();
-        if (handlersToConsider.length === 0) { return null; }
-        handlersToConsider.sort((a, b) => b.score - a.score);
-        return handlersToConsider[0];
+    analyzeInlineHandlers(doc) {
+        const handlers = [];
+        const elements = doc.querySelectorAll('[onmessage]');
+        elements.forEach(el => { const handlerCode = el.getAttribute('onmessage'); if (handlerCode) handlers.push({ handler: `function(event){ ${handlerCode} }`, category: 'inline-onmessage-attribute', source: this.endpoint + ' (inline attribute)', handlerNode: null, fullScriptContent: `function(event){ ${handlerCode} }` }); });
+        return handlers;
+    }
+
+    /**
+     * Scores a potential handler based on AST analysis (if node provided) or basic checks.
+     * @param {object} handlerInfo - Object containing handler details ({ handlerNode?, category?, source?, fullScriptContent?, handler? }).
+     * @returns {number} - The calculated score.
+     */
+    scoreHandler(handlerInfo) {
+        const { handlerNode, category, source, fullScriptContent, functionName } = handlerInfo;
+        const handlerCode = handlerInfo.handler;
+        let score = 0;
+        const MIN_CODE_LENGTH_ESTIMATE = 40;
+        const MAX_CODE_LENGTH_ESTIMATE = 15000;
+        let handlerCodeLength = 0;
+
+        if (handlerNode?.end && handlerNode?.start) handlerCodeLength = handlerNode.end - handlerNode.start;
+        else if (handlerCode) handlerCodeLength = handlerCode.length;
+
+        if (handlerCodeLength < MIN_CODE_LENGTH_ESTIMATE) return 0;
+
+        let astScore = 0;
+        if (handlerNode && typeof acorn !== 'undefined' && typeof acorn.walk !== 'undefined') {
+            try {
+                const foundGenericKeys = new Set(); const foundSpecificKeys = new Set(); const foundSpecificTypes = new Set();
+                let usesPostMessageCall = false; let referencesEventData = false; let referencesEventOrigin = false;
+                let hasOriginCheck = false; let usesJsonParse = false; let usesSwitchOnKind = false;
+                let eventParamName = null;
+
+                if (handlerNode.params && handlerNode.params.length > 0 && handlerNode.params[0].type === 'Identifier') {
+                    eventParamName = handlerNode.params[0].name;
+                }
+
+                acorn.walk.simple(handlerNode, {
+                    MemberExpression: (node) => {
+                        let propName = null; if (node.property?.type === 'Identifier') propName = node.property.name; else if (node.property?.type === 'Literal') propName = node.property.value;
+                        let baseObjectName = null; if (node.object?.type === 'Identifier') baseObjectName = node.object.name;
+
+                        if (propName) {
+                            if (eventParamName && baseObjectName === eventParamName && ['data', 'origin', 'source'].includes(propName)) {
+                                foundGenericKeys.add(propName); if (propName === 'data') referencesEventData = true; if (propName === 'origin') referencesEventOrigin = true;
+                            }
+                            if (eventParamName && node.object?.type === 'MemberExpression' && node.object.object?.name === eventParamName && node.object.property?.name === 'data') {
+                                if (this.messageKeys.has(propName)) foundSpecificKeys.add(propName);
+                            }
+                            if(eventParamName && propName === 'rawData' && node.object?.type === 'MemberExpression' && node.object.property?.name === 'data' && node.object.object?.type === 'MemberExpression' && node.object.object.property?.name === 'data' && node.object.object.object?.name === eventParamName){
+                                if(this.messageKeys.has(propName)) foundSpecificKeys.add(propName);
+                            }
+
+                            if (propName === 'postMessage') usesPostMessageCall = true;
+                            if (propName === 'origin' && node.parent?.type === 'BinaryExpression' && ['===', '!==', '==', '!='].includes(node.parent.operator)) {
+                                hasOriginCheck = true;
+                            }
+                        }
+                    },
+                    Literal: (node) => { if (typeof node.value === 'string' && this.messageTypes.has(node.value)) foundSpecificTypes.add(node.value); },
+                    CallExpression: (node) => {
+                        if (node.callee.type === 'MemberExpression' && node.callee.property.name === 'postMessage') usesPostMessageCall = true;
+                        if (node.callee.type === 'MemberExpression' && node.callee.object?.name === 'JSON' && node.callee.property?.name === 'parse') usesJsonParse = true;
+                    },
+                    SwitchStatement: (node) => {
+                        if (node.discriminant?.type === 'MemberExpression' && node.discriminant.property?.name && ['kind', 'messageType', 'type', 'action'].includes(node.discriminant.property.name)) {
+                            if (node.discriminant.object?.type === 'MemberExpression' && node.discriminant.object.property?.name === 'data') {
+                                usesSwitchOnKind = true;
+                            }
+                        }
+                    }
+                });
+                astScore += foundSpecificKeys.size * 150; astScore += foundSpecificTypes.size * 100;
+                if (referencesEventData) astScore += 20; if (referencesEventOrigin) astScore += 20; if (usesPostMessageCall) astScore += 10;
+                if (hasOriginCheck) astScore += 75; if (usesJsonParse) astScore += 40; if (usesSwitchOnKind) astScore += 50;
+                if (handlerCodeLength > MAX_CODE_LENGTH_ESTIMATE && astScore < 200) astScore -= 100; else if (handlerCodeLength > MAX_CODE_LENGTH_ESTIMATE) astScore -= 20;
+                log.debug(`[Scoring AST Node SUCCEEDED] Handler (Cat: ${category}, EstLen: ${handlerCodeLength}) - AST Score: ${astScore}, Specific Keys: ${foundSpecificKeys.size}, Patterns: OriginCheck=${hasOriginCheck}, JSONParse=${usesJsonParse}, Switch=${usesSwitchOnKind}`);
+            } catch (e) {
+                log.warn(`[Scoring AST Node] Failed walking node for category ${category}: ${e.message}.`);
+                astScore = 0;
+            }
+        } else if (handlerCode) {
+            if (handlerCode.includes('.data') || handlerCode.includes('["data"]')) astScore += 5; if (handlerCode.includes('.origin') || handlerCode.includes('["origin"]')) astScore += 5; if (handlerCode.includes('.source') || handlerCode.includes('["source"]')) astScore += 3; if (handlerCode.includes('postMessage')) astScore += 3; if (handlerCode.includes('messageType') || handlerCode.includes('["messageType"]')) astScore += 10; if (handlerCode.includes('JSON.parse')) astScore += 5; if (handlerCode.includes('switch')) astScore += 5;
+            log.debug(`[Scoring Basic String] Handler (Cat: ${category}, Len: ${handlerCodeLength}) - Basic Score Contribution: ${astScore}`);
+        }
+        score = 10 + astScore;
+
+        if (category?.includes('ast-event-listener') || category?.includes('ast-onmessage')) score += 50;
+        else if (category?.includes('runtime')) score += 150;
+        else if (category?.includes('debugger')) score += 5;
+        else if (category?.includes('inline-onmessage-attribute')) score += 5;
+        else if (category?.includes('regex')) score += 1;
+
+        return Math.max(0, score);
+    }
+
+    /**
+     * Selects the best handler from scored candidates using sorting and tie-breaking.
+     * Extracts the final handler code string.
+     * @param {Array<object>} handlersInfo - Array of handler info objects from analysis functions.
+     * @returns {object|null} - The best handler info { handler, category, score, source, functionName }, or null.
+     */
+    getBestHandler(handlersInfo) {
+        if (!handlersInfo || handlersInfo.length === 0) return null;
+
+        const scoredHandlers = handlersInfo.map(handlerInfo => {
+            const score = this.scoreHandler(handlerInfo);
+            return { ...handlerInfo, score };
+        }).filter(h => h.score > 0);
+
+        if (scoredHandlers.length === 0) {
+            log.debug("[getBestHandler] No candidates scored above 0.");
+            return null;
+        }
+
+        log.debug("[getBestHandler] Scored Candidates (Pre-sort):", JSON.stringify(scoredHandlers.map(h => ({
+            score: h.score, category: h.category, source: h.source?.substring(0,100),
+            hasNode: !!h.handlerNode, name: h.functionName || 'N/A'
+        })), null, 2));
+
+        const categoryPriority = { 'runtime': 1, 'ast-event-listener': 2, 'ast-onmessage': 3, 'debugger': 4, 'regex': 6, 'inline-onmessage-attribute': 7 };
+
+        scoredHandlers.sort((a, b) => {
+            if (b.score !== a.score) return b.score - a.score;
+            const priorityA = categoryPriority[a.category?.split('-')[0]] || 99;
+            const priorityB = categoryPriority[b.category?.split('-')[0]] || 99;
+            if (priorityA !== priorityB) return priorityA - priorityB;
+            const lenA = a.handlerNode ? a.handlerNode.end - a.handlerNode.start : (a.handler?.length || a.fullScriptContent?.length || 0);
+            const lenB = b.handlerNode ? b.handlerNode.end - b.handlerNode.start : (b.handler?.length || b.fullScriptContent?.length || 0);
+            if (lenA !== lenB) return lenA - lenB;
+            return (a.source || '').localeCompare(b.source || '');
+        });
+
+        const bestHandlerInfo = scoredHandlers[0];
+
+        let finalHandlerCode = bestHandlerInfo.handler || '';
+        if (!finalHandlerCode && bestHandlerInfo.handlerNode && bestHandlerInfo.fullScriptContent) {
+            try {
+                finalHandlerCode = bestHandlerInfo.fullScriptContent.substring(bestHandlerInfo.handlerNode.start, bestHandlerInfo.handlerNode.end);
+            } catch (e) {
+                log.error("Failed to extract final handler code string from node after selection!", e);
+                finalHandlerCode = "[Error extracting code string]";
+            }
+        } else if (!finalHandlerCode && bestHandlerInfo.fullScriptContent) {
+            finalHandlerCode = bestHandlerInfo.fullScriptContent;
+        }
+
+
+        const bestLen = bestHandlerInfo.handlerNode ? bestHandlerInfo.handlerNode.end - bestHandlerInfo.handlerNode.start : finalHandlerCode.length;
+        log.debug(`[getBestHandler] Selected Handler: Score=${bestHandlerInfo.score}, Category=${bestHandlerInfo.category}, Source=${bestHandlerInfo.source}, EstLen=${bestLen}, Name=${bestHandlerInfo.functionName || 'N/A'}`);
+
+        return {
+            handler: finalHandlerCode,
+            category: bestHandlerInfo.category,
+            score: bestHandlerInfo.score,
+            source: bestHandlerInfo.source,
+            functionName: bestHandlerInfo.functionName
+        };
+    }
+
+    async extractDynamicallyViaDebugger(targetUrl) {
+        const handlers = new Set();
+        let tabId = null; let attached = false; let detachReason = null;
+        const collectedScripts = new Map(); let analysisTimer = null;
+        const ANALYSIS_TIMEOUT = 10000; const SETTLE_TIME = 1500; const LOAD_EXTRA_TIME = 2000;
+        let resolveAnalysis; const analysisPromise = new Promise(res => { resolveAnalysis = res; }); let analysisResolved = false;
+
+        const onDebuggerEvent = (source, method, params) => {
+            if (!tabId || source.tabId !== tabId) return;
+            if (method === 'Debugger.scriptParsed') { const { scriptId, url } = params; if (url && !url.startsWith('chrome-extension://') && url !== 'about:blank') { log.debug(`[Debugger Tab] Script parsed: ID=${scriptId}, URL=${url.substring(0,100)}`); collectedScripts.set(scriptId, { url: url, scriptId: scriptId }); clearTimeout(analysisTimer); analysisTimer = setTimeout(() => { if (!analysisResolved) { log.debug('[Debugger Tab] Script parsing settled.'); analysisResolved = true; resolveAnalysis(); } }, SETTLE_TIME); } }
+            else if (method === 'Page.loadEventFired') { log.debug('[Debugger Tab] Page load event fired.'); clearTimeout(analysisTimer); analysisTimer = setTimeout(() => { if (!analysisResolved) { log.debug('[Debugger Tab] Page loaded + settle time.'); analysisResolved = true; resolveAnalysis(); } }, LOAD_EXTRA_TIME); }
+            else if (method === 'Runtime.exceptionThrown') { log.warn('[Debugger Tab] Exception in target:', params.exceptionDetails?.exception?.description || 'Unknown error'); }
+        };
+        const onDebuggerDetach = (source, reason) => { if (source.tabId === tabId) { log.warn(`[Debugger Tab] Detached unexpectedly from tab ${tabId}. Reason: ${reason}`); attached = false; detachReason = reason; if (chrome?.debugger) { try { chrome.debugger.onEvent.removeListener(onDebuggerEvent); } catch(e){} try { chrome.debugger.onDetach.removeListener(onDebuggerDetach); } catch(e){} } if (!analysisResolved) { analysisResolved = true; resolveAnalysis(); } } };
+
+        try {
+            log.debug('[Debugger Tab] Creating temporary background tab for:', targetUrl);
+            const tab = await chrome.tabs.create({ url: targetUrl, active: false }); tabId = tab.id; if (!tabId) throw new Error("Failed to create target tab."); log.debug(`[Debugger Tab] Created target tab ID: ${tabId}`); await new Promise(res => setTimeout(res, 1500));
+            await chrome.debugger.attach({ tabId }, "1.3"); attached = true; log.debug(`[Debugger Tab] Attached to target tab: ${tabId}`);
+            chrome.debugger.onEvent.addListener(onDebuggerEvent); chrome.debugger.onDetach.addListener(onDebuggerDetach);
+            await Promise.all([ chrome.debugger.sendCommand({ tabId }, "Page.enable"), chrome.debugger.sendCommand({ tabId }, "Runtime.enable"), chrome.debugger.sendCommand({ tabId }, "Debugger.enable") ]); log.debug(`[Debugger Tab] Enabled domains.`);
+            const overallTimeout = setTimeout(() => { if (!analysisResolved) { log.warn(`[Debugger Tab] Overall analysis timeout reached.`); analysisResolved = true; resolveAnalysis(); } }, ANALYSIS_TIMEOUT);
+            log.debug('[Debugger Tab] Waiting for script parsing to settle...'); await analysisPromise; clearTimeout(overallTimeout);
+            if (!attached) throw new Error(`Debugger detached unexpectedly. Reason: ${detachReason || 'Unknown'}`); log.debug(`[Debugger Tab] Proceeding to fetch ${collectedScripts.size} script sources.`);
+            const sourcePromises = Array.from(collectedScripts.keys()).map(scriptId => chrome.debugger.sendCommand({ tabId }, "Debugger.getScriptSource", { scriptId }).then(result => ({ scriptId, source: result.scriptSource })).catch(err => { log.warn(`[Debugger Tab] Failed to get source for scriptId ${scriptId}:`, err?.message || err); return { scriptId, source: null }; }));
+            const sources = await Promise.all(sourcePromises);
+            log.debug(`[Debugger Tab] Analyzing ${sources.filter(s => s.source).length} fetched script sources.`);
+            for (const { scriptId, source } of sources) { if (source) { const scriptInfo = collectedScripts.get(scriptId); const sourceUrl = scriptInfo?.url || `tab_${tabId}_scriptId_${scriptId}`; const scriptHandlers = this.analyzeScriptContent(source, sourceUrl); scriptHandlers.forEach(handlerInfo => handlers.add(handlerInfo)); } }
+        } catch (error) { log.error('[Debugger Tab] Error during dynamic extraction process:', error); throw new Error(`Debugger analysis failed: ${error.message}`); }
+        finally {
+            log.debug('[Debugger Tab] Entering finally block for cleanup.'); clearTimeout(analysisTimer);
+            if (attached && tabId) { log.debug(`[Debugger Tab] Attempting to detach from tab: ${tabId}`); try { if (chrome?.debugger) { if (chrome.debugger.onEvent?.removeListener) chrome.debugger.onEvent.removeListener(onDebuggerEvent); if (chrome.debugger.onDetach?.removeListener) chrome.debugger.onDetach.removeListener(onDebuggerDetach); if (chrome.debugger.detach) await chrome.debugger.detach({ tabId }); log.debug(`[Debugger Tab] Detached successfully from tab: ${tabId}`); } else { log.warn('[Debugger Tab] chrome.debugger API unavailable for detach.'); } } catch (detachError) { log.error('[Debugger Tab] Error detaching:', detachError?.message || detachError); } }
+            else { log.debug('[Debugger Tab] Skipping detach (not attached or no tabId).'); }
+            if (tabId) { log.debug(`[Debugger Tab] Attempting to remove temporary tab: ${tabId}`); try { await chrome.tabs.remove(tabId); log.debug(`[Debugger Tab] Removed temporary tab: ${tabId}`); } catch (removeError) { log.error(`[Debugger Tab] Error removing temporary tab ${tabId}:`, removeError); } }
+        }
+        log.success(`[Debugger Tab] Dynamic extraction finished. Found ${handlers.size} potential handler structures.`);
+        return Array.from(handlers);
     }
 }
+
 window.HandlerExtractor = HandlerExtractor;
