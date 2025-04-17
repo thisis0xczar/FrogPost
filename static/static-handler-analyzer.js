@@ -1,11 +1,20 @@
 /**
  * FrogPost Extension
  * Originally Created by thisis0xczar/Lidor JFrog AppSec Team
- * Refined on: 2025-04-15
+ * Refined on: 2025-04-17
  */
 (function(global) {
+    if (typeof log === 'undefined') {
+        window.log = {
+            debug: (...args) => console.debug(...args), // Or disable: () => {}
+            info: (...args) => console.info(...args),
+            warn: (...args) => console.warn(...args),
+            error: (...args) => console.error(...args),
+        };
+    }
+
     if (typeof global.acorn === 'undefined' || typeof global.acorn.parse !== 'function' || typeof global.acorn?.walk?.simple !== 'function' || typeof global.acorn?.walk?.ancestor !== 'function') {
-        console.error("Acorn/Acorn Walk library not loaded. Static analysis unavailable.");
+        log.error("Acorn/Acorn Walk library not loaded. Static analysis unavailable.");
         global.analyzeHandlerStatically = () => ({ success: false, error: 'Acorn library not found.', analysis: null });
         return;
     }
@@ -45,7 +54,10 @@
 
     function isEventObject(objectNode) {
         if (!objectNode || objectNode.type !== 'Identifier') return false;
-        return objectNode.name === identifiedEventParamName || STANDARD_EVENT_NAMES.test(objectNode.name);
+        if (identifiedEventParamName) {
+            return objectNode.name === identifiedEventParamName;
+        }
+        return STANDARD_EVENT_NAMES.test(objectNode.name);
     }
 
     function isSpecificPropertyAccess(node, propName) {
@@ -54,6 +66,9 @@
             return true;
         }
         if (node.property?.type === 'Literal' && node.property.value === propName && node.computed && isEventObject(node.object)) {
+            return true;
+        }
+        if (node.property?.name === propName && !node.computed && node.object.type === 'Identifier') {
             return true;
         }
         return false;
@@ -126,10 +141,10 @@
 
             if (eventDataSourceNode && otherNode) {
                 const fullPath = getFullAccessPath(eventDataSourceNode);
-                const eventVarName = identifiedEventParamName || 'event';
-                const pathRegex = new RegExp(`^${eventVarName}\\.data\\.?(.+)?`);
+                const eventVarName = identifiedEventParamName || 'event|e|msg|message|evt';
+                const pathRegex = new RegExp(`^(${eventVarName})\\.data\\.?(.+)?`);
                 const relativePathMatch = fullPath?.match(pathRegex);
-                const relativePath = relativePathMatch ? (relativePathMatch[1] || '(root)') : null;
+                const relativePath = relativePathMatch ? (relativePathMatch[2] || '(root)') : null;
                 if (relativePath !== null) {
                     let conditionValue;
                     if (otherNode.type === 'Literal') conditionValue = otherNode.value;
@@ -142,26 +157,26 @@
 
             if (typeofArgLeft && findEventDataSourceNode(typeofArgLeft) && node.right.type === 'Literal') {
                 const fullPath = getFullAccessPath(typeofArgLeft);
-                const eventVarName = identifiedEventParamName || 'event';
-                const pathRegex = new RegExp(`^${eventVarName}\\.data\\.?(.+)?`);
+                const eventVarName = identifiedEventParamName || 'event|e|msg|message|evt';
+                const pathRegex = new RegExp(`^(${eventVarName})\\.data\\.?(.+)?`);
                 const relativePathMatch = fullPath?.match(pathRegex);
-                const relativePath = relativePathMatch ? (relativePathMatch[1] || '(root)') : null;
+                const relativePath = relativePathMatch ? (relativePathMatch[2] || '(root)') : null;
                 if (relativePath !== null) return { path: relativePath, op: 'typeof', value: node.right.value, conditionSnippet: getCodeSnippet(node) };
             }
             if (typeofArgRight && findEventDataSourceNode(typeofArgRight) && node.left.type === 'Literal') {
                 const fullPath = getFullAccessPath(typeofArgRight);
-                const eventVarName = identifiedEventParamName || 'event';
-                const pathRegex = new RegExp(`^${eventVarName}\\.data\\.?(.+)?`);
+                const eventVarName = identifiedEventParamName || 'event|e|msg|message|evt';
+                const pathRegex = new RegExp(`^(${eventVarName})\\.data\\.?(.+)?`);
                 const relativePathMatch = fullPath?.match(pathRegex);
-                const relativePath = relativePathMatch ? (relativePathMatch[1] || '(root)') : null;
+                const relativePath = relativePathMatch ? (relativePathMatch[2] || '(root)') : null;
                 if (relativePath !== null) return { path: relativePath, op: 'typeof', value: node.left.value, conditionSnippet: getCodeSnippet(node) };
             }
         } else if (node.type === 'MemberExpression' && findEventDataSourceNode(node)) {
             const fullPath = getFullAccessPath(node);
-            const eventVarName = identifiedEventParamName || 'event';
-            const pathRegex = new RegExp(`^${eventVarName}\\.data\\.?(.+)`);
+            const eventVarName = identifiedEventParamName || 'event|e|msg|message|evt';
+            const pathRegex = new RegExp(`^(${eventVarName})\\.data\\.?(.+)`);
             const relativePathMatch = fullPath?.match(pathRegex);
-            const relativePath = relativePathMatch?.[1];
+            const relativePath = relativePathMatch?.[2];
             if (relativePath) return { path: relativePath, op: 'truthy', conditionSnippet: getCodeSnippet(node) };
         } else if (node.type === 'LogicalExpression' && node.operator === '&&') {
             const leftCond = analyzeConditionNode(node.left); const rightCond = analyzeConditionNode(node.right);
@@ -172,10 +187,10 @@
             const eventDataSourceNode = findEventDataSourceNode(calleeObj);
             if (eventDataSourceNode) {
                 const fullPath = getFullAccessPath(eventDataSourceNode);
-                const eventVarName = identifiedEventParamName || 'event';
-                const pathRegex = new RegExp(`^${eventVarName}\\.data\\.?(.+)`);
+                const eventVarName = identifiedEventParamName || 'event|e|msg|message|evt';
+                const pathRegex = new RegExp(`^(${eventVarName})\\.data\\.?(.+)`);
                 const relativePathMatch = fullPath?.match(pathRegex);
-                const relativePath = relativePathMatch?.[1];
+                const relativePath = relativePathMatch?.[2];
                 if (relativePath) {
                     const method = node.callee.property.name;
                     let argValue = '[complex argument]';
@@ -227,10 +242,10 @@
                     const discriminantNode = findEventDataSourceNode(switchStmt.discriminant);
                     if (discriminantNode) {
                         const fullPath = getFullAccessPath(discriminantNode);
-                        const eventVarName = identifiedEventParamName || 'event';
-                        const pathRegex = new RegExp(`^${eventVarName}\\.data\\.?(.+)?`);
+                        const eventVarName = identifiedEventParamName || 'event|e|msg|message|evt';
+                        const pathRegex = new RegExp(`^(${eventVarName})\\.data\\.?(.+)?`);
                         const relativePathMatch = fullPath?.match(pathRegex);
-                        const relativePath = relativePathMatch ? (relativePathMatch[1] || '(root)') : null;
+                        const relativePath = relativePathMatch ? (relativePathMatch[2] || '(root)') : null;
                         if (relativePath !== null) {
                             let caseValue;
                             if (ancestor.test.type === 'Literal') caseValue = ancestor.test.value;
@@ -274,10 +289,19 @@
                 topLevelFunctionNode = ast.body[0].declarations[0].init;
                 if (topLevelFunctionNode.params?.[0]?.type === 'Identifier') {
                     identifiedEventParamName = topLevelFunctionNode.params[0].name;
+                } else if (topLevelFunctionNode.params?.[0]?.type === 'AssignmentPattern' && topLevelFunctionNode.params[0].left?.type === 'Identifier') {
+                    identifiedEventParamName = topLevelFunctionNode.params[0].left.name;
+                } else if (topLevelFunctionNode.params?.[0]?.type === 'RestElement' && topLevelFunctionNode.params[0].argument?.type === 'Identifier') {
+                    identifiedEventParamName = topLevelFunctionNode.params[0].argument.name;
+                }
+
+                if(identifiedEventParamName) {
                     log.debug(`[Static Analyzer] Identified event param name: ${identifiedEventParamName}`);
+                } else {
+                    log.debug(`[Static Analyzer] Could not identify first param name directly.`);
                 }
             } else {
-                console.warn("[Static Analyzer] Could not find top-level function node using simple wrapper.");
+                log.warn("[Static Analyzer] Could not find top-level function node using simple wrapper.");
             }
 
         } catch (e) {
@@ -333,18 +357,29 @@
                 },
                 MemberExpression(node, ancestors) {
                     const fullPath = getFullAccessPath(node);
-                    const eventVarName = identifiedEventParamName || 'event';
-                    const dataPathRegex = new RegExp(`^${eventVarName}\\.data\\.?(.+)?`);
+                    const eventVarName = identifiedEventParamName || 'event|e|msg|message|evt';
+                    const dataPathRegex = new RegExp(`^(${eventVarName})\\.data\\.?(.+)?`);
                     const dataMatch = fullPath?.match(dataPathRegex);
 
                     if (dataMatch) {
                         analysisResults.hasListener = true;
-                        analysisResults.accessedEventDataPaths.add(dataMatch[1] || '(root)');
+                        analysisResults.accessedEventDataPaths.add(dataMatch[2] || '(root)');
                         if(analysisResults.firstDataAccessRangeStart === null && node.range) {
                             analysisResults.firstDataAccessRangeStart = node.range[0];
                         }
+                    } else if (!identifiedEventParamName && fullPath?.endsWith('.data')) {
+                        analysisResults.hasListener = true;
+                        analysisResults.accessedEventDataPaths.add(fullPath.substring(0, fullPath.length-5) + '.(root)');
                     }
+
                     if (isEventOriginAccess(node)) {
+                        analysisResults.hasListener = true;
+                        const parent = ancestors[ancestors.length - 2];
+                        const originCheckResult = analyzeOriginCheck(parent);
+                        if (originCheckResult && !analysisResults.rawOriginChecks.some(c => c.snippet === originCheckResult.snippet)) {
+                            analysisResults.rawOriginChecks.push(originCheckResult);
+                        }
+                    } else if (!identifiedEventParamName && fullPath?.endsWith('.origin')) {
                         analysisResults.hasListener = true;
                         const parent = ancestors[ancestors.length - 2];
                         const originCheckResult = analyzeOriginCheck(parent);
@@ -354,35 +389,42 @@
                     }
                 },
                 IfStatement(node, ancestors) {
-                    analysisResults.hasListener = true;
                     const originCheckResult = analyzeOriginCheck(node.test);
-                    if (originCheckResult && !analysisResults.rawOriginChecks.some(c => c.snippet === originCheckResult.snippet)) {
-                        analysisResults.rawOriginChecks.push(originCheckResult);
+                    if (originCheckResult) {
+                        analysisResults.hasListener = true;
+                        if(!analysisResults.rawOriginChecks.some(c => c.snippet === originCheckResult.snippet)) {
+                            analysisResults.rawOriginChecks.push(originCheckResult);
+                        }
                     }
                 },
                 ConditionalExpression(node, ancestors) {
-                    analysisResults.hasListener = true;
                     const originCheckResult = analyzeOriginCheck(node.test);
-                    if (originCheckResult && !analysisResults.rawOriginChecks.some(c => c.snippet === originCheckResult.snippet)) {
-                        analysisResults.rawOriginChecks.push(originCheckResult);
+                    if (originCheckResult) {
+                        analysisResults.hasListener = true;
+                        if(!analysisResults.rawOriginChecks.some(c => c.snippet === originCheckResult.snippet)) {
+                            analysisResults.rawOriginChecks.push(originCheckResult);
+                        }
                     }
                 },
                 CallExpression(node, ancestors) {
-                    analysisResults.hasListener = true;
                     const originCheckResult = analyzeOriginCheck(node);
-                    if (originCheckResult && !analysisResults.rawOriginChecks.some(c => c.snippet === originCheckResult.snippet)) {
-                        analysisResults.rawOriginChecks.push(originCheckResult);
+                    if (originCheckResult) {
+                        analysisResults.hasListener = true;
+                        if(!analysisResults.rawOriginChecks.some(c => c.snippet === originCheckResult.snippet)) {
+                            analysisResults.rawOriginChecks.push(originCheckResult);
+                        }
                     }
 
                     node.arguments.forEach((argNode, index) => {
                         const eventDataSourceNode = findEventDataSourceNode(argNode);
                         if (eventDataSourceNode) {
                             const fullSourcePath = getFullAccessPath(eventDataSourceNode);
-                            const eventVarName = identifiedEventParamName || 'event';
-                            const pathRegex = new RegExp(`^${eventVarName}\\.data\\.?(.+)?`);
+                            const eventVarName = identifiedEventParamName || 'event|e|msg|message|evt';
+                            const pathRegex = new RegExp(`^(${eventVarName})\\.data\\.?(.+)?`);
                             const sourcePathMatch = fullSourcePath?.match(pathRegex);
-                            const sourcePath = sourcePathMatch ? (sourcePathMatch[1] || '(root)') : null;
+                            const sourcePath = sourcePathMatch ? (sourcePathMatch[2] || '(root)') : null;
                             if (sourcePath !== null) {
+                                analysisResults.hasListener = true;
                                 let destinationContext = '[complex callee]';
                                 if (node.callee.type === 'Identifier') destinationContext = node.callee.name;
                                 else if (node.callee.type === 'MemberExpression') destinationContext = getFullAccessPath(node.callee);
@@ -397,15 +439,15 @@
                     });
                 },
                 AssignmentExpression(node, ancestors) {
-                    analysisResults.hasListener = true;
                     const eventDataSourceNode = findEventDataSourceNode(node.right);
                     if (eventDataSourceNode) {
                         const fullSourcePath = getFullAccessPath(eventDataSourceNode);
-                        const eventVarName = identifiedEventParamName || 'event';
-                        const pathRegex = new RegExp(`^${eventVarName}\\.data\\.?(.+)?`);
+                        const eventVarName = identifiedEventParamName || 'event|e|msg|message|evt';
+                        const pathRegex = new RegExp(`^(${eventVarName})\\.data\\.?(.+)?`);
                         const sourcePathMatch = fullSourcePath?.match(pathRegex);
-                        const sourcePath = sourcePathMatch ? (sourcePathMatch[1] || '(root)') : null;
+                        const sourcePath = sourcePathMatch ? (sourcePathMatch[2] || '(root)') : null;
                         if (sourcePath !== null) {
+                            analysisResults.hasListener = true;
                             let destinationContext = '[complex assignment target]';
                             if (node.left.type === 'MemberExpression') destinationContext = getFullAccessPath(node.left);
                             else if (node.left.type === 'Identifier') destinationContext = node.left.name;
@@ -429,10 +471,10 @@
                         const eventDataSourceNode = findEventDataSourceNode(node.init);
                         if (eventDataSourceNode) {
                             const fullSourcePath = getFullAccessPath(eventDataSourceNode);
-                            const eventVarName = identifiedEventParamName || 'event';
-                            const pathRegex = new RegExp(`^${eventVarName}\\.data\\.?(.+)?`);
+                            const eventVarName = identifiedEventParamName || 'event|e|msg|message|evt';
+                            const pathRegex = new RegExp(`^(${eventVarName})\\.data\\.?(.+)?`);
                             const sourcePathMatch = fullSourcePath?.match(pathRegex);
-                            const sourcePath = sourcePathMatch ? (sourcePathMatch[1] || '(root)') : null;
+                            const sourcePath = sourcePathMatch ? (sourcePathMatch[2] || '(root)') : null;
                             if (sourcePath !== null) {
                                 simpleTaint.set(node.id.name, { sourcePath: sourcePath, assignmentNode: node });
                                 analysisResults.hasListener = true;
@@ -443,16 +485,16 @@
                     }
                 },
                 NewExpression(node, ancestors) {
-                    analysisResults.hasListener = true;
                     node.arguments.forEach((argNode, index) => {
                         const eventDataSourceNode = findEventDataSourceNode(argNode);
                         if (eventDataSourceNode) {
                             const fullSourcePath = getFullAccessPath(eventDataSourceNode);
-                            const eventVarName = identifiedEventParamName || 'event';
-                            const pathRegex = new RegExp(`^${eventVarName}\\.data\\.?(.+)?`);
+                            const eventVarName = identifiedEventParamName || 'event|e|msg|message|evt';
+                            const pathRegex = new RegExp(`^(${eventVarName})\\.data\\.?(.+)?`);
                             const sourcePathMatch = fullSourcePath?.match(pathRegex);
-                            const sourcePath = sourcePathMatch ? (sourcePathMatch[1] || '(root)') : null;
+                            const sourcePath = sourcePathMatch ? (sourcePathMatch[2] || '(root)') : null;
                             if (sourcePath !== null) {
+                                analysisResults.hasListener = true;
                                 let destinationContext = '[complex constructor]';
                                 if (node.callee.type === 'Identifier') destinationContext = `new ${node.callee.name}`;
 
@@ -469,7 +511,7 @@
         } catch (walkError) {
             currentSourceMap = '';
             identifiedEventParamName = null;
-            console.error("Error during AST walk:", walkError);
+            log.error("Error during AST walk:", walkError);
             return { success: false, error: `AST walk failed: ${walkError.message}`, analysis: null };
         }
 

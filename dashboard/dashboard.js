@@ -1,7 +1,7 @@
 /**
  * FrogPost Extension
  * Originally Created by thisis0xczar/Lidor JFrog AppSec Team
- * Refined on: 2025-04-15
+ * Refined on: 2025-04-17
  */
 window.frogPostState = {
     frameConnections: new Map(),
@@ -91,7 +91,6 @@ const reportButtonStates = new Map();
 const traceButtonStates = new Map();
 let callbackUrl = null;
 const CALLBACK_URL_STORAGE_KEY = 'callback_url';
-const modifiedEndpoints = new Map();
 const launchInProgressEndpoints = new Set();
 let uiUpdateTimer = null;
 const DEBOUNCE_DELAY = 150;
@@ -217,7 +216,6 @@ function getStorageKeyForUrl(url) {
 }
 window.getStorageKeyForUrl = getStorageKeyForUrl;
 
-
 function showToastNotification(message, type = 'error', duration = 5000) {
     let container = document.getElementById('toast-container');
     if (!container) {
@@ -229,37 +227,40 @@ function showToastNotification(message, type = 'error', duration = 5000) {
     const toast = document.createElement('div');
     toast.className = `toast toast-${type}`;
     toast.textContent = message;
-    container.appendChild(toast);
-    requestAnimationFrame(() => {
-        toast.classList.add('show');
-    });
-    const timeoutId = setTimeout(() => {
+    let removalTimeoutId = null;
+    let removed = false;
+
+    const removeToast = () => {
+        if (removed || !toast.parentNode) return;
+        removed = true;
+        clearTimeout(removalTimeoutId);
         toast.classList.remove('show');
         toast.classList.add('fade-out');
 
-        toast.addEventListener('transitionend', () => {
+        const transitionEndHandler = () => {
             if (toast.parentNode) {
                 toast.parentNode.removeChild(toast);
             }
-        }, { once: true });
+        };
+
+        toast.addEventListener('transitionend', transitionEndHandler, { once: true });
 
         setTimeout(() => {
             if (toast.parentNode) {
                 toast.parentNode.removeChild(toast);
             }
-        }, duration + 600);
+        }, 600);
+    };
 
-    }, duration);
 
-    toast.addEventListener('click', () => {
-        clearTimeout(timeoutId);
-        toast.classList.remove('show');
-        toast.classList.add('fade-out');
-        toast.addEventListener('transitionend', () => {
-            if (toast.parentNode) toast.parentNode.removeChild(toast);
-        }, { once: true });
-        setTimeout(() => { if (toast.parentNode) toast.parentNode.removeChild(toast); }, 600);
+    container.appendChild(toast);
+    requestAnimationFrame(() => {
+        toast.classList.add('show');
     });
+
+    removalTimeoutId = setTimeout(removeToast, duration);
+
+    toast.addEventListener('click', removeToast);
 }
 
 function updateButton(button, state, options = {}) {
@@ -274,14 +275,15 @@ function updateButton(button, state, options = {}) {
         csp: { text: '⏳', title: 'Checking CSP...', class: 'checking is-working' },
         analyze: { text: '⏳', title: 'Analyzing...', class: 'checking is-working' },
         launch: { text: '🚀', title: 'Launch Payload Testing', class: 'green' },
-        success: { text: '✓', title: 'Check successful', class: 'success' },
-        warning: { text: '⚠', title: 'No handler found', class: 'yellow' },
-        error: { text: '✕', title: 'Check failed', class: 'red' }
+        success: { text: '✓', title: 'Check successful, handler found', class: 'success' },
+        warning: { text: '⚠', title: options.errorMessage || 'Check completed with warnings (e.g., no handler found)', class: 'yellow' },
+        error: { text: '✕', title: options.errorMessage || 'Check failed', class: 'red' }
     };
     let newState = states[state] || states.start;
 
     button.textContent = newState.text;
     button.title = newState.title;
+
     button.classList.remove('default', 'checking', 'is-working', 'green', 'success', 'yellow', 'red', 'has-critical-sinks', 'show-next-step-arrow', 'show-next-step-emoji');
     button.classList.add(...newState.class.split(' '));
     button.style.animation = '';
@@ -495,11 +497,9 @@ function createHostElement(hostKey, iframesSet) {
     return hostElement;
 }
 
-
 function createActionButtonContainer(endpointKey) {
     const buttonContainer = document.createElement("div");
     buttonContainer.className = "button-container";
-
     const playButton = document.createElement("button");
     playButton.className = "iframe-check-button default";
     playButton.setAttribute("data-endpoint", endpointKey);
@@ -513,31 +513,22 @@ function createActionButtonContainer(endpointKey) {
     reportButton.className = "iframe-report-button disabled";
     reportButton.setAttribute("data-endpoint", endpointKey);
 
-    const handlerButton = document.createElement("button");
-    handlerButton.className = "iframe-handler-button";
-    handlerButton.setAttribute("data-endpoint", endpointKey);
-    handlerButton.textContent = '{ }';
-
-    const hasHandler = endpointsWithHandlers.has(endpointKey);
-    handlerButton.disabled = !hasHandler;
-    handlerButton.title = hasHandler ? 'View Captured Listeners' : 'No Listeners Captured Yet';
-    handlerButton.classList.toggle('green', hasHandler);
-    handlerButton.classList.toggle('disabled', !hasHandler);
-    if(hasHandler) handlerButton.style.backgroundColor = '#222';
-
     const savedPlayStateInfo = buttonStates.get(endpointKey);
+    const savedTraceStateInfo = traceButtonStates.get(endpointKey);
+    const savedReportStateInfo = reportButtonStates.get(endpointKey);
+
     updateButton(playButton, savedPlayStateInfo?.state || 'start', savedPlayStateInfo?.options || {});
 
-    const savedTraceStateInfo = traceButtonStates.get(endpointKey);
-    const canTrace = playButton.classList.contains('success') || playButton.classList.contains('green');
+    const canTrace = playButton.classList.contains('success') || playButton.classList.contains('green') || playButton.classList.contains('launch');
     updateTraceButton(traceButton, savedTraceStateInfo?.state || (canTrace ? 'default' : 'disabled'), savedTraceStateInfo?.options || {});
 
-    const savedReportStateInfo = reportButtonStates.get(endpointKey);
-    const canReport = traceButton.classList.contains('green');
+    const canReport = traceButton.classList.contains('green') || traceButton.classList.contains('success');
     updateReportButton(reportButton, savedReportStateInfo || (canReport ? 'default' : 'disabled'), endpointKey);
 
-
-    playButton.addEventListener("click", async (e) => { e.stopPropagation(); await handlePlayButton(endpointKey, playButton); });
+    playButton.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        await handlePlayButton(endpointKey, playButton);
+    });
     traceButton.addEventListener("click", async (e) => {
         e.stopPropagation();
         if (!traceButton.hasAttribute('disabled') && !traceButton.classList.contains('checking')) {
@@ -545,26 +536,25 @@ function createActionButtonContainer(endpointKey) {
         }
     });
 
-    reportButton.addEventListener("click", async (e) => { e.stopPropagation(); if (!reportButton.classList.contains('disabled')) { await handleReportButton(endpointKey); } });
-    handlerButton.addEventListener("click", (e) => {
+    reportButton.addEventListener("click", async (e) => {
         e.stopPropagation();
-        if (!handlerButton.disabled) {
-            const key = handlerButton.getAttribute('data-endpoint');
-            if (key) { showHandlerModal(key); }
+        if (!reportButton.classList.contains('disabled')) {
+            await handleReportButton(endpointKey);
         }
     });
 
     buttonContainer.appendChild(playButton);
     buttonContainer.appendChild(traceButton);
-    buttonContainer.appendChild(handlerButton);
     buttonContainer.appendChild(reportButton);
     return buttonContainer;
 }
 
-
 function renderEndpoints(filter = "") {
     const endpointsList = document.getElementById("endpointsList");
     if (!endpointsList) return;
+
+    const fragment = document.createDocumentFragment();
+
     const currentFrameConnections = new Map();
     const messageKeys = new Set();
     messages.forEach(msg => {
@@ -623,7 +613,7 @@ function renderEndpoints(filter = "") {
         return;
     }
 
-    endpointsList.innerHTML = "";
+
     let hostCount = 0;
     const sortedHostKeys = finalHostKeys.sort();
 
@@ -645,7 +635,7 @@ function renderEndpoints(filter = "") {
             }
             const hostElement = createHostElement(hostKey, displayedIframeSet);
             if (hostElement) {
-                endpointsList.appendChild(hostElement);
+                fragment.appendChild(hostElement);
                 hostCount++;
             }
         } catch (e) {
@@ -653,11 +643,15 @@ function renderEndpoints(filter = "") {
         }
     });
 
+    endpointsList.innerHTML = "";
+
     if (hostCount === 0 && filter) {
         endpointsList.innerHTML = `<div class='no-endpoints'>No endpoints match filter "${filter}".</div>`;
     } else if (hostCount === 0 && (finalHostKeys.length > 0 || knownHandlerEndpoints.size > 0)) {
         endpointsList.innerHTML = "<div class='no-endpoints'>Rendering error or no matching endpoints.</div>";
         log.handler("[RenderEndpoints] Rendered 0 hosts despite available keys.");
+    } else {
+        endpointsList.appendChild(fragment);
     }
     highlightActiveEndpoint();
 }
@@ -719,7 +713,8 @@ window.escapeHTML = escapeHTML;
 function renderMessages() {
     const messagesList = document.getElementById("messagesList");
     if (!messagesList) return;
-    messagesList.innerHTML = "";
+
+    const fragment = document.createDocumentFragment();
 
     if (!activeEndpoint) {
         messagesList.innerHTML = "<div class='no-messages'>Select a host or iframe to view messages.</div>";
@@ -789,11 +784,14 @@ function renderMessages() {
             messageItem.appendChild(header);
             messageItem.appendChild(dataPre);
             messageItem.appendChild(controls);
-            messagesList.appendChild(messageItem);
+            fragment.appendChild(messageItem);
         } catch (e) {
             log.error("Error rendering message item:", e);
         }
     });
+
+    messagesList.innerHTML = "";
+    messagesList.appendChild(fragment);
 }
 
 function showEditModal(messageObject) {
@@ -906,7 +904,7 @@ function updateDashboardUI() {
     updateEndpointCounts();
     highlightActiveEndpoint();
 }
-window.updateDashboardUI = updateDashboardUI; // Keep if needed globally
+window.updateDashboardUI = updateDashboardUI;
 
 function requestUiUpdate() {
     clearTimeout(uiUpdateTimer);
@@ -961,8 +959,7 @@ function initializeMessageHandling() {
             }
 
             if (needsUiUpdate) {
-                // requestAnimationFrame(updateDashboardUI); // REMOVED
-                requestUiUpdate(); // ADDED
+                requestUiUpdate();
             }
             if (sendResponse) sendResponse({ success: true });
 
@@ -985,66 +982,12 @@ function initializeMessageHandling() {
                         endpointsWithHandlers.add(key);
                     });
                 }
-                updateDashboardUI(); // Keep initial update direct
+                updateDashboardUI();
             } else { log.error("Failed to fetch initial state:", response?.error); }
         });
     });
 }
 
-
-async function showHandlerModal(endpointKey) {
-    const modalContainer = document.getElementById('handlerDisplayModalContainer');
-    if (!modalContainer) return;
-    modalContainer.innerHTML = '';
-
-    const storageKey = `runtime-listeners-${endpointKey}`;
-    log.handler(`[Show Handler] Fetching listeners for key: ${storageKey}`);
-    modalContainer.innerHTML = '<div class="modal-backdrop"></div><div class="handler-display-modal"><div class="modal-loading">Loading listeners...</div></div>';
-    const backdrop = modalContainer.querySelector('.modal-backdrop');
-    const modal = modalContainer.querySelector('.handler-display-modal');
-    const closeModal = () => { if (modalContainer) modalContainer.innerHTML = ''; };
-    if(backdrop) backdrop.onclick = closeModal;
-
-    chrome.storage.local.get([storageKey], (result) => {
-        let content = '';
-        if (chrome.runtime.lastError) {
-            log.error(`[Show Handler] Error fetching listeners:`, chrome.runtime.lastError);
-            content = `<p class="error-message">Failed to load listeners: ${chrome.runtime.lastError.message}</p>`;
-        } else {
-            const listeners = result[storageKey];
-            log.handler(`[Show Handler] Found ${listeners?.length || 0} listeners for ${endpointKey}`);
-            if (!listeners || listeners.length === 0) {
-                content = `<p class="no-listeners-found">No runtime listeners captured for this endpoint.</p>`;
-            } else {
-                listeners.forEach((listener, index) => {
-                    const captureContext = listener.context || 'unknown source';
-                    const captureTime = listener.timestamp ? new Date(listener.timestamp).toLocaleString() : 'unknown time';
-                    let codeContent = '[Code Unavailable]';
-                    try { codeContent = listener.code.replace(/^ {8}/gm, '').replace(/\t/g, '  '); } catch{}
-
-                    content += `<details class='listener-details' ${listeners.length === 1 ? 'open' : ''}>
-                        <summary class='listener-summary'>Listener #${index + 1} (via <code>${escapeHTML(captureContext)}</code> at ${escapeHTML(captureTime)}) <span class="toggle-icon">${listeners.length === 1 ? '▼' : '▶'}</span></summary>
-                        <div class='listener-content'><pre class='report-code-block listener-code'><code>${escapeHTML(codeContent)}</code></pre>`;
-                    if (listener.stack) {
-                        content += `<strong style='display: block; margin-top: 10px; font-size: 12px;'>Capture Stack Trace:</strong><pre class='report-code-block listener-stack' style='font-size: 11px; max-height: 150px; border-color: #555;'>${escapeHTML(listener.stack)}</pre>`;
-                    }
-                    content += `</div></details>`;
-                });
-            }
-        }
-
-        modal.innerHTML = `
-            <div class="handler-modal-header"><h4>Captured Listeners</h4><div class="endpoint-info">For: ${escapeHTML(endpointKey)}</div><button class="close-modal-btn">&times;</button></div>
-            <div class="handler-modal-body">${content}</div>`;
-        modal.querySelector('.close-modal-btn').onclick = closeModal;
-        modal.querySelectorAll('.listener-details').forEach(details => {
-            details.addEventListener('toggle', () => {
-                const icon = details.querySelector('.toggle-icon');
-                if (icon) icon.textContent = details.open ? '▼' : '▶';
-            });
-        });
-    });
-}
 
 function setupCallbackUrl() {
     const urlInput = document.getElementById('callbackUrlInput');
@@ -1086,7 +1029,7 @@ function setupUIControls() {
     document.getElementById("clearMessages")?.addEventListener("click", () => {
         log.info("Clearing dashboard state...");
         messages.length = 0; buttonStates.clear(); traceButtonStates.clear(); reportButtonStates.clear();
-        activeEndpoint = null; endpointsWithHandlers.clear(); knownHandlerEndpoints.clear(); modifiedEndpoints.clear(); launchInProgressEndpoints.clear();
+        activeEndpoint = null; endpointsWithHandlers.clear(); knownHandlerEndpoints.clear(); launchInProgressEndpoints.clear();
         chrome.storage.local.clear(() => log.info("Local storage cleared."));
         chrome.runtime.sendMessage({ type: "resetState" }, (response) => log.info("Background reset:", response));
         requestUiUpdate();
@@ -1104,8 +1047,7 @@ function setupUIControls() {
                 if (response.messages) { messages.length = 0; messages.push(...response.messages); }
                 if (response.handlerEndpointKeys) { knownHandlerEndpoints.clear(); endpointsWithHandlers.clear(); response.handlerEndpointKeys.forEach(key => { knownHandlerEndpoints.add(key); endpointsWithHandlers.add(key); }); }
                 log.info("Dashboard refreshed.");
-                // updateDashboardUI(); // REMOVED
-                requestUiUpdate(); // ADDED
+                requestUiUpdate();
             } else { log.error("Failed refresh:", response?.error); }
         });
     });
@@ -1170,154 +1112,110 @@ function clearCustomPayloads() {
     });
 }
 
-async function launchFuzzerEnvironment(endpoint, testData) {
+async function launchFuzzerEnvironment(targetUrl, handlerCode, messages, payloads, traceReportData, fuzzerOptions, analysisKeyForReport) {
+    log.debug(`[Launch Env] Start. Target: ${targetUrl}, AnalysisKey: ${analysisKeyForReport}`);
+    let serverStarted = false;
+
     try {
-        let traceReport = null;
-        const endpointKey = window.getStorageKeyForUrl(endpoint);
-        let analysisKeyToUse = endpointKey;
-        try {
-            const traceInfoKey = `trace-info-${endpointKey}`;
-            const traceInfo = await new Promise(resolve => chrome.storage.local.get(traceInfoKey, result => resolve(result[traceInfoKey])));
-            if (traceInfo?.analysisStorageKey) {
-                analysisKeyToUse = traceInfo.analysisStorageKey;
-            } else if (traceInfo?.analyzedUrl) {
-                analysisKeyToUse = window.getStorageKeyForUrl(traceInfo.analyzedUrl);
-            }
-            traceReport = await window.traceReportStorage.getTraceReport(analysisKeyToUse);
-        } catch (e) {}
-
-        if (!traceReport) {
-            traceReport = await window.traceReportStorage.getTraceReport(endpointKey);
-            if (traceReport) {
-                analysisKeyToUse = endpointKey;
-            } else {
-                throw new Error('No trace report. Run Play & Trace.');
-            }
+        if (!analysisKeyForReport) {
+            log.error("[Launch Env] analysisKeyForReport was not provided! Cannot proceed reliably.");
+            throw new Error("Internal error: Missing analysis key for launching fuzzer.");
         }
-
-        const handlerCode = traceReport?.analyzedHandler?.handler || traceReport?.analyzedHandler?.code || testData?.handler;
-        if (!handlerCode) {
-            throw new Error('No handler code. Run Play.');
+        if (!traceReportData) {
+            log.error(`[Launch Env] traceReportData object was not provided.`);
+            throw new Error(`Internal error: Trace report data missing.`);
         }
+        log.debug(`[Launch Env] Received trace report data for key: ${analysisKeyForReport}`);
 
-        let payloads = [];
-        try { payloads = await window.traceReportStorage.getReportPayloads(analysisKeyToUse); } catch {}
-        if (payloads.length === 0 && traceReport?.details?.payloads?.length > 0) payloads = traceReport.details.payloads;
-        else if (payloads.length === 0 && traceReport?.payloads?.length > 0) payloads = traceReport.payloads;
-        else if (payloads.length === 0 && testData?.payloads?.length > 0) payloads = testData.payloads;
-        if (payloads.length === 0) window.log.warning('[Launch] No specific payloads found.');
-
-        let messages = testData?.originalMessages || await window.retrieveMessagesWithFallbacks(endpointKey);
-        if (messages.length === 0 && traceReport?.details?.uniqueStructures?.length > 0) {
-            messages = traceReport.details.uniqueStructures.flatMap(s => s.examples || []) || [];
+        if (!targetUrl || !handlerCode || !messages || !payloads || !fuzzerOptions) {
+            log.error("[Launch Env] Missing required parameters (target, handler, messages, payloads, or options).");
+            throw new Error("Internal error: Missing data for launching fuzzer.");
         }
 
         await chrome.runtime.sendMessage({ action: "startServer" });
         await new Promise(resolve => setTimeout(resolve, 1500));
-        let serverStarted = false; let attempts = 0;
+        let attempts = 0;
         while (!serverStarted && attempts < 3) {
             attempts++;
+            log.debug(`[Launch Env] Checking fuzzer server status (Attempt ${attempts})`);
             try {
                 const health = await fetch('http://127.0.0.1:1337/health', { method: 'GET', cache: 'no-store', signal: AbortSignal.timeout(800) });
-                if (health.ok) serverStarted = true;
-            } catch { await new Promise(r => setTimeout(r, 700)); }
+                if (health.ok) { serverStarted = true; log.success('[Launch Env] Fuzzer server is running.'); }
+                else { log.warn(`[Launch Env] Server health check failed status: ${health.status}`); await new Promise(r => setTimeout(r, 700)); }
+            } catch(err) { log.warn(`[Launch Env] Server health check fetch error (Attempt ${attempts}): ${err.message}`); await new Promise(r => setTimeout(r, 700)); }
         }
-        if (!serverStarted) throw new Error("Fuzzer server did not start.");
-
-        const storageData = await chrome.storage.session.get([CALLBACK_URL_STORAGE_KEY]);
-        const currentCallbackUrl = storageData[CALLBACK_URL_STORAGE_KEY] || null;
-        const customPayloadsResult = await new Promise(resolve => chrome.storage.session.get('customXssPayloads', result => resolve(result.customXssPayloads)));
-        const useCustomPayloads = customPayloadsResult && customPayloadsResult.length > 0;
+        if (!serverStarted) { log.error("[Launch Env] Fuzzer server did not start."); throw new Error("Fuzzer server did not start."); }
 
         const config = {
-            target: traceReport.endpoint || endpoint,
+            target: targetUrl,
             messages: messages,
             handler: handlerCode,
             payloads: payloads,
             traceData: {
-                ...(traceReport || {}),
+                ...(traceReportData || {}),
                 details: {
-                    ...(traceReport?.details || {}),
-                    originValidationChecks: traceReport?.details?.originValidationChecks || []
+                    ...(traceReportData?.details || {}),
+                    originValidationChecks: traceReportData?.details?.originValidationChecks || []
                 }
             },
-            callbackUrl: currentCallbackUrl,
+            callbackUrl: fuzzerOptions.callbackUrl,
             fuzzerOptions: {
-                autoStart: true,
-                useCustomPayloads: useCustomPayloads,
-                enableCallbackFuzzing: !!currentCallbackUrl
+                autoStart: fuzzerOptions.autoStart,
+                useCustomPayloads: fuzzerOptions.useCustomPayloads,
+                enableCallbackFuzzing: fuzzerOptions.enableCallbackFuzzing
             }
         };
+        log.debug("[Launch Env] Sending config to fuzzer server:", { target: config.target, messageCount: config.messages.length, payloadCount: config.payloads.length, hasCallback: !!config.callbackUrl, customPayloads: config.fuzzerOptions.useCustomPayloads });
 
         const response = await fetch('http://127.0.0.1:1337/current-config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(config), signal: AbortSignal.timeout(5000) });
         if (!response.ok) {
-            throw new Error(`Config update failed: ${response.statusText}`);
+            const errorText = await response.text(); log.error(`[Launch Env] Config update failed: ${response.status} - ${response.statusText}. Response: ${errorText}`); throw new Error(`Config update failed: ${response.statusText}`);
         }
+        log.success("[Launch Env] Config sent successfully.");
+
         const tab = await chrome.tabs.create({ url: 'http://127.0.0.1:1337/' });
-        const cleanupListener = (tabId) => {
+        log.info(`[Launch Env] Fuzzer tab created ID: ${tab.id}`);
+        const cleanupListener = (tabId, removeInfo) => {
             if (tabId === tab.id) {
-                chrome.runtime.sendMessage({ action: "stopServer" });
+                log.info(`[Launch Env] Fuzzer tab ${tabId} closed. Stopping server.`);
+                chrome.runtime.sendMessage({ action: "stopServer" }).catch(e => log.warn("[Launch Env] Error sending stopServer:", e));
                 chrome.tabs.onRemoved.removeListener(cleanupListener);
             }
         };
         chrome.tabs.onRemoved.addListener(cleanupListener);
         return true;
+
     } catch (error) {
+        log.error("[Launch Fuzzer Env] Caught error:", error);
         alert(`Fuzzer Launch Failed: ${error.message}`);
-        window.log.error("[Launch Fuzzer Env]", error);
-        try { await chrome.runtime.sendMessage({ action: "stopServer" }); } catch {}
+        if (serverStarted === false) {
+            log.info("[Launch Fuzzer Env] Attempting to stop server after launch failure.");
+            try { await chrome.runtime.sendMessage({ action: "stopServer" }); } catch {}
+        }
         return false;
     }
 }
 
-
-function showQueryModal(endpoint) {
-    return new Promise((resolve) => {
-        try {
-            log.handler(`[Query Modal] Opening for: ${endpoint}`);
-            const originalUrl = new URL(endpoint); const currentParams = new URLSearchParams(originalUrl.search);
-            const modalContainer = document.getElementById('queryModalContainer');
-            if (!modalContainer) throw new Error("Query modal container not found.");
-            modalContainer.innerHTML = '';
-
-            const modal = document.createElement('div'); modal.className = 'query-modal';
-            let modalContentHTML = `<h2 class="query-modal-title">Modify Query Parameters</h2><div class="query-modal-body">`;
-            let paramCount = 0;
-            currentParams.forEach((value, key) => { paramCount++; modalContentHTML += `<div class="query-param-row"><label class="query-param-label">${escapeHTML(key)}:</label><input type="text" class="query-param-input" value="${escapeHTML(value)}" data-param="${escapeHTML(key)}"></div>`; });
-            if (paramCount === 0) modalContentHTML += '<p class="query-modal-no-params">No query parameters found.</p>';
-            modalContentHTML += `</div><div class="query-modal-footer"><button id="cancelBtn" class="control-button secondary-button">Cancel</button><button id="okBtn" class="control-button primary-button">OK</button></div>`;
-            modal.innerHTML = modalContentHTML;
-
-            const backdrop = document.createElement('div'); backdrop.className = 'modal-backdrop';
-            const closeModal = (result) => { modalContainer.innerHTML = ''; resolve(result); };
-
-            modalContainer.appendChild(backdrop); modalContainer.appendChild(modal);
-            modal.querySelector('#okBtn').addEventListener('click', () => {
-                const modifiedUrl = new URL(endpoint); modifiedUrl.search = '';
-                modal.querySelectorAll('input.query-param-input').forEach(input => modifiedUrl.searchParams.set(input.dataset.param, input.value));
-                log.handler(`[Query Modal] OK. Modified URL: ${modifiedUrl.toString()}`);
-                closeModal({ url: modifiedUrl.toString(), modified: true, originalUrl: endpoint });
-            });
-            modal.querySelector('#cancelBtn').addEventListener('click', () => closeModal({ url: endpoint, modified: false, cancelled: true, originalUrl: endpoint }));
-            backdrop.addEventListener('click', () => closeModal({ url: endpoint, modified: false, cancelled: true, originalUrl: endpoint }));
-        } catch (error) {
-            log.error('[Query Modal] Error:', error);
-            resolve({ url: endpoint, modified: false, originalUrl: endpoint });
-        }
-    });
-}
-
-
-async function saveRandomPostMessages(endpointKey) {
+async function saveRandomPostMessages(endpointKey, messagesToSave = null) {
     const MAX_MESSAGES = 20;
-    let relevantMessages = messages.filter(msg => {
-        if (!msg?.origin || !msg?.destinationUrl) return false;
-        const originKey = window.getStorageKeyForUrl(msg.origin);
-        const destKey = window.getStorageKeyForUrl(msg.destinationUrl);
-        return originKey === endpointKey || destKey === endpointKey;
-    });
+    let relevantMessages = [];
 
-    relevantMessages = relevantMessages.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp)).slice(0, MAX_MESSAGES);
+    if (messagesToSave && Array.isArray(messagesToSave)) {
+        relevantMessages = messagesToSave;
+        log.debug(`[Save Messages] Using ${messagesToSave.length} provided messages for key: ${endpointKey}`);
+    } else {
+        log.debug(`[Save Messages] Filtering global messages for key: ${endpointKey}`);
+        relevantMessages = messages.filter(msg => {
+            if (!msg?.origin || !msg?.destinationUrl) return false;
+            const originKey = window.getStorageKeyForUrl(msg.origin);
+            const destKey = window.getStorageKeyForUrl(msg.destinationUrl);
+            return originKey === endpointKey || destKey === endpointKey;
+        });
+    }
+
+    relevantMessages = relevantMessages
+        .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
+        .slice(0, MAX_MESSAGES);
 
     const processedMessages = relevantMessages.map(msg => {
         if (!msg.messageType) {
@@ -1333,130 +1231,459 @@ async function saveRandomPostMessages(endpointKey) {
     });
 
     const storageKey = `saved-messages-${endpointKey}`;
-    try { await chrome.storage.local.set({ [storageKey]: processedMessages }); return processedMessages; }
-    catch (error) { log.error("Failed to save messages:", error); try { await chrome.storage.local.remove(storageKey); } catch {} return []; }
+    try {
+        if (processedMessages.length > 0) {
+            await chrome.storage.local.set({ [storageKey]: processedMessages });
+            log.debug(`[Save Messages] Successfully saved ${processedMessages.length} messages for key: ${storageKey}`);
+        } else {
+            await chrome.storage.local.remove(storageKey);
+            log.debug(`[Save Messages] No relevant messages found/provided, removed key: ${storageKey}`);
+        }
+        return processedMessages;
+    }
+    catch (error) {
+        log.error("Failed to save messages:", error);
+        try { await chrome.storage.local.remove(storageKey); } catch {}
+        return [];
+    }
 }
 
 async function retrieveMessagesWithFallbacks(endpointKey) {
     const primaryStorageKey = `saved-messages-${endpointKey}`;
-    try { const primaryResult = await new Promise(resolve => chrome.storage.local.get(primaryStorageKey, result => resolve(result[primaryStorageKey] || null))); if (primaryResult?.length > 0) return primaryResult; }
-    catch(e) {} return [];
+    log.debug(`[RetrieveMessages] Attempting retrieval for key: ${primaryStorageKey}`);
+
+    try {
+        const result = await new Promise((resolve, reject) => {
+            chrome.storage.local.get(primaryStorageKey, (storageResult) => {
+                if (chrome.runtime.lastError) {
+                    log.error(`[RetrieveMessages] Storage error for key ${primaryStorageKey}:`, chrome.runtime.lastError);
+                    reject(chrome.runtime.lastError);
+                } else {
+                    log.debug(`[RetrieveMessages] Raw result from storage.local.get for key ${primaryStorageKey}:`, storageResult);
+                    const messages = storageResult?.[primaryStorageKey] || null;
+                    log.debug(`[RetrieveMessages] Extracted messages from result for key ${primaryStorageKey} (Type: ${typeof messages}, Length: ${messages?.length ?? 'N/A'}):`, messages);
+                    resolve(messages);
+                }
+            });
+        });
+
+        if (result && Array.isArray(result) && result.length > 0) {
+            log.debug(`[RetrieveMessages] Found ${result.length} valid messages in storage for key ${primaryStorageKey}. Returning stored data.`);
+            return result;
+        } else {
+            log.debug(`[RetrieveMessages] No valid messages found in storage (result was null, not array, or empty) for key ${primaryStorageKey}. Returning empty array.`);
+            return [];
+        }
+    } catch (e) {
+        log.error(`[RetrieveMessages] Error during retrieval promise/processing for key ${primaryStorageKey}:`, e);
+        return [];
+    }
 }
 window.retrieveMessagesWithFallbacks = retrieveMessagesWithFallbacks;
 
+async function showUrlModificationModal(originalUrl, failureReason) {
+    return new Promise((resolve) => {
+        const modalContainer = document.getElementById('urlModificationModalContainer');
+        if (!modalContainer) {
+            console.error("URL modification modal container not found");
+            resolve({ action: 'cancel', modifiedUrl: null });
+            return;
+        }
+        modalContainer.innerHTML = '';
+
+        const backdrop = document.createElement('div');
+        backdrop.className = 'modal-backdrop';
+
+        const modal = document.createElement('div');
+        modal.className = 'url-modification-modal';
+
+        let currentUrl = new URL(originalUrl);
+        const params = new URLSearchParams(currentUrl.search);
+        let paramInputs = {};
+
+        let paramsHTML = '';
+        if (Array.from(params.keys()).length > 0) {
+            params.forEach((value, key) => {
+                const inputId = `param-input-${key}`;
+                paramsHTML += `
+                    <div class="url-param-row">
+                        <label for="${inputId}" class="url-param-label">${escapeHTML(key)}:</label>
+                        <input type="text" id="${inputId}" class="url-param-input" value="${escapeHTML(value)}">
+                    </div>
+                `;
+                paramInputs[key] = inputId;
+            });
+        } else {
+            paramsHTML = '<p class="url-modal-no-params">No query parameters found in the URL.</p>';
+        }
+
+        modal.innerHTML = `
+            <div class="url-modal-header">
+                <h4>Embedding Check Failed - Modify URL?</h4>
+                <button class="close-modal-btn">&times;</button>
+            </div>
+            <div class="url-modal-body">
+                <p class="url-modal-reason"><strong>Reason:</strong> ${escapeHTML(failureReason)}</p>
+                <p class="url-modal-original"><strong>Original URL:</strong> <span class="url-display">${escapeHTML(originalUrl)}</span></p>
+                <hr>
+                <h5 class="url-modal-params-title">Edit Query Parameters:</h5>
+                <div class="url-params-editor">${paramsHTML}</div>
+            </div>
+            <div class="url-modal-footer">
+                <button id="urlCancelBtn" class="control-button secondary-button">Cancel Analysis</button>
+                <button id="urlContinueBtn" class="control-button secondary-button orange-button">Analyze Original Anyway</button>
+                <button id="urlRetryBtn" class="control-button primary-button">Modify & Retry Analysis</button>
+            </div>
+        `;
+
+        modalContainer.appendChild(backdrop);
+        modalContainer.appendChild(modal);
+
+        const closeModal = (result) => {
+            modalContainer.innerHTML = '';
+            resolve(result);
+        };
+
+        modal.querySelector('.close-modal-btn').addEventListener('click', () => closeModal({ action: 'cancel', modifiedUrl: null }));
+        backdrop.addEventListener('click', () => closeModal({ action: 'cancel', modifiedUrl: null }));
+        modal.querySelector('#urlCancelBtn').addEventListener('click', () => closeModal({ action: 'cancel', modifiedUrl: null }));
+        modal.querySelector('#urlContinueBtn').addEventListener('click', () => closeModal({ action: 'continue', modifiedUrl: originalUrl }));
+
+        modal.querySelector('#urlRetryBtn').addEventListener('click', () => {
+            const newParams = new URLSearchParams();
+            let changed = false;
+            params.forEach((originalValue, key) => {
+                const inputElement = document.getElementById(paramInputs[key]);
+                const newValue = inputElement ? inputElement.value : originalValue;
+                newParams.set(key, newValue);
+                if (newValue !== originalValue) {
+                    changed = true;
+                }
+            });
+
+            if (!changed) {
+                showToastNotification("No parameters were changed.", "info", 3000);
+                return;
+            }
+
+            currentUrl.search = newParams.toString();
+            const modifiedUrlString = currentUrl.toString();
+
+            if (!isValidUrl(modifiedUrlString)) {
+                showToastNotification("Modified URL is invalid.", "error", 4000);
+                return;
+            }
+
+            closeModal({ action: 'retry', modifiedUrl: modifiedUrlString });
+        });
+    });
+}
 
 async function handlePlayButton(endpoint, button, skipCheck = false) {
     const endpointKey = button.getAttribute('data-endpoint');
-    if (!endpointKey) { log.error("[Play Button] No endpoint key found."); updateButton(button, 'error'); return; }
+    if (!endpointKey) {
+        log.error("[Play Button] No endpoint key found.");
+        updateButton(button, 'error');
+        return;
+    }
     const originalFullEndpoint = endpoint;
+
+    const currentState = buttonStates.get(endpointKey);
+    log.debug(`[Play Button Click] Entered handler for key: ${endpointKey}. Current state: ${currentState?.state}`);
+
+    if (currentState?.state === 'launch') {
+        if (launchInProgressEndpoints.has(endpointKey)) {
+            log.warn(`[Play Button Click] Launch already in progress for ${endpointKey}. Aborting.`);
+            return;
+        }
+        launchInProgressEndpoints.add(endpointKey);
+        log.scan(`Starting launch for key: ${endpointKey}`);
+        const traceButton = button.closest('.button-container')?.querySelector('.iframe-trace-button');
+        try {
+            const successfulUrlStorageKey = `successful-url-${endpointKey}`;
+            const successfulUrlResult = await new Promise(resolve => chrome.storage.local.get(successfulUrlStorageKey, resolve));
+            const successfulUrl = successfulUrlResult[successfulUrlStorageKey] || originalFullEndpoint;
+
+            const analysisKeyToUse = endpointKey;
+            log.debug(`[Launch] Using analysis key for report/messages: ${analysisKeyToUse}`);
+            log.debug(`[Launch] Using endpoint URL for launch target: ${successfulUrl}`);
+
+            const [traceReport, storedPayloads, storedMessages] = await Promise.all([
+                window.traceReportStorage.getTraceReport(analysisKeyToUse),
+                window.traceReportStorage.getReportPayloads(analysisKeyToUse),
+                window.retrieveMessagesWithFallbacks(analysisKeyToUse)
+            ]);
+
+            if (!traceReport) {
+                log.error(`[Launch] Could not retrieve trace report using key: ${analysisKeyToUse}`);
+                throw new Error('No trace report found. Run Play & Trace again.');
+            }
+            log.debug(`[Launch] Retrieved Trace Report using key ${analysisKeyToUse}`);
+
+            const handlerCode = traceReport?.analyzedHandler?.handler || traceReport?.analyzedHandler?.code;
+            if (!handlerCode) {
+                log.error(`[Launch] Handler code missing in trace report (key: ${analysisKeyToUse})`);
+                throw new Error('Handler code missing in trace report.');
+            }
+
+            const payloads = storedPayloads || traceReport?.details?.payloads || traceReport?.payloads || [];
+            if (payloads.length === 0) log.warn('[Launch] No specific payloads found.');
+
+            const messages = storedMessages || traceReport.details?.uniqueStructures?.flatMap(s => s.examples || []) || [];
+            if (messages.length === 0) log.warn('[Launch] No specific messages found.');
+
+            const callbackStorageData = await chrome.storage.session.get([CALLBACK_URL_STORAGE_KEY]);
+            const currentCallbackUrl = callbackStorageData[CALLBACK_URL_STORAGE_KEY] || null;
+            const customPayloadsResult = await new Promise(resolve => chrome.storage.session.get('customXssPayloads', result => resolve(result.customXssPayloads)));
+            const useCustomPayloads = customPayloadsResult && customPayloadsResult.length > 0;
+
+            const fuzzerOptions = {
+                autoStart: true,
+                useCustomPayloads: useCustomPayloads,
+                enableCallbackFuzzing: !!currentCallbackUrl,
+                callbackUrl: currentCallbackUrl
+            };
+
+            const success = await launchFuzzerEnvironment(
+                successfulUrl,
+                handlerCode,
+                messages,
+                payloads,
+                traceReport,
+                fuzzerOptions,
+                analysisKeyToUse
+            );
+
+            updateButton(button, success ? 'launch' : 'error', { hasCriticalSinks: button.classList.contains('has-critical-sinks'), errorMessage: success ? undefined : 'Fuzzer launch failed' });
+            if (traceButton) updateTraceButton(traceButton, success ? 'success' : 'default');
+
+        } catch (error) {
+            log.error('[Launch Error]:', error?.message); alert(`Fuzzer launch failed: ${error.message}`);
+            const traceButton = button.closest('.button-container')?.querySelector('.iframe-trace-button');
+            updateButton(button, 'error', {errorMessage: 'Fuzzer launch failed'});
+            if (traceButton) updateTraceButton(traceButton, 'disabled');
+            try { await chrome.runtime.sendMessage({ action: "stopServer" }); } catch {}
+        } finally {
+            launchInProgressEndpoints.delete(endpointKey);
+            setTimeout(requestUiUpdate, 100);
+        }
+        return;
+    }
+
+    if (launchInProgressEndpoints.has(endpointKey)) {
+        log.warn(`[Play Button Click] Aborting click for ${endpointKey} because Play/Analyze is already in progress.`);
+        return;
+    }
+    launchInProgressEndpoints.add(endpointKey);
+    log.debug(`[Play Button Click] Added ${endpointKey} to launchInProgressEndpoints for Play/Analyze action.`);
 
     const currentButtonContainer = button.closest('.button-container');
     const traceButton = currentButtonContainer?.querySelector('.iframe-trace-button');
     const reportButton = currentButtonContainer?.querySelector('.iframe-report-button');
 
-    button.classList.remove('show-next-step-emoji', 'show-next-step-arrow');
-    if (traceButton) traceButton.classList.remove('show-next-step-emoji');
-
-    if (button.classList.contains('has-critical-sinks') || button.textContent === '🚀') {
-        if (launchInProgressEndpoints.has(endpointKey)) return;
-        launchInProgressEndpoints.add(endpointKey);
-        log.scan(`Starting launch for key: ${endpointKey}`);
-        try {
-            const traceInfoKey = `trace-info-${endpointKey}`;
-            const traceInfoResult = await new Promise(resolve => chrome.storage.local.get(traceInfoKey, resolve));
-            const traceInfo = traceInfoResult[traceInfoKey];
-            let analysisKeyToUse = endpointKey;
-            if (traceInfo?.analysisStorageKey) analysisKeyToUse = traceInfo.analysisStorageKey;
-            else if (traceInfo?.analyzedUrl) analysisKeyToUse = window.getStorageKeyForUrl(traceInfo.analyzedUrl);
-
-            const [reportData, reportPayloads] = await Promise.all([ window.traceReportStorage.getTraceReport(analysisKeyToUse), window.traceReportStorage.getReportPayloads(analysisKeyToUse) ]);
-
-            if (!reportData) throw new Error(`Trace report not found for analysis key ${analysisKeyToUse}. Run Play/Trace again.`);
-
-            const handlerCode = reportData?.analyzedHandler?.handler || reportData?.analyzedHandler?.code;
-            if (!handlerCode) throw new Error(`Handler code missing in report for launch. Key: ${analysisKeyToUse}`);
-
-            let relevantMessages = await retrieveMessagesWithFallbacks(endpointKey);
-            if (relevantMessages.length === 0 && reportData?.details?.uniqueStructures?.length > 0) { relevantMessages = reportData.details.uniqueStructures.flatMap(s => s.examples || []); }
-            const payloads = reportPayloads || reportData?.details?.payloads || reportData?.payloads || [];
-            const targetEndpointForLaunch = reportData.endpoint || endpointKey;
-            const testData = { target: targetEndpointForLaunch, originalMessages: relevantMessages, handler: handlerCode, sinks: reportData.details?.sinks || reportData.vulnerabilities || [], payloads: payloads };
-            const success = await launchFuzzerEnvironment(targetEndpointForLaunch, testData);
-            updateButton(button, success ? 'launch' : 'error', { hasCriticalSinks: button.classList.contains('has-critical-sinks') });
-            if (traceButton) updateTraceButton(traceButton, success ? 'success' : 'default');
-        } catch (error) {
-            log.error('[Launch Error]:', error?.message); alert(`Fuzzer launch failed: ${error.message}`); updateButton(button, 'error'); if (traceButton) updateTraceButton(traceButton, 'disabled'); try { await chrome.runtime.sendMessage({ action: "stopServer" }); } catch {}
-        } finally { launchInProgressEndpoints.delete(endpointKey); setTimeout(() => requestAnimationFrame(updateDashboardUI), 100); }
-        return;
-    }
-
-    if (launchInProgressEndpoints.has(endpointKey)) return;
-    launchInProgressEndpoints.add(endpointKey);
-    let analysisStorageKey = endpointKey; let endpointUrlForAnalysis = originalFullEndpoint; let handlerStateUpdated = false; let foundHandlerObject = null; let usingStaticFallback = false;
+    let endpointUrlForAnalysis = originalFullEndpoint;
+    let analysisStorageKey = endpointKey;
+    let successfullyAnalyzedUrl = null;
+    let handlerStateUpdated = false;
+    let foundHandlerObject = null;
+    let originalMessages = [];
 
     try {
-        await saveRandomPostMessages(endpointKey);
-        const modalResult = await showQueryModal(originalFullEndpoint);
-        if (modalResult.cancelled) { updateButton(button, 'start'); throw new Error("User cancelled"); }
-
-        if (modalResult.modified) {
-            endpointUrlForAnalysis = modalResult.url; analysisStorageKey = window.getStorageKeyForUrl(endpointUrlForAnalysis);
-            const mappingKey = `analyzed-url-for-${endpointKey}`;
-            await chrome.storage.local.set({ [mappingKey]: endpointUrlForAnalysis, [`analysis-storage-key-for-${endpointKey}`]: analysisStorageKey });
-            modifiedEndpoints.set(endpointKey, endpointUrlForAnalysis);
-        } else {
-            analysisStorageKey = window.getStorageKeyForUrl(originalFullEndpoint); endpointUrlForAnalysis = originalFullEndpoint;
-            await chrome.storage.local.remove([`analyzed-url-for-${endpointKey}`, `analysis-storage-key-for-${endpointKey}`]);
-            modifiedEndpoints.delete(endpointKey);
-        }
-        log.handler(`Using URL for analysis: ${endpointUrlForAnalysis}, Storage key: ${analysisStorageKey}`);
+        originalMessages = messages.filter(msg => {
+            if (!msg?.origin || !msg?.destinationUrl) return false;
+            const originKey = window.getStorageKeyForUrl(msg.origin);
+            const destKey = window.getStorageKeyForUrl(msg.destinationUrl);
+            return originKey === endpointKey || destKey === endpointKey;
+        }).sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp)).slice(0, 50);
+        log.debug(`Filtered ${originalMessages.length} messages from global buffer for original key: ${endpointKey}`);
 
         if (!skipCheck) {
-            updateButton(button, 'csp'); const cspResult = await performEmbeddingCheck(endpointUrlForAnalysis);
-            if (!cspResult.embeddable) throw new Error(`Embedding check failed: ${cspResult.status}`);
+            updateButton(button, 'csp');
+            let cspResult = await performEmbeddingCheck(endpointUrlForAnalysis);
+
+            if (!cspResult.embeddable) {
+                log.warn(`[Play] Initial embedding check failed for ${endpointUrlForAnalysis}: ${cspResult.status}`);
+                const modalResult = await showUrlModificationModal(endpointUrlForAnalysis, cspResult.status);
+
+                if (modalResult.action === 'cancel') {
+                    log.info('[Play] URL modification cancelled by user.');
+                    updateButton(button, 'start');
+                    throw new Error("User cancelled analysis");
+                } else if (modalResult.action === 'continue') {
+                    log.warn('[Play] User chose to continue analysis despite embedding failure.');
+                    successfullyAnalyzedUrl = endpointUrlForAnalysis;
+                    updateButton(button, 'warning', { errorMessage: 'Proceeding despite CSP failure' });
+                    throw new Error("Proceeding despite embedding failure (analysis skipped)");
+                } else if (modalResult.action === 'retry') {
+                    log.info('[Play] Retrying embedding check with modified URL:', modalResult.modifiedUrl);
+                    endpointUrlForAnalysis = modalResult.modifiedUrl;
+                    updateButton(button, 'csp');
+                    cspResult = await performEmbeddingCheck(endpointUrlForAnalysis);
+                    if (!cspResult.embeddable) {
+                        log.error(`[Play] Embedding check failed even after modification: ${cspResult.status}`);
+                        showToastNotification(`Modified URL also failed CSP check: ${cspResult.status.substring(0, 100)}`, 'error');
+                        updateButton(button, 'error', { errorMessage: 'Modified URL failed CSP' });
+                        throw new Error("Modified URL failed embedding check");
+                    }
+                    log.success('[Play] Embedding check PASSED after modification.');
+                    successfullyAnalyzedUrl = endpointUrlForAnalysis;
+                }
+            } else {
+                successfullyAnalyzedUrl = endpointUrlForAnalysis;
+            }
+        } else {
+            successfullyAnalyzedUrl = endpointUrlForAnalysis;
         }
 
         updateButton(button, 'analyze');
+        log.handler(`Using URL for analysis: ${endpointUrlForAnalysis}, Storage key: ${analysisStorageKey}`);
+
+        await saveRandomPostMessages(analysisStorageKey, originalMessages);
+        log.debug(`Saved original messages under original analysis key: ${analysisStorageKey}`);
+
+        const successfulUrlStorageKey = `successful-url-${analysisStorageKey}`;
+        await chrome.storage.local.set({ [successfulUrlStorageKey]: successfullyAnalyzedUrl });
+        log.debug(`Associated successful URL ${successfullyAnalyzedUrl} with key ${analysisStorageKey}`);
+
         const runtimeListenerKey = `runtime-listeners-${endpointKey}`;
         const runtimeResult = await new Promise(resolve => chrome.storage.local.get(runtimeListenerKey, resolve));
         const runtimeListeners = runtimeResult ? runtimeResult[runtimeListenerKey] : null;
         const validRuntimeListeners = runtimeListeners?.filter(l => l?.code && typeof l.code === 'string' && !l.code.includes('[native code]') && l.code.length > 25) || [];
 
+        const scoringMessages = originalMessages;
+        log.handler(`[Play] Found ${validRuntimeListeners.length} valid runtime listeners (original key). Using ${scoringMessages.length} original messages for scoring.`);
+
         if (validRuntimeListeners.length > 0) {
-            log.success(`[Play] Found ${validRuntimeListeners.length} valid runtime listener(s).`);
-            if (validRuntimeListeners.length === 1) {
-                const chosen = validRuntimeListeners[0];
-                foundHandlerObject = { handler: chosen.code, category: 'runtime-captured-single', score: 50, source: 'runtime-instrumentation', timestamp: chosen.timestamp, stack: chosen.stack, context: chosen.context };
-            } else {
-                const scoringMessages = await retrieveMessagesWithFallbacks(endpointKey);
-                if (scoringMessages.length > 0) {
-                    try { const extractor = new HandlerExtractor().initialize(endpointUrlForAnalysis, scoringMessages); foundHandlerObject = extractor.getBestHandler(validRuntimeListeners.map(l => ({...l, handler: l.code, category: 'runtime-captured-scored'}))); } catch(e){ log.error("Error scoring runtime handlers:", e); }
+            log.handler("[Play] Prioritizing runtime listeners.");
+            const scorer = new HandlerExtractor();
+            scorer.initialize(endpointUrlForAnalysis, scoringMessages);
+            let bestScore = -1;
+            let bestListener = null;
+            validRuntimeListeners.forEach(listener => {
+                const score = scorer.scoreHandler(listener.code, listener.category || 'runtime-captured', listener.source);
+                log.debug(`[Play] Scoring runtime listener (Source: ${listener.context || 'unknown'}). Score: ${score}`);
+                if (score > bestScore) {
+                    bestScore = score;
+                    bestListener = listener;
                 }
-                if (!foundHandlerObject) { const chosen = validRuntimeListeners[0]; foundHandlerObject = { handler: chosen.code, category: 'runtime-captured-first', score: 50, source: 'runtime-instrumentation', timestamp: chosen.timestamp, stack: chosen.stack, context: chosen.context }; }
+            });
+
+            if (bestListener) {
+                foundHandlerObject = {
+                    handler: bestListener.code,
+                    category: bestListener.category || 'runtime-best-scored',
+                    score: bestScore,
+                    source: `runtime: ${bestListener.context || bestListener.source || 'unknown'}`,
+                    timestamp: bestListener.timestamp,
+                    stack: bestListener.stack,
+                    context: bestListener.context
+                };
+                log.success(`[Play] Selected best runtime listener. Score: ${bestScore.toFixed(1)}`);
+            } else {
+                log.warning("[Play] Runtime listeners found, but none could be selected (scoring issue?).");
+                foundHandlerObject = null;
             }
-        } else {
-            log.warning(`[Play] No valid runtime listeners found. Trying static fallback.`);
-            usingStaticFallback = true;
+        }
+
+        if (!foundHandlerObject) {
             try {
-                const extractor = new HandlerExtractor().initialize(endpointUrlForAnalysis, await retrieveMessagesWithFallbacks(endpointKey));
-                const extractedFallbackHandlers = await extractor.extract();
-                foundHandlerObject = extractor.getBestHandler(extractedFallbackHandlers);
-                if(foundHandlerObject) log.success(`[Play] Selected handler via static fallback (Score: ${foundHandlerObject.score?.toFixed(1)})`);
-            } catch (extractionError) { log.error(`[Play] Static fallback failed:`, extractionError); }
+                const extractor = new HandlerExtractor().initialize(endpointUrlForAnalysis, scoringMessages);
+                showToastNotification('Attaching debugger to analyze scripts (may take ~10s)...', 'info', 10000);
+                const dynamicHandlers = await extractor.extractDynamicallyViaDebugger(endpointUrlForAnalysis);
+
+                if (dynamicHandlers && dynamicHandlers.length > 0) {
+                    foundHandlerObject = extractor.getBestHandler(dynamicHandlers);
+                    if (foundHandlerObject) {
+                        log.success(`[Play] Selected handler via Debugger extraction (Score: ${foundHandlerObject.score?.toFixed(1)})`);
+                        foundHandlerObject.category = foundHandlerObject.category ? `debugger-${foundHandlerObject.category}` : 'debugger-extracted';
+                    } else {
+                        log.warning("[Play] Debugger extraction found candidates but none scored well enough.");
+                        foundHandlerObject = null;
+                    }
+                } else {
+                    log.warning("[Play] Debugger extraction failed to find any potential handlers.");
+                    foundHandlerObject = null;
+                }
+
+            } catch (extractionError) {
+                log.error(`[Play] Dynamic fallback (Debugger) failed:`, extractionError);
+                showToastNotification(`Debugger analysis error: ${extractionError.message.substring(0,100)}`, 'error', 7000);
+                foundHandlerObject = null;
+            }
         }
 
         if (foundHandlerObject?.handler) {
             const finalBestHandlerKey = `best-handler-${analysisStorageKey}`;
-            try { await chrome.storage.local.set({ [finalBestHandlerKey]: foundHandlerObject }); log.success(`Saved best handler to: ${finalBestHandlerKey}`); const runtimeListKey = `runtime-listeners-${endpointKey}`; try { const res = await new Promise(resolve => chrome.storage.local.get(runtimeListKey, resolve)); let listeners = res[runtimeListKey] || []; if (!listeners.some(l => l.code === foundHandlerObject.handler)) { listeners.push({ code: foundHandlerObject.handler, context: `selected-by-play (${foundHandlerObject.category})`, timestamp: Date.now() }); if (listeners.length > 30) listeners = listeners.slice(-30); await chrome.storage.local.set({ [runtimeListKey]: listeners }); if (!endpointsWithHandlers.has(endpointKey)) { endpointsWithHandlers.add(endpointKey); handlerStateUpdated = true; } } } catch (e) { log.error("Failed updating runtime list", e); } updateButton(button, 'success'); if (traceButton) updateTraceButton(traceButton, 'default', { showEmoji: true }); if (reportButton) updateReportButton(reportButton, 'disabled', originalFullEndpoint); }
-            catch (storageError) { log.error(`Failed to save handler (${finalBestHandlerKey}):`, storageError); updateButton(button, 'error'); if (traceButton) updateTraceButton(traceButton, 'disabled'); if (reportButton) updateReportButton(reportButton, 'disabled', originalFullEndpoint); }
-        } else { log.error(`[Play] No usable handler found.`); updateButton(button, 'warning'); if (traceButton) updateTraceButton(traceButton, 'disabled'); if (reportButton) updateReportButton(reportButton, 'disabled', originalFullEndpoint); }
-        if (handlerStateUpdated) requestAnimationFrame(updateDashboardUI);
+            try {
+                await chrome.storage.local.set({ [finalBestHandlerKey]: foundHandlerObject });
+                log.success(`Saved best handler to: ${finalBestHandlerKey} (Category: ${foundHandlerObject.category})`);
+                const runtimeListKeyForUpdate = `runtime-listeners-${endpointKey}`;
+                try {
+                    const res = await new Promise(resolve => chrome.storage.local.get(runtimeListKeyForUpdate, resolve));
+                    let listeners = res[runtimeListKeyForUpdate] || [];
+                    if (!listeners.some(l => l.code === foundHandlerObject.handler)) {
+                        listeners.push({
+                            code: foundHandlerObject.handler,
+                            context: `selected-by-play (${foundHandlerObject.category})`,
+                            timestamp: Date.now(),
+                            source: foundHandlerObject.source
+                        });
+                        if (listeners.length > 30) listeners = listeners.slice(-30);
+                        await chrome.storage.local.set({ [runtimeListKeyForUpdate]: listeners });
+                    }
+                    if (!endpointsWithHandlers.has(endpointKey)) {
+                        endpointsWithHandlers.add(endpointKey);
+                        handlerStateUpdated = true;
+                    }
+                } catch (e) {
+                    log.error("Failed updating runtime list after selection", e);
+                }
+                updateButton(button, 'success');
+                if (traceButton) updateTraceButton(traceButton, 'default', { showEmoji: true });
+                if (reportButton) updateReportButton(reportButton, 'disabled', originalFullEndpoint);
+            } catch (storageError) {
+                log.error(`Failed to save handler (${finalBestHandlerKey}):`, storageError);
+                updateButton(button, 'error', {errorMessage: 'Failed to save handler'});
+                if (traceButton) updateTraceButton(traceButton, 'disabled');
+                if (reportButton) updateReportButton(reportButton, 'disabled', originalFullEndpoint);
+            }
+        } else {
+            const failureMessage = `No usable handler found after all checks for ${endpointUrlForAnalysis}.`;
+            log.error(`[Play] ${failureMessage}`);
+            const wasModificationSuccessful = (successfullyAnalyzedUrl && successfullyAnalyzedUrl !== originalFullEndpoint);
+            if (wasModificationSuccessful) {
+                showToastNotification("URL modification succeeded, but handler analysis could not find a suitable function.", "warning", 6000);
+                updateButton(button, 'warning', { errorMessage: "Handler not found after URL modification" });
+            } else {
+                showToastNotification("Handler analysis could not find a suitable function.", "warning", 5000);
+                updateButton(button, 'warning', { errorMessage: "No handler function found" });
+            }
+            if (traceButton) updateTraceButton(traceButton, 'disabled');
+            if (reportButton) updateReportButton(reportButton, 'disabled', originalFullEndpoint);
+        }
+
+        if (handlerStateUpdated) {
+            requestUiUpdate();
+        }
+
     } catch (error) {
-        if (error.message === "User cancelled") { log.info(`Play cancelled for key ${endpointKey}.`); const currentState = buttonStates.get(endpointKey)?.state || 'start'; if (['start', 'csp', 'analyze', 'checking', 'default'].includes(currentState)) updateButton(button, 'start'); }
-        else { log.error(`[Play Button Error] for key ${endpointKey}:`, error.message); showToastNotification(`Error: ${error.message.substring(0, 150)}`, 'error'); updateButton(button, 'error', { errorMessage: 'An error occurred' }); if (traceButton) updateTraceButton(traceButton, 'disabled'); if (reportButton) updateReportButton(reportButton, 'disabled', originalFullEndpoint); }
-    } finally { launchInProgressEndpoints.delete(endpointKey);
+        if (error.message !== "User cancelled analysis" &&
+            error.message !== "Modified URL failed embedding check" &&
+            error.message !== "Proceeding despite embedding failure (analysis skipped)") {
+            log.error(`[Play Button Error] for key ${endpointKey}:`, error.message);
+            showToastNotification(`Error: ${error.message.substring(0, 150)}`, 'error');
+            updateButton(button, 'error', { errorMessage: 'Analysis error occurred' });
+        } else if (error.message === "Proceeding despite embedding failure (analysis skipped)"){
+            log.debug("[Play] Analysis skipped as requested after embedding failure.");
+        } else {
+            log.info(`[Play] Process stopped for ${endpointKey}: ${error.message}`);
+        }
+        if (traceButton && !button.classList.contains('success')) updateTraceButton(traceButton, 'disabled');
+        if (reportButton && !button.classList.contains('success')) updateReportButton(reportButton, 'disabled', originalFullEndpoint);
+    } finally {
+        launchInProgressEndpoints.delete(endpointKey);
         setTimeout(requestUiUpdate, 150);
-         }
+    }
 }
 
 function getRiskLevelAndColor(score) {
@@ -1530,7 +1757,7 @@ function displayReport(reportData, panel) {
         const payloads = details.payloads || [];
         const structures = details.uniqueStructures || [];
         const endpointDisplay = reportData.endpoint || reportData.originalEndpointKey || 'Unknown Endpoint';
-        const analysisStorageKey = reportData.analysisStorageKey || 'report'; // Used for filename
+        const analysisStorageKey = reportData.analysisStorageKey || 'report';
         const originChecks = details.originValidationChecks || [];
 
         const safeEscape = (str) => { try { return window.escapeHTML(String(str)); } catch(e){ console.error('escapeHTML failed:', e); return '[Error]'; }};
