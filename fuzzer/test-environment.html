@@ -109,7 +109,6 @@
   let isFuzzingRunning = false;
   let lastSentPayloadIndex = -1;
   let fuzzerPayloads = [];
-  // Removed mutationCount, successCount, devtoolsPort
 
   function updateStatus(message, isError = false) {
     const statusElement = document.getElementById('fuzzerStatus');
@@ -131,7 +130,6 @@
     const logElement = document.getElementById('payloadLog');
     if (!logElement) return;
     const entry = document.createElement('div');
-    // Remove special handling for 'mutation' or 'success' types here for now
     entry.className = `payload-entry ${type}`;
     if (type === 'sent' && index !== -1) {
       entry.setAttribute('data-payload-log-index', index);
@@ -181,24 +179,20 @@
     if (clearLogBtn) clearLogBtn.disabled = disableAll;
   }
 
-  // applyHighlight function removed
 
   function startFuzzing() {
     if (isFuzzingRunning) { updateStatus("Fuzzing already running."); return; }
     if (!currentFuzzerInstance) { updateStatus("Error: Fuzzer not initialized.", true); return; }
     if(!fuzzerPayloads || fuzzerPayloads.length === 0) { updateStatus("Error: No payloads loaded/generated to execute.", true); return; }
 
-    // Remove badge reset logic
     updateStatus("Starting fuzzer execution...");
     setButtonState(true);
     lastSentPayloadIndex = -1;
     try {
       currentFuzzerInstance.start(() => {
-        // Completion callback
         updateStatus("Fuzzing completed/stopped.");
         isFuzzingRunning = false;
         setButtonState(false);
-        // Remove post-run query logic
         console.log("[Fuzzer UI] Fuzzing finished.");
       });
       isFuzzingRunning = true;
@@ -214,10 +208,8 @@
     if (!isFuzzingRunning) { updateStatus("Fuzzing is not running."); return; }
     if (currentFuzzerInstance && typeof currentFuzzerInstance.stop === 'function') {
       currentFuzzerInstance.stop();
-      // Status/button updates are now handled in the completion callback passed to start()
     } else {
       updateStatus("Error: Cannot stop fuzzer instance.", true);
-      // Manually update state if stop fails for some reason
       isFuzzingRunning = false;
       setButtonState(false);
       lastSentPayloadIndex = -1;
@@ -227,12 +219,10 @@
   function clearLog() {
     const logElement = document.getElementById('payloadLog');
     if(logElement) { logElement.innerHTML = ''; }
-    // Remove badge reset logic
     updateStatus("Log cleared.");
   }
 
   window.addEventListener('DOMContentLoaded', async () => {
-    // Removed chrome.runtime.connect and related listeners
 
     try {
       updateStatus("Initializing fuzzer environment...");
