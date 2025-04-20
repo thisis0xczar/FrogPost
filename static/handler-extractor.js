@@ -1,8 +1,3 @@
-/**
- * FrogPost Extension
- * Originally Created by thisis0xczar/Lidor JFrog AppSec Team
- * Refined on: 2025-04-17
- */
 class HandlerExtractor {
     constructor() {
         this.endpoint = null;
@@ -14,12 +9,6 @@ class HandlerExtractor {
         this.fetchInProgress = new Map();
     }
 
-    /**
-     * Initializes the extractor with context.
-     * @param {string} endpoint - The URL of the target document.
-     * @param {Array<object>} [messages=[]] - Intercepted message objects.
-     * @returns {HandlerExtractor}
-     */
     initialize(endpoint, messages = []) {
         this.endpoint = endpoint;
         this.messages = messages || [];
@@ -68,12 +57,6 @@ class HandlerExtractor {
         return promise;
     }
 
-    /**
-     * Analyzes script content, attempts AST analysis, falls back to regex.
-     * @param {string} content - Script source code.
-     * @param {string} sourceIdentifier - Script URL or description.
-     * @returns {Array<object>} - Array of handler info objects { category, source, functionName, handlerNode, fullScriptContent, handler? }.
-     */
     analyzeScriptContent(content, sourceIdentifier) {
         const handlers = [];
         if (!content || typeof content !== 'string' || content.length < 50) return handlers;
@@ -95,56 +78,69 @@ class HandlerExtractor {
         return handlers;
     }
 
-    /**
-     * Maps function declarations and variable assignments to functions.
-     * @param {object} ast - Acorn AST node.
-     */
     _mapFunctionDeclarations(ast) {
         if (!ast || typeof acorn === 'undefined' || typeof acorn.walk === 'undefined') return;
         try {
             acorn.walk.simple(ast, {
-                FunctionDeclaration: (node) => { if (node.id?.name) this.functionDefinitions.set(node.id.name, node); },
-                VariableDeclarator: (node) => { if (node.id?.name && (node.init?.type === 'FunctionExpression' || node.init?.type === 'ArrowFunctionExpression')) this.functionDefinitions.set(node.id.name, node.init); }
+                FunctionDeclaration: (node) => {
+                    if (node.id?.name) {
+                        this.functionDefinitions.set(node.id.name, { node: node, type: 'declaration' });
+                    }
+                },
+                VariableDeclarator: (node) => {
+                    if (node.id?.name && (node.init?.type === 'FunctionExpression' || node.init?.type === 'ArrowFunctionExpression')) {
+                        this.functionDefinitions.set(node.id.name, { node: node.init, type: 'expression-variable' });
+                    }
+                }
             });
         } catch (e) { log.error("[Extractor] Error mapping function declarations:", e); }
     }
 
-    /**
-     * Maps assignments to prototype methods (e.g., Class.prototype.method = function...).
-     * @param {object} ast - Acorn AST node.
-     */
     _mapPrototypeMethods(ast) {
         if (!ast || typeof acorn === 'undefined' || typeof acorn.walk === 'undefined') return;
         try {
             acorn.walk.simple(ast, {
                 AssignmentExpression: (node) => {
                     if (node.operator === '=' &&
-                        node.left.type === 'MemberExpression' &&                      // ...methodName
-                        node.left.object.type === 'MemberExpression' &&               // ...prototype
+                        node.left.type === 'MemberExpression' &&
+                        node.left.object.type === 'MemberExpression' &&
                         node.left.object.property.name === 'prototype' &&
-                        node.left.object.object.type === 'Identifier' &&              // Class name
-                        (node.right.type === 'FunctionExpression' || node.right.type === 'ArrowFunctionExpression')) // = function...
+                        node.left.object.object.type === 'Identifier' &&
+                        (node.right.type === 'FunctionExpression' || node.right.type === 'ArrowFunctionExpression'))
                     {
                         const className = node.left.object.object.name;
                         const methodName = node.left.property.name;
                         const functionNode = node.right;
                         const prototypeKey = `${className}.prototype.${methodName}`;
-                        this.functionDefinitions.set(prototypeKey, functionNode);
+                        this.functionDefinitions.set(prototypeKey, { node: functionNode, className: className, methodName: methodName, type: 'prototype' });
                         log.debug(`[Extractor] Mapped prototype method: ${prototypeKey}`);
+                    }
+                    else if (node.operator === '=' &&
+                        node.left.type === 'MemberExpression' &&
+                        node.left.property?.name &&
+                        node.left.object?.type === 'Identifier' &&
+                        (node.right.type === 'FunctionExpression' || node.right.type === 'ArrowFunctionExpression'))
+                    {
+                        const functionName = node.left.property.name;
+                        const objectName = node.left.object.name;
+                        const key = `${objectName}.${functionName}`;
+
+
+                        if (!this.functionDefinitions.has(key) && !this.functionDefinitions.has(functionName)) {
+                            this.functionDefinitions.set(key, { node: node.right, className: objectName, methodName: functionName, type: 'object-method' });
+                            log.debug(`[Extractor] Mapped object method: ${key}`);
+                        }
                     }
                 }
             });
-        } catch (e) { log.error("[Extractor] Error mapping prototype methods:", e); }
+        } catch (e) {
+            log.error("[Extractor] Error mapping prototype/object methods:", e);
+
+
+            console.error("Stack Trace:", e.stack);
+        }
     }
 
-
-    /**
-     * Analyzes AST to find handlers, returns objects with AST nodes.
-     * @param {object} ast - Acorn AST node.
-     * @param {string} scriptContent - Full script source.
-     * @param {string} sourceUrl - Script identifier.
-     * @returns {Array<object>} - Array of handler info objects { category, source, functionName, handlerNode, fullScriptContent }.
-     */
     analyzeAst(ast, scriptContent, sourceUrl) {
         const foundHandlers = [];
         if (!ast || typeof acorn === 'undefined' || typeof acorn.walk === 'undefined') return foundHandlers;
@@ -164,37 +160,102 @@ class HandlerExtractor {
                 },
                 CallExpression: (node) => {
                     if (node.callee.type === 'MemberExpression' && node.callee.property.name === 'addEventListener' && node.arguments.length >= 2 && node.arguments[0].type === 'Literal' && node.arguments[0].value === 'message') {
-                        const handlerArg = node.arguments[1]; let funcNode = null; let category = 'ast-event-listener'; let functionName = null;
-                        if (handlerArg.type === 'FunctionExpression' || handlerArg.type === 'ArrowFunctionExpression') funcNode = handlerArg;
-                        else if (handlerArg.type === 'Identifier') { functionName = handlerArg.name; funcNode = this.functionDefinitions.get(functionName); if(funcNode) category += '-identifier'; }
-                        else if (handlerArg.type === 'MemberExpression') { // Handle instance.method or Class.prototype.method
-                            let lookupKey = null;
-                            if (handlerArg.object?.type === 'Identifier' && handlerArg.property?.name) {
-                                const methodKey = Array.from(this.functionDefinitions.keys()).find(key => key.endsWith(`.${handlerArg.property.name}`));
-                                if (methodKey) {
-                                    funcNode = this.functionDefinitions.get(methodKey);
-                                    functionName = handlerArg.property.name;
+                        const handlerArg = node.arguments[1];
+                        let funcDef = null;
+                        let category = 'ast-event-listener';
+                        let functionName = null;
+                        let resolvedIdentifier = false;
+
+                        if (handlerArg.type === 'FunctionExpression' || handlerArg.type === 'ArrowFunctionExpression') {
+                            funcDef = { node: handlerArg };
+                        } else if (handlerArg.type === 'Identifier') {
+                            functionName = handlerArg.name;
+                            funcDef = this.functionDefinitions.get(functionName);
+                            if (funcDef) {
+                                category += '-identifier';
+                                resolvedIdentifier = true;
+                            }
+                        } else if (handlerArg.type === 'MemberExpression') {
+                            const objName = handlerArg.object?.name;
+                            const methodName = handlerArg.property?.name;
+
+                            if (methodName) {
+                                functionName = methodName;
+
+
+                                const protoKey = Array.from(this.functionDefinitions.keys()).find(key => key.endsWith(`.${methodName}`));
+                                if (protoKey) {
+                                    funcDef = this.functionDefinitions.get(protoKey);
                                     category += '-prototype-lookup';
-                                    log.debug(`[Extractor AST] Found prototype method ref for ${functionName} via heuristic.`);
+                                    resolvedIdentifier = true;
+                                    log.debug(`[Extractor AST] Found prototype method ref ${protoKey} for addEventListener via MemberExpression.`);
+                                } else {
+                                    const objMethodKey = `${objName}.${methodName}`;
+                                    if (this.functionDefinitions.has(objMethodKey)) {
+                                        funcDef = this.functionDefinitions.get(objMethodKey);
+                                        category += '-objectMethod-lookup';
+                                        resolvedIdentifier = true;
+                                        log.debug(`[Extractor AST] Found object method ref ${objMethodKey} for addEventListener via MemberExpression.`);
+                                    }
                                 }
                             }
-                        }
-                        else if (handlerArg.type === 'CallExpression' && handlerArg.callee.type === 'MemberExpression' && handlerArg.callee.property.name === 'bind') {
+                            if(!resolvedIdentifier && handlerArg.object?.type === 'ThisExpression' && handlerArg.property?.name) {
+                                functionName = handlerArg.property.name;
+                                const thisProtoKey = Array.from(this.functionDefinitions.keys()).find(key => key.endsWith(`.${functionName}`) && this.functionDefinitions.get(key)?.type === 'prototype');
+                                if(thisProtoKey) {
+                                    funcDef = this.functionDefinitions.get(thisProtoKey);
+                                    category += '-this-prototype-lookup';
+                                    resolvedIdentifier = true;
+                                    log.debug(`[Extractor AST] Found this.prototype method ref ${thisProtoKey} for addEventListener.`);
+                                }
+                            }
+                        } else if (handlerArg.type === 'CallExpression' && handlerArg.callee.type === 'MemberExpression' && handlerArg.callee.property.name === 'bind') {
                             let boundFuncIdentifier = null;
-                            if (handlerArg.callee.object.type === 'Identifier') boundFuncIdentifier = handlerArg.callee.object.name;
-                            else if (handlerArg.callee.object.type === 'MemberExpression' && handlerArg.callee.object.property?.name) boundFuncIdentifier = handlerArg.callee.object.property.name;
-                            else if (handlerArg.callee.object.type === 'FunctionExpression') { funcNode = handlerArg.callee.object; category += '-bind-inline'; } // Bound inline function
+                            let boundFuncNode = null;
 
-                            if(boundFuncIdentifier) {
-                                functionName = boundFuncIdentifier;
-                                funcNode = this.functionDefinitions.get(functionName) || Array.from(this.functionDefinitions.entries()).find(([key, node]) => key.endsWith(`.${functionName}`))?.[1];
-                                if(funcNode) category += '-bind-identifier';
+
+                            if (handlerArg.callee.object.type === 'Identifier') {
+                                boundFuncIdentifier = handlerArg.callee.object.name;
+                                boundFuncNode = this.functionDefinitions.get(boundFuncIdentifier);
+                            } else if (handlerArg.callee.object.type === 'MemberExpression' && handlerArg.callee.object.property?.name) {
+
+                                const objName = handlerArg.callee.object.object?.name;
+                                const methodName = handlerArg.callee.object.property.name;
+                                boundFuncIdentifier = methodName;
+
+                                const protoKey = Array.from(this.functionDefinitions.keys()).find(key => key.endsWith(`.${methodName}`) && (!objName || key.startsWith(objName)));
+                                if (protoKey) {
+                                    boundFuncNode = this.functionDefinitions.get(protoKey);
+                                    category += '-bind-prototype';
+                                    log.debug(`[Extractor AST] Found bound prototype method ref ${protoKey} for addEventListener.`);
+                                } else {
+                                    const objMethodKey = `${objName}.${methodName}`;
+                                    if(this.functionDefinitions.has(objMethodKey)) {
+                                        boundFuncNode = this.functionDefinitions.get(objMethodKey);
+                                        category += '-bind-objectMethod';
+                                        log.debug(`[Extractor AST] Found bound object method ref ${objMethodKey} for addEventListener.`);
+                                    }
+                                }
+
+                            } else if (handlerArg.callee.object.type === 'FunctionExpression') {
+                                boundFuncNode = { node: handlerArg.callee.object };
+                                category += '-bind-inline';
+                            }
+
+                            if (boundFuncNode) {
+                                funcDef = boundFuncNode;
+                                functionName = boundFuncIdentifier || funcDef.methodName;
+                                resolvedIdentifier = true;
+                                category += boundFuncIdentifier ? '-identifier' : '';
                             }
                         }
-                        if (funcNode) {
-                            const codePreview = scriptContent.substring(funcNode.start, Math.min(funcNode.end, funcNode.start + 100));
+
+                        if (funcDef && funcDef.node) {
+                            const codePreview = scriptContent.substring(funcDef.node.start, Math.min(funcDef.node.end, funcDef.node.start + 100));
                             log.debug(`[Extractor AST Found] Category: ${category}, Source: ${sourceUrl}, FuncName: ${functionName || 'N/A'}, Preview: ${codePreview}...`);
-                            foundHandlers.push({ category, source: sourceUrl, functionName, handlerNode: funcNode, fullScriptContent: scriptContent });
+                            foundHandlers.push({ category, source: sourceUrl, functionName: functionName || funcDef.methodName, handlerNode: funcDef.node, fullScriptContent: scriptContent });
+                        } else if (handlerArg.type === 'Identifier' && !resolvedIdentifier) {
+                            log.debug(`[Extractor AST] Could not resolve identifier "${handlerArg.name}" used in addEventListener.`);
                         }
                     }
                 }
@@ -225,11 +286,6 @@ class HandlerExtractor {
         return handlers;
     }
 
-    /**
-     * Scores a potential handler based on AST analysis (if node provided) or basic checks.
-     * @param {object} handlerInfo - Object containing handler details ({ handlerNode?, category?, source?, fullScriptContent?, handler? }).
-     * @returns {number} - The calculated score.
-     */
     scoreHandler(handlerInfo) {
         const { handlerNode, category, source, fullScriptContent, functionName } = handlerInfo;
         const handlerCode = handlerInfo.handler;
@@ -240,61 +296,45 @@ class HandlerExtractor {
 
         if (handlerNode?.end && handlerNode?.start) handlerCodeLength = handlerNode.end - handlerNode.start;
         else if (handlerCode) handlerCodeLength = handlerCode.length;
-
         if (handlerCodeLength < MIN_CODE_LENGTH_ESTIMATE) return 0;
 
+        log.debug(`[Scoring Handler] Category: ${category}, Source: ${source?.substring(0, 100)}`);
+        log.debug(`[Scoring Handler] Using Context - Keys:`, Array.from(this.messageKeys));
+        log.debug(`[Scoring Handler] Using Context - Types/Kinds:`, Array.from(this.messageTypes));
+
+        let basicScore = 10;
+        score += basicScore;
         let astScore = 0;
+
         if (handlerNode && typeof acorn !== 'undefined' && typeof acorn.walk !== 'undefined') {
             try {
                 const foundGenericKeys = new Set(); const foundSpecificKeys = new Set(); const foundSpecificTypes = new Set();
                 let usesPostMessageCall = false; let referencesEventData = false; let referencesEventOrigin = false;
                 let hasOriginCheck = false; let usesJsonParse = false; let usesSwitchOnKind = false;
                 let eventParamName = null;
-
-                if (handlerNode.params && handlerNode.params.length > 0 && handlerNode.params[0].type === 'Identifier') {
-                    eventParamName = handlerNode.params[0].name;
-                }
+                if (handlerNode.params?.[0]?.type === 'Identifier') eventParamName = handlerNode.params[0].name;
 
                 acorn.walk.simple(handlerNode, {
                     MemberExpression: (node) => {
                         let propName = null; if (node.property?.type === 'Identifier') propName = node.property.name; else if (node.property?.type === 'Literal') propName = node.property.value;
                         let baseObjectName = null; if (node.object?.type === 'Identifier') baseObjectName = node.object.name;
-
                         if (propName) {
-                            if (eventParamName && baseObjectName === eventParamName && ['data', 'origin', 'source'].includes(propName)) {
-                                foundGenericKeys.add(propName); if (propName === 'data') referencesEventData = true; if (propName === 'origin') referencesEventOrigin = true;
-                            }
-                            if (eventParamName && node.object?.type === 'MemberExpression' && node.object.object?.name === eventParamName && node.object.property?.name === 'data') {
-                                if (this.messageKeys.has(propName)) foundSpecificKeys.add(propName);
-                            }
-                            if(eventParamName && propName === 'rawData' && node.object?.type === 'MemberExpression' && node.object.property?.name === 'data' && node.object.object?.type === 'MemberExpression' && node.object.object.property?.name === 'data' && node.object.object.object?.name === eventParamName){
-                                if(this.messageKeys.has(propName)) foundSpecificKeys.add(propName);
-                            }
-
+                            if (eventParamName && baseObjectName === eventParamName && ['data', 'origin', 'source'].includes(propName)) { foundGenericKeys.add(propName); if (propName === 'data') referencesEventData = true; if (propName === 'origin') referencesEventOrigin = true; }
+                            if (eventParamName && node.object?.type === 'MemberExpression' && node.object.object?.name === eventParamName && node.object.property?.name === 'data') { if (this.messageKeys.has(propName)) { log.debug(`[Scoring AST Walk] Found Specific Key: ${propName}`); foundSpecificKeys.add(propName); } }
+                            if(eventParamName && propName === 'rawData' && node.object?.type === 'MemberExpression' && node.object.property?.name === 'data' && node.object.object?.type === 'MemberExpression' && node.object.object.property?.name === 'data' && node.object.object.object?.name === eventParamName){ if(this.messageKeys.has(propName)) foundSpecificKeys.add(propName); }
                             if (propName === 'postMessage') usesPostMessageCall = true;
-                            if (propName === 'origin' && node.parent?.type === 'BinaryExpression' && ['===', '!==', '==', '!='].includes(node.parent.operator)) {
-                                hasOriginCheck = true;
-                            }
+                            if (propName === 'origin' && node.parent?.type === 'BinaryExpression' && ['===', '!==', '==', '!='].includes(node.parent.operator)) { hasOriginCheck = true; }
                         }
                     },
-                    Literal: (node) => { if (typeof node.value === 'string' && this.messageTypes.has(node.value)) foundSpecificTypes.add(node.value); },
-                    CallExpression: (node) => {
-                        if (node.callee.type === 'MemberExpression' && node.callee.property.name === 'postMessage') usesPostMessageCall = true;
-                        if (node.callee.type === 'MemberExpression' && node.callee.object?.name === 'JSON' && node.callee.property?.name === 'parse') usesJsonParse = true;
-                    },
-                    SwitchStatement: (node) => {
-                        if (node.discriminant?.type === 'MemberExpression' && node.discriminant.property?.name && ['kind', 'messageType', 'type', 'action'].includes(node.discriminant.property.name)) {
-                            if (node.discriminant.object?.type === 'MemberExpression' && node.discriminant.object.property?.name === 'data') {
-                                usesSwitchOnKind = true;
-                            }
-                        }
-                    }
+                    Literal: (node) => { if (typeof node.value === 'string') { log.debug(`[Scoring AST Walk] Visiting Literal: "${node.value}"`); if (this.messageTypes.has(node.value)) { log.debug(`[Scoring AST Walk] Matched Specific Type/Kind: "${node.value}"`); foundSpecificTypes.add(node.value); } } },
+                    CallExpression: (node) => { if (node.callee.type === 'MemberExpression' && node.callee.property.name === 'postMessage') usesPostMessageCall = true; if (node.callee.type === 'MemberExpression' && node.callee.object?.name === 'JSON' && node.callee.property?.name === 'parse') usesJsonParse = true; },
+                    SwitchStatement: (node) => { if (node.discriminant?.type === 'MemberExpression' && node.discriminant.property?.name && ['kind', 'messageType', 'type', 'action'].includes(node.discriminant.property.name)) { if (node.discriminant.object?.type === 'MemberExpression' && node.discriminant.object.property?.name === 'data') { usesSwitchOnKind = true; } } }
                 });
                 astScore += foundSpecificKeys.size * 150; astScore += foundSpecificTypes.size * 100;
                 if (referencesEventData) astScore += 20; if (referencesEventOrigin) astScore += 20; if (usesPostMessageCall) astScore += 10;
                 if (hasOriginCheck) astScore += 75; if (usesJsonParse) astScore += 40; if (usesSwitchOnKind) astScore += 50;
                 if (handlerCodeLength > MAX_CODE_LENGTH_ESTIMATE && astScore < 200) astScore -= 100; else if (handlerCodeLength > MAX_CODE_LENGTH_ESTIMATE) astScore -= 20;
-                log.debug(`[Scoring AST Node SUCCEEDED] Handler (Cat: ${category}, EstLen: ${handlerCodeLength}) - AST Score: ${astScore}, Specific Keys: ${foundSpecificKeys.size}, Patterns: OriginCheck=${hasOriginCheck}, JSONParse=${usesJsonParse}, Switch=${usesSwitchOnKind}`);
+                log.debug(`[Scoring AST Node SUCCEEDED] Handler (Cat: ${category}, EstLen: ${handlerCodeLength}) - AST Score: ${astScore}, Specific Keys Found: ${foundSpecificKeys.size}, Patterns: OriginCheck=${hasOriginCheck}, JSONParse=${usesJsonParse}, Switch=${usesSwitchOnKind}`);
             } catch (e) {
                 log.warn(`[Scoring AST Node] Failed walking node for category ${category}: ${e.message}.`);
                 astScore = 0;
@@ -303,7 +343,7 @@ class HandlerExtractor {
             if (handlerCode.includes('.data') || handlerCode.includes('["data"]')) astScore += 5; if (handlerCode.includes('.origin') || handlerCode.includes('["origin"]')) astScore += 5; if (handlerCode.includes('.source') || handlerCode.includes('["source"]')) astScore += 3; if (handlerCode.includes('postMessage')) astScore += 3; if (handlerCode.includes('messageType') || handlerCode.includes('["messageType"]')) astScore += 10; if (handlerCode.includes('JSON.parse')) astScore += 5; if (handlerCode.includes('switch')) astScore += 5;
             log.debug(`[Scoring Basic String] Handler (Cat: ${category}, Len: ${handlerCodeLength}) - Basic Score Contribution: ${astScore}`);
         }
-        score = 10 + astScore;
+        score += astScore;
 
         if (category?.includes('ast-event-listener') || category?.includes('ast-onmessage')) score += 50;
         else if (category?.includes('runtime')) score += 150;
@@ -314,31 +354,32 @@ class HandlerExtractor {
         return Math.max(0, score);
     }
 
-    /**
-     * Selects the best handler from scored candidates using sorting and tie-breaking.
-     * Extracts the final handler code string.
-     * @param {Array<object>} handlersInfo - Array of handler info objects from analysis functions.
-     * @returns {object|null} - The best handler info { handler, category, score, source, functionName }, or null.
-     */
     getBestHandler(handlersInfo) {
         if (!handlersInfo || handlersInfo.length === 0) return null;
+        const scoredHandlers = handlersInfo
+            .map(handlerInfo => {
+                const score = this.scoreHandler(handlerInfo);
+                let boostedScore = score;
 
-        const scoredHandlers = handlersInfo.map(handlerInfo => {
-            const score = this.scoreHandler(handlerInfo);
-            return { ...handlerInfo, score };
-        }).filter(h => h.score > 0);
+                if (handlerInfo.category?.includes('prototype') || handlerInfo.category?.includes('objectMethod') || handlerInfo.category?.includes('indirect')) {
+                    boostedScore += 10;
+                } else if (handlerInfo.category?.includes('ast-event-listener-identifier') || handlerInfo.category?.includes('ast-onmessage-assignment-identifier')) {
+                    boostedScore += 5;
+                }
+                return { ...handlerInfo, score: boostedScore };
+            })
+            .filter(h => h.score > 0);
 
-        if (scoredHandlers.length === 0) {
-            log.debug("[getBestHandler] No candidates scored above 0.");
-            return null;
-        }
+        if (scoredHandlers.length === 0) { log.debug("[getBestHandler] No candidates scored above 0."); return null; }
+        log.debug("[getBestHandler] Scored Candidates (Pre-sort):", JSON.stringify(scoredHandlers.map(h => ({ score: h.score, category: h.category, source: h.source?.substring(0,100), hasNode: !!h.handlerNode, name: h.functionName || 'N/A' })), null, 2));
 
-        log.debug("[getBestHandler] Scored Candidates (Pre-sort):", JSON.stringify(scoredHandlers.map(h => ({
-            score: h.score, category: h.category, source: h.source?.substring(0,100),
-            hasNode: !!h.handlerNode, name: h.functionName || 'N/A'
-        })), null, 2));
+        const categoryPriority = {
+            'runtime': 1,
+            'ast-event-listener': 2, 'ast-onmessage': 3,
+            'debugger': 4,
+            'regex': 6, 'inline-onmessage-attribute': 7
+        };
 
-        const categoryPriority = { 'runtime': 1, 'ast-event-listener': 2, 'ast-onmessage': 3, 'debugger': 4, 'regex': 6, 'inline-onmessage-attribute': 7 };
 
         scoredHandlers.sort((a, b) => {
             if (b.score !== a.score) return b.score - a.score;
@@ -347,35 +388,27 @@ class HandlerExtractor {
             if (priorityA !== priorityB) return priorityA - priorityB;
             const lenA = a.handlerNode ? a.handlerNode.end - a.handlerNode.start : (a.handler?.length || a.fullScriptContent?.length || 0);
             const lenB = b.handlerNode ? b.handlerNode.end - b.handlerNode.start : (b.handler?.length || b.fullScriptContent?.length || 0);
-            if (lenA !== lenB) return lenA - lenB;
+            if (lenA !== lenB) return lenB - lenA;
             return (a.source || '').localeCompare(b.source || '');
         });
 
         const bestHandlerInfo = scoredHandlers[0];
-
         let finalHandlerCode = bestHandlerInfo.handler || '';
         if (!finalHandlerCode && bestHandlerInfo.handlerNode && bestHandlerInfo.fullScriptContent) {
             try {
                 finalHandlerCode = bestHandlerInfo.fullScriptContent.substring(bestHandlerInfo.handlerNode.start, bestHandlerInfo.handlerNode.end);
             } catch (e) {
-                log.error("Failed to extract final handler code string from node after selection!", e);
+                log.error("Failed to extract final handler code string from node!", e);
                 finalHandlerCode = "[Error extracting code string]";
             }
-        } else if (!finalHandlerCode && bestHandlerInfo.fullScriptContent) {
+        }
+        else if (!finalHandlerCode && bestHandlerInfo.fullScriptContent) {
             finalHandlerCode = bestHandlerInfo.fullScriptContent;
         }
 
-
         const bestLen = bestHandlerInfo.handlerNode ? bestHandlerInfo.handlerNode.end - bestHandlerInfo.handlerNode.start : finalHandlerCode.length;
         log.debug(`[getBestHandler] Selected Handler: Score=${bestHandlerInfo.score}, Category=${bestHandlerInfo.category}, Source=${bestHandlerInfo.source}, EstLen=${bestLen}, Name=${bestHandlerInfo.functionName || 'N/A'}`);
-
-        return {
-            handler: finalHandlerCode,
-            category: bestHandlerInfo.category,
-            score: bestHandlerInfo.score,
-            source: bestHandlerInfo.source,
-            functionName: bestHandlerInfo.functionName
-        };
+        return { handler: finalHandlerCode, category: bestHandlerInfo.category, score: bestHandlerInfo.score, source: bestHandlerInfo.source, functionName: bestHandlerInfo.functionName };
     }
 
     async extractDynamicallyViaDebugger(targetUrl) {
@@ -384,15 +417,8 @@ class HandlerExtractor {
         const collectedScripts = new Map(); let analysisTimer = null;
         const ANALYSIS_TIMEOUT = 10000; const SETTLE_TIME = 1500; const LOAD_EXTRA_TIME = 2000;
         let resolveAnalysis; const analysisPromise = new Promise(res => { resolveAnalysis = res; }); let analysisResolved = false;
-
-        const onDebuggerEvent = (source, method, params) => {
-            if (!tabId || source.tabId !== tabId) return;
-            if (method === 'Debugger.scriptParsed') { const { scriptId, url } = params; if (url && !url.startsWith('chrome-extension://') && url !== 'about:blank') { log.debug(`[Debugger Tab] Script parsed: ID=${scriptId}, URL=${url.substring(0,100)}`); collectedScripts.set(scriptId, { url: url, scriptId: scriptId }); clearTimeout(analysisTimer); analysisTimer = setTimeout(() => { if (!analysisResolved) { log.debug('[Debugger Tab] Script parsing settled.'); analysisResolved = true; resolveAnalysis(); } }, SETTLE_TIME); } }
-            else if (method === 'Page.loadEventFired') { log.debug('[Debugger Tab] Page load event fired.'); clearTimeout(analysisTimer); analysisTimer = setTimeout(() => { if (!analysisResolved) { log.debug('[Debugger Tab] Page loaded + settle time.'); analysisResolved = true; resolveAnalysis(); } }, LOAD_EXTRA_TIME); }
-            else if (method === 'Runtime.exceptionThrown') { log.warn('[Debugger Tab] Exception in target:', params.exceptionDetails?.exception?.description || 'Unknown error'); }
-        };
+        const onDebuggerEvent = (source, method, params) => { if (!tabId || source.tabId !== tabId) return; if (method === 'Debugger.scriptParsed') { const { scriptId, url } = params; if (url && !url.startsWith('chrome-extension://') && url !== 'about:blank') { log.debug(`[Debugger Tab] Script parsed: ID=${scriptId}, URL=${url.substring(0,100)}`); collectedScripts.set(scriptId, { url: url, scriptId: scriptId }); clearTimeout(analysisTimer); analysisTimer = setTimeout(() => { if (!analysisResolved) { log.debug('[Debugger Tab] Script parsing settled.'); analysisResolved = true; resolveAnalysis(); } }, SETTLE_TIME); } } else if (method === 'Page.loadEventFired') { log.debug('[Debugger Tab] Page load event fired.'); clearTimeout(analysisTimer); analysisTimer = setTimeout(() => { if (!analysisResolved) { log.debug('[Debugger Tab] Page loaded + settle time.'); analysisResolved = true; resolveAnalysis(); } }, LOAD_EXTRA_TIME); } else if (method === 'Runtime.exceptionThrown') { log.warn('[Debugger Tab] Exception in target:', params.exceptionDetails?.exception?.description || 'Unknown error'); } };
         const onDebuggerDetach = (source, reason) => { if (source.tabId === tabId) { log.warn(`[Debugger Tab] Detached unexpectedly from tab ${tabId}. Reason: ${reason}`); attached = false; detachReason = reason; if (chrome?.debugger) { try { chrome.debugger.onEvent.removeListener(onDebuggerEvent); } catch(e){} try { chrome.debugger.onDetach.removeListener(onDebuggerDetach); } catch(e){} } if (!analysisResolved) { analysisResolved = true; resolveAnalysis(); } } };
-
         try {
             log.debug('[Debugger Tab] Creating temporary background tab for:', targetUrl);
             const tab = await chrome.tabs.create({ url: targetUrl, active: false }); tabId = tab.id; if (!tabId) throw new Error("Failed to create target tab."); log.debug(`[Debugger Tab] Created target tab ID: ${tabId}`); await new Promise(res => setTimeout(res, 1500));
