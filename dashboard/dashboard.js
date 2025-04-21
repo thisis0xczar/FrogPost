@@ -1,3 +1,8 @@
+/**
+ * FrogPost Extension
+ * Originally Created by thisis0xczar/Lidor JFrog AppSec Team
+ * Refined on: 2025-04-21
+ */
 window.frogPostState = {
     frameConnections: new Map(),
     messages: [],
@@ -676,14 +681,14 @@ window.addEventListener('DOMContentLoaded', () => {
     const silentFilterToggle = document.getElementById('silentFilterToggle');
     if (silentFilterToggle) {
         const textSpan = silentFilterToggle.querySelector('.button-text');
-        if (textSpan) textSpan.textContent = showOnlySilentIframes ? 'Silent On' : 'Silent Off';
+        if (textSpan) textSpan.textContent = showOnlySilentIframes ? 'Silent Listeners On' : 'Silent Listeners Off';
         silentFilterToggle.classList.toggle('active', showOnlySilentIframes);
 
         silentFilterToggle.addEventListener('click', () => {
             showOnlySilentIframes = !showOnlySilentIframes;
             silentFilterToggle.classList.toggle('active', showOnlySilentIframes);
             const textSpan = silentFilterToggle.querySelector('.button-text');
-            if (textSpan) textSpan.textContent = showOnlySilentIframes ? 'Silent On' : 'Silent Off';
+            if (textSpan) textSpan.textContent = showOnlySilentIframes ? 'Silent Listeners On' : 'Silent Listeners Off';
             log.info(`Silent iframe filter ${showOnlySilentIframes ? 'ON (Showing ONLY Silent)' : 'OFF (Showing All)'}.`);
             requestUiUpdate();
         });

@@ -1,6 +1,7 @@
 /**
- * FrogPost Extension - Static Handler Analyzer
- * Refined on: 2025-04-21 (Removed Array Conversion)
+ * FrogPost Extension
+ * Originally Created by thisis0xczar/Lidor JFrog AppSec Team
+ * Refined on: 2025-04-21
  */
 (function(global) {
 

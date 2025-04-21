@@ -1,7 +1,7 @@
 /**
  * FrogPost Extension
  * Originally Created by thisis0xczar/Lidor JFrog AppSec Team
- * Refined on: 2025-04-20
+ * Refined on: 2025-04-21
  */
 if (typeof window.analyzeHandlerStatically === 'undefined') {
     console.error("Static Handler Analyzer not loaded. Payload generation will be limited.");
@@ -353,8 +353,8 @@ class HandlerTracer {
         const accessedEventDataPaths = safeStaticData.accessedEventDataPaths instanceof Set ? safeStaticData.accessedEventDataPaths : new Set(safeStaticData.accessedEventDataPaths || []);
         const requiredConditionsForSinkPath = safeStaticData.requiredConditions || {};
 
-        window.log.debug("[PayloadGen] Starting generation. Context received. Static Analysis available:", !!staticAnalysisData);
-        window.log.debug("[PayloadGen] Required conditions map:", requiredConditionsForSinkPath);
+        log.debug("[PayloadGen] Starting generation. Context received. Static Analysis available:", !!staticAnalysisData);
+        log.debug("[PayloadGen] Required conditions map:", requiredConditionsForSinkPath);
 
         const generatedPayloads = [];
         const handledSinkPaths = new Set();
@@ -588,7 +588,7 @@ class HandlerTracer {
                     if (baseStructInfo.source === 'raw-string') continue;
                     const baseObject = baseStructInfo.baseObject;
                     if(typeof baseObject !== 'object' || baseObject === null) continue;
-                    const baseIdentifier = baseStructInfo.source + (baseStructInfo.variantInfo ? `-<span class="math-inline">\{baseStructInfo\.variantInfo\.path\}\=</span>{baseStructInfo.variantInfo.value}` : '');
+                    const baseIdentifier = baseStructInfo.source + (baseStructInfo.variantInfo ? `-<span class="math-inline">\{baseStructInfo\.variantInfo\.path\}\=</span>{bs.variantInfo.value}` : '');
                     const pathsForThisBase = dumbPathsToTarget.filter(p => p.baseIdentifier === baseIdentifier);
 
                     for (const targetPathInfo of pathsForThisBase) {
@@ -885,7 +885,7 @@ async function handleTraceButton(endpoint, traceButton) {
 
                     if (staticAnalysisResult?.success) {
                         staticAnalysisData = staticAnalysisResult;
-                        console.debug('[Tracer] Assigned staticAnalysisData. Type:', typeof staticAnalysisData, 'Keys:', staticAnalysisData ? Object.keys(staticAnalysisData) : 'N/A');
+                        log.debug('[Tracer] Assigned staticAnalysisData. Type:', typeof staticAnalysisData, 'Keys:', staticAnalysisData ? Object.keys(staticAnalysisData) : 'N/A');
                         window.log.handler(`[Trace] Static analysis successful.`);
                     } else {
                         window.log.warn(`[Trace] Static analysis failed: ${staticAnalysisResult?.error}. Proceeding without AST data.`);
