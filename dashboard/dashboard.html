@@ -42,6 +42,12 @@
         <div id="endpointsSection" class="section">
             <div class="section-title">Endpoints</div>
             <div id="endpointsList" class="panel">
+                <div class="endpoint-filter-container">
+                    <input type="text" id="endpointFilterInput" placeholder="Filter endpoints...">
+                    <button id="silentFilterToggle" class="control-button secondary-button filter-toggle-button" title="Toggle Silent Iframes (0 messages)">
+                        <span class="button-icon">🤫</span> <span class="button-text">Silent Off</span>
+                    </button>
+                </div>
                 <div class='no-endpoints'>Loading captured communications...</div>
             </div>
         </div>
@@ -82,8 +88,6 @@
     <div id="editMessageModalContainer"></div>
     <div id="urlModificationModalContainer"></div>
 
-
 </div>
-
 </body>
 </html>

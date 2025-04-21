@@ -497,3 +497,87 @@ body {
     background-color: #f39c12;
     border-color: #e67e22;
 }
+
+/* Style for the filter input container */
+.endpoint-filter-container {
+    padding: 10px 15px 5px 15px; /* Adjust padding as needed */
+    border-bottom: 1px solid var(--border-color); /* Optional: Add a separator */
+    background-color: var(--bg-secondary); /* Match the pane background */
+}
+
+/* Style for the filter input field */
+#endpointFilterInput {
+    width: 100%;
+    padding: 6px 10px;
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    background-color: var(--code-bg); /* Similar background */
+    color: var(--text-primary); /* Similar text color */
+    font-size: 13px; /* Match font size */
+    font-family: var(--font-sans); /* Use sans-serif for better readability in input */
+    box-sizing: border-box; /* Include padding and border in the element's total width and height */
+    outline: none; /* Remove default focus outline */
+}
+
+/* Style for focus state - similar to other inputs */
+#endpointFilterInput:focus {
+    border-color: var(--accent-primary);
+    box-shadow: 0 0 0 1px var(--accent-primary);
+}
+
+/* Style for placeholder text */
+#endpointFilterInput::placeholder {
+    color: var(--text-muted);
+    font-style: italic;
+}
+
+/* Adjust padding for the main endpoints list container if needed */
+.endpoints-list {
+    /* Remove top padding if the filter container handles it */
+    /* padding-top: 0; */
+    /* Add overflow-y if not already present */
+    overflow-y: auto;
+    /* You might need to adjust the height or max-height depending on layout */
+}
+
+/* Adjust filter container to allow button */
+.endpoint-filter-container {
+    display: flex; /* Use flexbox for alignment */
+    align-items: center; /* Vertically center items */
+    gap: 10px; /* Add space between input and button */
+    padding: 10px 15px 5px 15px;
+    border-bottom: 1px solid var(--border-color);
+    background-color: var(--bg-secondary);
+    /* Remove sticky position if filter should scroll */
+    /* position: sticky; */
+    /* top: 0; */
+}
+
+#endpointFilterInput {
+    flex-grow: 1; /* Allow input to take available space */
+    /* Input styles from previous steps */
+    width: auto; /* Override width: 100% if needed due to flex */
+}
+
+.filter-toggle-button {
+    flex-shrink: 0; /* Prevent button from shrinking */
+    padding: 5px 8px; /* Adjust padding */
+    font-size: 12px; /* Adjust font size */
+    line-height: 1.2;
+    white-space: nowrap; /* Prevent text wrapping */
+}
+
+.filter-toggle-button .button-icon {
+    margin-right: 4px; /* Space between icon and text */
+    display: inline-block; /* Ensure icon displays correctly */
+}
+
+/* Style for when the silent filter is ON */
+.filter-toggle-button.active {
+    background-color: var(--accent-primary);
+    color: var(--bg-primary);
+    border-color: var(--accent-primary);
+}
+.filter-toggle-button.active:hover {
+    background-color: var(--accent-primary-hover);
+}
