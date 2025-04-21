@@ -1,7 +1,7 @@
 /**
  * FrogPost Extension
  * Originally Created by thisis0xczar/Lidor JFrog AppSec Team
- * Refined on: 2025-04-17
+ * Refined on: 2025-04-21
  */
 const log = {
     debug: (...args) => console.debug("BG:", ...args),
@@ -179,7 +179,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 notifyDashboard('stateReset', {});
                 return true;
             case 'startServer':
-                log.info(`Received startServer from ${senderTabId || 'unknown sender'}`);
                 isAsync = true;
                 chrome.runtime.sendNativeMessage( NATIVE_HOST_NAME, { action: 'startServer', data: JSON.stringify(message.data), options: { port: 1337, maxRetries: 3, timeout: 5000 } }, (response) => { if (chrome.runtime.lastError) { if (responseFunction) try { responseFunction({success: false, error: chrome.runtime.lastError.message}); } catch(e){} } else if (response?.success) { setTimeout(() => { if (responseFunction) try { responseFunction({success: true}); } catch(e){} }, 2000); } else { if (responseFunction) try { responseFunction({success: false, error: response?.error || "Failed to start server"}); } catch(e){} } } );
                 return true;
