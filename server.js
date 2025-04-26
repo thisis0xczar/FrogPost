@@ -4,7 +4,7 @@ const cors = require('cors');
 const path = require('path');
 const http = require('http');
 
-const rootDir = '/Users/[USER_NAME]/Library/Application Support/NodeServerStarter/server.js';
+const rootDir = __dirname;
 
 const app = express();
 const server = http.createServer(app);
