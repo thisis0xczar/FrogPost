@@ -29,30 +29,15 @@ foreach ($node_path in $NODE_LOCATIONS) {
         if (Test-Path $path) {
             "Found executable at: $path" | Add-Content $LOG_FILE
 
-            # Try to run the server with this Node path
-            $tempErr = [System.IO.Path]::GetTempFileName()
-
-            $process = Start-Process -FilePath $path `
-                -ArgumentList "`"$SERVER_JS`"" `
-                -PassThru `
-                -RedirectStandardOutput $LOG_FILE `
-                -RedirectStandardError $tempErr
-
-            Start-Sleep -Seconds 1
-
-            if (!$process.HasExited) {
-                "Started server with PID: $($process.Id)" | Add-Content $LOG_FILE
+            # Try to run the server with this Node path using direct invocation and UTF-8 encoding for the log
+            & $path $SERVER_JS 2>&1 | Out-File -FilePath $LOG_FILE -Encoding 'UTF8'
+            if ($LASTEXITCODE -eq 0) {
+                "Started server with $path" | Add-Content $LOG_FILE
                 "Server running successfully with: $path" | Add-Content $LOG_FILE
                 $found = $true
-                $process.WaitForExit()
-                # Append stderr to log
-                Get-Content $tempErr | Add-Content $LOG_FILE
-                Remove-Item $tempErr -ErrorAction SilentlyContinue
                 exit 0
             } else {
                 "Server failed to start with: $path" | Add-Content $LOG_FILE
-                Get-Content $tempErr | Add-Content $LOG_FILE
-                Remove-Item $tempErr -ErrorAction SilentlyContinue
             }
         } else {
             "Not found or not executable: $path" | Add-Content $LOG_FILE

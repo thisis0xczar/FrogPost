@@ -22,7 +22,7 @@ Write-Host @"
 Write-Host "🐸 Starting FrogPost installation on Windows..."
 
 # ========== AUTO CONFIGURATION ==========
-$FROGPOST_REPO = Split-Path -Parent $MyInvocation.MyCommand.Definition
+$FROGPOST_REPO = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Definition)
 Write-Host "📍 FrogPost repository detected at: $FROGPOST_REPO"
 
 $USER_NAME = $env:USERNAME
@@ -45,7 +45,7 @@ $NATIVE_HOST_DIR = "$env:APPDATA\Google\Chrome\NativeMessagingHosts"
 
 # Source file paths
 $SERVER_JS_SRC = Join-Path $FROGPOST_REPO "server.js"
-$START_PS1_SRC = Join-Path $FROGPOST_REPO "start_server.ps1"
+$START_PS1_SRC = Join-Path $FROGPOST_REPO "Windows" "start_server.ps1"
 $MANIFEST_SRC = Join-Path $FROGPOST_REPO "com.nodeserver.starter.json"
 
 # Target destination paths
@@ -116,6 +116,6 @@ Write-Host "⚠️ Extension ID: $EXTENSION_ID"
 Write-Host "   (This ID is also saved in extension_id.txt for your reference)"
 Write-Host ""
 Write-Host "🚀 To start the local server, run:"
-Write-Host "   powershell -File `"$START_PS1_DST`""
+Write-Host "   powershell.exe -File `"$START_PS1_DST`""
 Write-Host ""
 Write-Host "💡 Happy Hacking with FrogPost 🐸"
