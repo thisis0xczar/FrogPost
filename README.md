@@ -193,7 +193,7 @@ Use FrogPost **ethically and legally** — only test applications you own or hav
 4. Run the setup script in PowerShell:
 
     ```
-    pwsh.exe -File Windows/setup.ps1
+    powershell.exe -File Windows/setup.ps1
     ```
 ---
 
