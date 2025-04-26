@@ -172,6 +172,31 @@ Use FrogPost **ethically and legally** — only test applications you own or hav
 
 ---
 
+## 📥 Installation Guide for Windows
+
+### Install the Chrome Extension via `Windows/setup.ps1`
+
+1. Clone the repository:
+
+    ```
+    git clone https://github.com/thisis0xczar/FrogPost.git
+    ```
+
+2. Load the extension in Chrome.
+
+3. `cd` to the repo folder:
+
+    ```
+    cd FrogPost
+    ```
+
+4. Run the setup script in PowerShell:
+
+    ```
+    powershell.exe -File Windows/setup.ps1
+    ```
+---
+
 ## 🧪 Troubleshooting
 
 - **Could not connect to fuzzer server**: Recheck file paths
