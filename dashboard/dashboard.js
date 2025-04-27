@@ -110,11 +110,38 @@ function showToastNotification(message, type = 'error', duration = 5000) {
     container.appendChild(toast); requestAnimationFrame(() => { toast.classList.add('show'); }); removalTimeoutId = setTimeout(removeToast, duration); toast.addEventListener('click', removeToast);
 }
 
+
 function updateButton(button, state, options = {}) {
-    if (!button) return; const endpointKey = getStorageKeyForUrl(button.getAttribute('data-endpoint')); if (endpointKey) buttonStates.set(endpointKey, { state, options });
-    const states = { start: { text: '▶', title: 'Start checks', class: 'default' }, csp: { text: '⏳', title: 'Checking CSP...', class: 'checking is-working' }, analyze: { text: '⏳', title: 'Analyzing...', class: 'checking is-working' }, launch: { text: '🚀', title: 'Launch Payload Testing', class: 'green' }, success: { text: '✓', title: 'Check successful, handler found', class: 'success' }, warning: { text: '⚠', title: options.errorMessage || 'Check completed with warnings', class: 'yellow' }, error: { text: '✕', title: options.errorMessage || 'Check failed', class: 'red' } };
-    let newState = states[state] || states.start; button.textContent = newState.text; button.title = newState.title; button.classList.remove('default', 'checking', 'is-working', 'green', 'success', 'yellow', 'red', 'has-critical-sinks', 'show-next-step-arrow', 'show-next-step-emoji'); button.classList.add(...newState.class.split(' ')); button.style.animation = '';
-    if (newState.class.includes('is-working')) button.classList.add('is-working'); if (state === 'launch' && options.hasCriticalSinks) button.classList.add('has-critical-sinks'); if (options.showArrow) button.classList.add('show-next-step-arrow'); if (options.showEmoji) button.classList.add('show-next-step-emoji');
+    if (!button) return;
+    const endpointKey = getStorageKeyForUrl(button.getAttribute('data-endpoint'));
+    if (endpointKey) buttonStates.set(endpointKey, { state, options });
+
+    const states = {
+        start: { text: '▶', title: 'Start checks', class: 'default' },
+        csp: { text: '⏳', title: 'Checking CSP...', class: 'checking is-working' },
+        analyze: { text: '⏳', title: 'Analyzing...', class: 'checking is-working' },
+        launch: { text: '🚀', title: 'Launch Payload Testing', class: 'green' },
+        launching: { text: '🚀', title: 'Launching Fuzzer...', class: 'checking is-working launching' }, // <-- ADDED STATE
+        success: { text: '✓', title: 'Check successful, handler found', class: 'success' },
+        warning: { text: '⚠', title: options.errorMessage || 'Check completed with warnings', class: 'yellow' },
+        error: { text: '✕', title: options.errorMessage || 'Check failed', class: 'red' }
+    };
+
+    let newState = states[state] || states.start;
+    button.textContent = newState.text;
+    button.title = newState.title;
+    button.classList.remove(
+        'default', 'checking', 'is-working', 'green', 'success', 'yellow', 'red',
+        'has-critical-sinks', 'show-next-step-arrow', 'show-next-step-emoji',
+        'launching' // <-- Add 'launching' here
+    );
+    button.classList.add(...newState.class.split(' '));
+    button.style.animation = '';
+
+    if (newState.class.includes('is-working')) button.classList.add('is-working');
+    if (state === 'launch' && options.hasCriticalSinks) button.classList.add('has-critical-sinks');
+    if (options.showArrow) button.classList.add('show-next-step-arrow');
+    if (options.showEmoji) button.classList.add('show-next-step-emoji');
 }
 window.updateButton = updateButton;
 
@@ -544,52 +571,85 @@ async function showUrlModificationModal(originalUrl, failureReason) {
     return new Promise((resolve) => { const modalContainer = document.getElementById('urlModificationModalContainer'); if (!modalContainer) { resolve({ action: 'cancel', modifiedUrl: null }); return; } modalContainer.innerHTML = ''; const backdrop = document.createElement('div'); backdrop.className = 'modal-backdrop'; const modal = document.createElement('div'); modal.className = 'url-modification-modal'; let currentUrl = new URL(originalUrl); const params = new URLSearchParams(currentUrl.search); let paramInputs = {}; let paramsHTML = ''; if (Array.from(params.keys()).length > 0) { params.forEach((value, key) => { const inputId = `param-input-${key}`; paramsHTML += `<div class="url-param-row"><label for="${inputId}" class="url-param-label">${escapeHTML(key)}:</label><input type="text" id="${inputId}" class="url-param-input" value="${escapeHTML(value)}"></div>`; paramInputs[key] = inputId; }); } else paramsHTML = '<p class="url-modal-no-params">No query parameters found.</p>'; modal.innerHTML = `<div class="url-modal-header"><h4>Embedding Check Failed - Modify URL?</h4><button class="close-modal-btn">&times;</button></div><div class="url-modal-body"><p class="url-modal-reason"><strong>Reason:</strong> ${escapeHTML(failureReason)}</p><p class="url-modal-original"><strong>Original URL:</strong> <span class="url-display">${escapeHTML(originalUrl)}</span></p><hr><h5 class="url-modal-params-title">Edit Query Parameters:</h5><div class="url-params-editor">${paramsHTML}</div></div><div class="url-modal-footer"><button id="urlCancelBtn" class="control-button secondary-button">Cancel Analysis</button><button id="urlContinueBtn" class="control-button secondary-button orange-button">Analyze Original Anyway</button><button id="urlRetryBtn" class="control-button primary-button">Modify & Retry Analysis</button></div>`; modalContainer.appendChild(backdrop); modalContainer.appendChild(modal); const closeModal = (result) => { modalContainer.innerHTML = ''; resolve(result); }; modal.querySelector('.close-modal-btn').addEventListener('click', () => closeModal({ action: 'cancel', modifiedUrl: null })); backdrop.addEventListener('click', () => closeModal({ action: 'cancel', modifiedUrl: null })); modal.querySelector('#urlCancelBtn').addEventListener('click', () => closeModal({ action: 'cancel', modifiedUrl: null })); modal.querySelector('#urlContinueBtn').addEventListener('click', () => closeModal({ action: 'continue', modifiedUrl: originalUrl })); modal.querySelector('#urlRetryBtn').addEventListener('click', () => { const newParams = new URLSearchParams(); let changed = false; params.forEach((originalValue, key) => { const inputElement = document.getElementById(paramInputs[key]); const newValue = inputElement ? inputElement.value : originalValue; newParams.set(key, newValue); if (newValue !== originalValue) changed = true; }); if (!changed) { showToastNotification("No parameters were changed.", "info", 3000); return; } currentUrl.search = newParams.toString(); const modifiedUrlString = currentUrl.toString(); if (!isValidUrl(modifiedUrlString)) { showToastNotification("Modified URL is invalid.", "error", 4000); return; } closeModal({ action: 'retry', modifiedUrl: modifiedUrlString }); }); });
 }
 
+
 async function handlePlayButton(endpoint, button, skipCheck = false) {
     const endpointKey = button.getAttribute('data-endpoint');
     if (!endpointKey) { log.error("[Play Button] No endpoint key found."); updateButton(button, 'error'); return; }
 
     const originalFullEndpoint = endpoint;
-    const currentState = buttonStates.get(endpointKey);
+    const currentStateInfo = buttonStates.get(endpointKey);
 
-    if (currentState?.state === 'launch') {
-        if (launchInProgressEndpoints.has(endpointKey)) return;
+    if (currentStateInfo?.state === 'launch') {
+        if (launchInProgressEndpoints.has(endpointKey)) {
+            log.debug(`[Play Button] Launch already in progress for ${endpointKey}`);
+            return;
+        }
         launchInProgressEndpoints.add(endpointKey);
         const traceButton = button.closest('.button-container')?.querySelector('.iframe-trace-button');
+        let launchSuccess = false;
+
         try {
+            updateButton(button, 'launching', currentStateInfo.options);
+            showToastNotification("Preparing Fuzzer Environment...", "info", 3000);
+
             const successfulUrlStorageKey = `successful-url-${endpointKey}`;
             const successfulUrlResult = await new Promise(resolve => chrome.storage.local.get(successfulUrlStorageKey, resolve));
             const successfulUrl = successfulUrlResult[successfulUrlStorageKey] || originalFullEndpoint;
-            const analysisKeyToUse = endpointKey;
-            const [traceReport, storedPayloads, storedMessages] = await Promise.all([ window.traceReportStorage.getTraceReport(analysisKeyToUse), window.traceReportStorage.getReportPayloads(analysisKeyToUse), retrieveMessagesWithFallbacks(analysisKeyToUse) ]);
-            if (!traceReport) throw new Error('No trace report found. Run Play & Trace again.');
+            const analysisKeyToUse = getStorageKeyForUrl(successfulUrl);
+
+            const [traceReport, storedPayloads, storedMessages] = await Promise.all([
+                window.traceReportStorage.getTraceReport(analysisKeyToUse),
+                window.traceReportStorage.getReportPayloads(analysisKeyToUse),
+                retrieveMessagesWithFallbacks(endpointKey) // Get messages associated with original endpoint key
+            ]);
+
+            if (!traceReport) throw new Error(`No trace report found for ${analysisKeyToUse}. Run Play & Trace again.`);
             const handlerCode = traceReport?.analyzedHandler?.handler || traceReport?.analyzedHandler?.code;
             if (!handlerCode) throw new Error('Handler code missing in trace report.');
+
             const payloads = storedPayloads || traceReport?.details?.payloads || traceReport?.payloads || [];
-            const messagesForFuzzer = storedMessages || traceReport.details?.uniqueStructures?.flatMap(s => s.examples || []) || [];
-            const callbackStorageData = await chrome.storage.session.get([CALLBACK_URL_STORAGE_KEY]);
+            let messagesForFuzzer = [];
+            if (Array.isArray(storedMessages) && storedMessages.length > 0) {
+                messagesForFuzzer = storedMessages;
+            } else if (traceReport?.details?.uniqueStructures) {
+                messagesForFuzzer = traceReport.details.uniqueStructures.flatMap(s => s.examples || []);
+            }
+
+            const callbackStorageData = await new Promise(resolve => chrome.storage.session.get([CALLBACK_URL_STORAGE_KEY], resolve));
             const currentCallbackUrl = callbackStorageData[CALLBACK_URL_STORAGE_KEY] || null;
             const customPayloadsResult = await new Promise(resolve => chrome.storage.session.get('customXssPayloads', result => resolve(result.customXssPayloads)));
             const useCustomPayloads = customPayloadsResult && customPayloadsResult.length > 0;
-            const fuzzerOptions = { autoStart: true, useCustomPayloads: useCustomPayloads, enableCallbackFuzzing: !!currentCallbackUrl, callbackUrl: currentCallbackUrl };
-            const success = await launchFuzzerEnvironment(successfulUrl, handlerCode, messagesForFuzzer, payloads, traceReport, fuzzerOptions, analysisKeyToUse);
-            updateButton(button, success ? 'launch' : 'error', { hasCriticalSinks: button.classList.contains('has-critical-sinks'), errorMessage: success ? undefined : 'Fuzzer launch failed' });
-            if (traceButton) updateTraceButton(traceButton, success ? 'success' : 'default');
+
+            const fuzzerOptions = {
+                autoStart: true, // Can be configured if needed
+                useCustomPayloads: useCustomPayloads,
+                enableCallbackFuzzing: !!currentCallbackUrl,
+                callbackUrl: currentCallbackUrl
+            };
+
+            launchSuccess = await launchFuzzerEnvironment(successfulUrl, handlerCode, messagesForFuzzer, payloads, traceReport, fuzzerOptions, analysisKeyToUse);
+
         } catch (error) {
-            log.error('[Launch Error]:', error?.message); alert(`Fuzzer launch failed: ${error.message}`);
-            const traceButton = button.closest('.button-container')?.querySelector('.iframe-trace-button');
-            updateButton(button, 'error', {errorMessage: 'Fuzzer launch failed'});
-            if (traceButton) updateTraceButton(traceButton, 'disabled');
-            try { await chrome.runtime.sendMessage({ action: "stopServer" }); } catch {}
-        } finally { launchInProgressEndpoints.delete(endpointKey); setTimeout(requestUiUpdate, 100); }
+            log.error('[Launch Error]:', error?.message);
+            alert(`Fuzzer launch failed: ${error.message}`);
+            launchSuccess = false;
+            try { await chrome.runtime.sendMessage({ type: "stopServer" }); } catch {} // Use type for clarity
+        } finally {
+            updateButton(button, launchSuccess ? 'launch' : 'error', { // Restore to launch on success, error on failure
+                ...currentStateInfo.options, // Keep original options like hasCriticalSinks
+                errorMessage: launchSuccess ? undefined : 'Fuzzer launch failed'
+            });
+
+            launchInProgressEndpoints.delete(endpointKey);
+            setTimeout(requestUiUpdate, 100);
+        }
         return;
     }
 
     if (launchInProgressEndpoints.has(endpointKey)) return;
     launchInProgressEndpoints.add(endpointKey);
 
-    const currentButtonContainer = button.closest('.button-container');
-    const traceButton = currentButtonContainer?.querySelector('.iframe-trace-button');
-    const reportButton = currentButtonContainer?.querySelector('.iframe-report-button');
+    const reportButton = button.closest('.button-container')?.querySelector('.iframe-report-button');
     let endpointUrlForAnalysis = originalFullEndpoint;
     let analysisStorageKey = endpointKey;
     let successfullyAnalyzedUrl = null;
@@ -603,42 +663,29 @@ async function handlePlayButton(endpoint, button, skipCheck = false) {
         if (!skipCheck) {
             updateButton(button, 'csp');
             let cspResult = await performEmbeddingCheck(endpointUrlForAnalysis);
-
             if (!cspResult.embeddable) {
                 log.warn(`[Play] Embedding check failed for ${endpointUrlForAnalysis}: ${cspResult.status}`);
                 const isCspOrXfoError = cspResult.status.includes('X-Frame-Options') || cspResult.status.includes('CSP');
-
                 showToastNotification(`Embedding check failed: ${cspResult.status}`, 'error');
-
                 if (isCspOrXfoError) {
                     const modalResult = await showUrlModificationModal(endpointUrlForAnalysis, cspResult.status);
                     if (modalResult.action === 'cancel') { updateButton(button, 'start'); throw new Error("User cancelled analysis"); }
                     else if (modalResult.action === 'continue') { successfullyAnalyzedUrl = endpointUrlForAnalysis; updateButton(button, 'warning', { errorMessage: 'Proceeding despite embedding failure' }); throw new Error("Proceeding despite embedding failure (analysis skipped)"); }
                     else if (modalResult.action === 'retry') {
-                        endpointUrlForAnalysis = modalResult.modifiedUrl; updateButton(button, 'csp');
+                        endpointUrlForAnalysis = modalResult.modifiedUrl; analysisStorageKey = getStorageKeyForUrl(endpointUrlForAnalysis);
+                        updateButton(button, 'csp');
                         cspResult = await performEmbeddingCheck(endpointUrlForAnalysis);
-                        if (!cspResult.embeddable) {
-                            updateButton(button, 'error', { errorMessage: `Modified URL failed check: ${cspResult.status}` });
-                            throw new Error("Modified URL failed embedding check");
-                        }
+                        if (!cspResult.embeddable) { updateButton(button, 'error', { errorMessage: `Modified URL failed check: ${cspResult.status}` }); throw new Error("Modified URL failed embedding check"); }
                         successfullyAnalyzedUrl = endpointUrlForAnalysis;
                     } else { updateButton(button, 'start'); throw new Error("Embedding check failed - Unknown modal action"); }
-                } else {
-                    updateButton(button, 'error', { errorMessage: cspResult.status });
-                    launchInProgressEndpoints.delete(endpointKey);
-                    setTimeout(requestUiUpdate, 50);
-                    return;
-                }
-            } else {
-                successfullyAnalyzedUrl = endpointUrlForAnalysis;
-            }
-        } else {
-            successfullyAnalyzedUrl = endpointUrlForAnalysis;
-        }
+                } else { updateButton(button, 'error', { errorMessage: cspResult.status }); launchInProgressEndpoints.delete(endpointKey); setTimeout(requestUiUpdate, 50); return; }
+            } else { successfullyAnalyzedUrl = endpointUrlForAnalysis; }
+        } else { successfullyAnalyzedUrl = endpointUrlForAnalysis; }
 
         updateButton(button, 'analyze');
-        await saveRandomPostMessages(analysisStorageKey, originalMessages);
-        const successfulUrlStorageKey = `successful-url-${analysisStorageKey}`;
+        analysisStorageKey = getStorageKeyForUrl(successfullyAnalyzedUrl);
+        await saveRandomPostMessages(endpointKey, originalMessages);
+        const successfulUrlStorageKey = `successful-url-${endpointKey}`;
         await chrome.storage.local.set({ [successfulUrlStorageKey]: successfullyAnalyzedUrl });
 
         const runtimeListenerKey = `runtime-listeners-${endpointKey}`;
@@ -646,34 +693,55 @@ async function handlePlayButton(endpoint, button, skipCheck = false) {
         const runtimeListeners = runtimeResult ? runtimeResult[runtimeListenerKey] : null;
         const validRuntimeListeners = runtimeListeners?.filter(l => l?.code && typeof l.code === 'string' && !l.code.includes('[native code]') && l.code.length > 25) || [];
         const scoringMessages = originalMessages;
-        if (validRuntimeListeners.length > 0) { const scorer = new HandlerExtractor().initialize(successfullyAnalyzedUrl, scoringMessages); let bestScore = -1; let bestListener = null; validRuntimeListeners.forEach(listener => { const score = scorer.scoreHandler(listener.code, listener.category || 'runtime-captured', listener.source); if (score > bestScore) { bestScore = score; bestListener = listener; } }); if (bestListener) foundHandlerObject = { handler: bestListener.code, category: bestListener.category || 'runtime-best-scored', score: bestScore, source: `runtime: ${bestListener.context || bestListener.source || 'unknown'}`, timestamp: bestListener.timestamp, stack: bestListener.stack, context: bestListener.context }; else foundHandlerObject = null; }
-        if (!foundHandlerObject) { try { const extractor = new HandlerExtractor().initialize(successfullyAnalyzedUrl, scoringMessages); showToastNotification('Attaching debugger to analyze scripts...', 'info', 10000); const dynamicHandlers = await extractor.extractDynamicallyViaDebugger(successfullyAnalyzedUrl); if (dynamicHandlers && dynamicHandlers.length > 0) { foundHandlerObject = extractor.getBestHandler(dynamicHandlers); if (foundHandlerObject) foundHandlerObject.category = foundHandlerObject.category ? `debugger-${foundHandlerObject.category}` : 'debugger-extracted'; else foundHandlerObject = null; } else foundHandlerObject = null; } catch (extractionError) { log.error(`[Play] Debugger extraction failed:`, extractionError); foundHandlerObject = null; } }
 
-        if (foundHandlerObject?.handler) { const finalBestHandlerKey = `best-handler-${analysisStorageKey}`; try { await chrome.storage.local.set({ [finalBestHandlerKey]: foundHandlerObject }); const runtimeListKeyForUpdate = `runtime-listeners-${endpointKey}`; try { const res = await new Promise(resolve => chrome.storage.local.get(runtimeListKeyForUpdate, resolve)); let listeners = res[runtimeListKeyForUpdate] || []; if (!listeners.some(l => l.code === foundHandlerObject.handler)) { listeners.push({ code: foundHandlerObject.handler, context: `selected-by-play (${foundHandlerObject.category})`, timestamp: Date.now(), source: foundHandlerObject.source }); if (listeners.length > 30) listeners = listeners.slice(-30); await chrome.storage.local.set({ [runtimeListKeyForUpdate]: listeners }); } if (!endpointsWithHandlers.has(endpointKey)) { endpointsWithHandlers.add(endpointKey); handlerStateUpdated = true; } } catch (e) { log.error("Failed updating runtime list after selection", e); } updateButton(button, 'success'); if (traceButton) updateTraceButton(traceButton, 'default', { showEmoji: true }); if (reportButton) updateReportButton(reportButton, 'disabled', originalFullEndpoint); } catch (storageError) { log.error(`Failed to save handler (${finalBestHandlerKey}):`, storageError); updateButton(button, 'error', {errorMessage: 'Failed to save handler'}); if (traceButton) updateTraceButton(traceButton, 'disabled'); if (reportButton) updateReportButton(reportButton, 'disabled', originalFullEndpoint); } }
-        else { const failureMessage = `No usable handler found for ${endpointUrlForAnalysis}.`; updateButton(button, 'warning', { errorMessage: "No handler function found" }); if (traceButton) updateTraceButton(traceButton, 'disabled'); if (reportButton) updateReportButton(reportButton, 'disabled', originalFullEndpoint); }
+        if (validRuntimeListeners.length > 0) {
+            const scorer = new HandlerExtractor().initialize(successfullyAnalyzedUrl, scoringMessages);
+            let bestScore = -1; let bestListener = null;
+            validRuntimeListeners.forEach(listener => {
+                let handlerInfo = { handler: listener.code, category: listener.category || 'runtime-captured', source: listener.source || 'runtime', handlerNode: null, fullScriptContent: listener.code };
+                const score = scorer.scoreHandler(handlerInfo);
+                if (score > bestScore) { bestScore = score; bestListener = listener; } });
+            if (bestListener) foundHandlerObject = { handler: bestListener.code, category: bestListener.category || 'runtime-best-scored', score: bestScore, source: `runtime: ${bestListener.context || bestListener.source || 'unknown'}`, timestamp: bestListener.timestamp, stack: bestListener.stack, context: bestListener.context };
+            else foundHandlerObject = null;
+        }
+
+        if (!foundHandlerObject) {
+            try {
+                const extractor = new HandlerExtractor().initialize(successfullyAnalyzedUrl, scoringMessages);
+                showToastNotification('Attaching debugger to analyze scripts...', 'info', 10000);
+                const dynamicHandlers = await extractor.extractDynamicallyViaDebugger(successfullyAnalyzedUrl);
+                if (dynamicHandlers && dynamicHandlers.length > 0) {
+                    foundHandlerObject = extractor.getBestHandler(dynamicHandlers);
+                    if (foundHandlerObject) foundHandlerObject.category = foundHandlerObject.category ? `debugger-${foundHandlerObject.category}` : 'debugger-extracted';
+                    else foundHandlerObject = null;
+                } else foundHandlerObject = null;
+            } catch (extractionError) { log.error(`[Play] Debugger extraction failed:`, extractionError); foundHandlerObject = null; }
+        }
+
+        if (foundHandlerObject?.handler) {
+            const finalBestHandlerKey = `best-handler-${analysisStorageKey}`;
+            try {
+                if (typeof window.analyzeHandlerStatically === 'function') {
+                    const quickAnalysis = window.analyzeHandlerStatically(foundHandlerObject.handler);
+                    if(quickAnalysis?.analysis?.identifiedEventParam) {
+                        foundHandlerObject.eventParamName = quickAnalysis.analysis.identifiedEventParam;
+                    }
+                }
+                await chrome.storage.local.set({ [finalBestHandlerKey]: foundHandlerObject });
+                const runtimeListKeyForUpdate = `runtime-listeners-${endpointKey}`;
+                try { const res = await new Promise(resolve => chrome.storage.local.get(runtimeListKeyForUpdate, resolve)); let listeners = res[runtimeListKeyForUpdate] || []; if (!listeners.some(l => l.code === foundHandlerObject.handler)) { listeners.push({ code: foundHandlerObject.handler, context: `selected-by-play (${foundHandlerObject.category})`, timestamp: Date.now(), source: foundHandlerObject.source }); if (listeners.length > 30) listeners = listeners.slice(-30); await chrome.storage.local.set({ [runtimeListKeyForUpdate]: listeners }); } if (!endpointsWithHandlers.has(endpointKey)) { endpointsWithHandlers.add(endpointKey); handlerStateUpdated = true; } } catch (e) { log.error("Failed updating runtime list after selection", e); }
+                updateButton(button, 'success');
+                const traceButton = button.closest('.button-container')?.querySelector('.iframe-trace-button');
+                if (traceButton) updateTraceButton(traceButton, 'default', { showEmoji: true });
+                if (reportButton) updateReportButton(reportButton, 'disabled', originalFullEndpoint);
+            } catch (storageError) { log.error(`Failed to save handler (${finalBestHandlerKey}):`, storageError); updateButton(button, 'error', {errorMessage: 'Failed to save handler'}); const traceButton = button.closest('.button-container')?.querySelector('.iframe-trace-button'); if (traceButton) updateTraceButton(traceButton, 'disabled'); if (reportButton) updateReportButton(reportButton, 'disabled', originalFullEndpoint); }
+        } else { const failureMessage = `No usable handler found for ${endpointUrlForAnalysis}.`; updateButton(button, 'warning', { errorMessage: "No handler function found" }); const traceButton = button.closest('.button-container')?.querySelector('.iframe-trace-button'); if (traceButton) updateTraceButton(traceButton, 'disabled'); if (reportButton) updateReportButton(reportButton, 'disabled', originalFullEndpoint); }
         if (handlerStateUpdated) requestUiUpdate();
 
     } catch (error) {
-        log.error(`[Play Button Error] Caught in main try:`, error);
-
-        if (error.message === "Proceeding despite embedding failure (analysis skipped)") {
-            log.info(`[Play] Process stopped for ${endpointKey}: ${error.message}`);
-            showToastNotification('Analysis skipped due to embedding restrictions. Button set to warning.', 'warning', 6000);
-            if (traceButton) updateTraceButton(traceButton, 'default');
-            if (reportButton) updateReportButton(reportButton, 'disabled', originalFullEndpoint);
-        } else if (["User cancelled analysis", "Modified URL failed embedding check"].includes(error.message) || error.message?.startsWith('Embedding check failed:')) {
-            log.info(`[Play] Process stopped for ${endpointKey}: ${error.message}`);
-            if (traceButton) updateTraceButton(traceButton, 'disabled');
-            if (reportButton) updateReportButton(reportButton, 'disabled', originalFullEndpoint);
-        } else {
-            log.error(`[Play Button Error] Unexpected error for key ${endpointKey}:`, error.message);
-            if(!button.classList.contains('error') && !button.classList.contains('warning')) {
-                updateButton(button, 'error', { errorMessage: 'Analysis error occurred' });
-            }
-            showToastNotification(`Analysis Error: ${error.message.substring(0, 100)}`, 'error');
-            if (traceButton) updateTraceButton(traceButton, 'disabled');
-            if (reportButton) updateReportButton(reportButton, 'disabled', originalFullEndpoint);
-        }
+        if (error.message === "Proceeding despite embedding failure (analysis skipped)") { log.info(`[Play] Process stopped for ${endpointKey}: ${error.message}`); showToastNotification('Analysis skipped due to embedding restrictions. Button set to warning.', 'warning', 6000); const traceButton = button.closest('.button-container')?.querySelector('.iframe-trace-button'); if (traceButton) updateTraceButton(traceButton, 'disabled'); if (reportButton) updateReportButton(reportButton, 'disabled', originalFullEndpoint); }
+        else if (["User cancelled analysis", "Modified URL failed embedding check"].includes(error.message) || error.message?.startsWith('Embedding check failed:')) { log.info(`[Play] Process stopped for ${endpointKey}: ${error.message}`); const traceButton = button.closest('.button-container')?.querySelector('.iframe-trace-button'); if (traceButton) updateTraceButton(traceButton, 'disabled'); if (reportButton) updateReportButton(reportButton, 'disabled', originalFullEndpoint); }
+        else { log.error(`[Play Button Error] Unexpected error for key ${endpointKey}:`, error.message); if(!button.classList.contains('error') && !button.classList.contains('warning')) { updateButton(button, 'error', { errorMessage: 'Analysis error occurred' }); } showToastNotification(`Analysis Error: ${error.message.substring(0, 100)}`, 'error'); const traceButton = button.closest('.button-container')?.querySelector('.iframe-trace-button'); if (traceButton) updateTraceButton(traceButton, 'disabled'); if (reportButton) updateReportButton(reportButton, 'disabled', originalFullEndpoint); }
     } finally {
         launchInProgressEndpoints.delete(endpointKey);
         setTimeout(requestUiUpdate, 150);
@@ -690,7 +758,164 @@ function renderPayloadItem(payloadItem, index) { let displayString = '(Error dis
 
 function attachReportEventListeners(panel, reportData) { panel.querySelectorAll('details.report-details').forEach(detailsElement => { const iconElement = detailsElement.querySelector('.toggle-icon'); if (detailsElement && iconElement) { detailsElement.addEventListener('toggle', () => { iconElement.textContent = detailsElement.open ? '▼' : '▶'; }); } }); panel.querySelectorAll('.view-full-payload-btn').forEach(btn => { btn.addEventListener('click', (e) => { const item = e.target.closest('.payload-item'); const index = parseInt(item?.getAttribute('data-payload-index')); const payloads = reportData?.details?.payloads || []; if (payloads[index] !== undefined) showFullPayloadModal(payloads[index]); }); }); const showAllPayloadsBtn = panel.querySelector('#showAllPayloadsBtn'); if (showAllPayloadsBtn) { showAllPayloadsBtn.addEventListener('click', () => { const list = panel.querySelector('#payloads-list'); const payloads = reportData?.details?.payloads || []; if (list && payloads.length > 0) { list.innerHTML = payloads.map((p, index) => renderPayloadItem(p, index)).join(''); attachReportEventListeners(panel, reportData); } showAllPayloadsBtn.remove(); }, { once: true }); } const showAllStructuresBtn = panel.querySelector('#showAllStructuresBtn'); if (showAllStructuresBtn) { showAllStructuresBtn.addEventListener('click', () => { const list = panel.querySelector('.structures-list'); const structures = reportData?.details?.uniqueStructures || []; if (list && structures.length > 0) { list.innerHTML = structures.map((s, index) => renderStructureItem(s, index)).join(''); attachReportEventListeners(panel, reportData); } showAllStructuresBtn.remove(); }, { once: true }); } }
 
-function displayReport(reportData, panel) { try { panel.innerHTML = ''; } catch (clearError) { panel.innerHTML = '<p class="error-message">Internal error clearing report panel.</p>'; return; } let content; try { content = document.createElement('div'); content.className = 'trace-results-content'; panel.appendChild(content); } catch (contentError) { panel.innerHTML = '<p class="error-message">Internal error creating report content area.</p>'; return; } if (!reportData || typeof reportData !== 'object') { content.innerHTML = '<p class="error-message">Error: Invalid or missing report data.</p>'; return; } try { const details = reportData.details || {}; const summary = reportData.summary || {}; const bestHandler = details.bestHandler || reportData.bestHandler || reportData.analyzedHandler; const vulnerabilities = [...(details.sinks || []), ...(reportData.vulnerabilities || [])]; const securityIssues = [...(details.securityIssues || []), ...(reportData.securityIssues || [])]; const dataFlows = details.dataFlows || []; const payloads = details.payloads || []; const structures = details.uniqueStructures || []; const endpointDisplay = reportData.endpoint || reportData.originalEndpointKey || 'Unknown'; const analysisStorageKey = reportData.analysisStorageKey || 'report'; const originChecks = details.originValidationChecks || []; const safeEscape = (str) => { try { return window.escapeHTML(String(str)); } catch(e){ return '[Error]'; }}; const safeGetRisk = (score) => { try { return getRiskLevelAndColor(score); } catch(e){ return { riskLevel: 'Error', riskColor: 'critical' }; }}; const safeGetRec = (score, data) => { try { return getRecommendationText(score, data); } catch(e){ return 'Error generating recommendation.'; }}; const safeRenderPayload = (p, i) => { try { return renderPayloadItem(p, i); } catch(e){ return '<p class="error-message">Error rendering payload item.</p>'; }}; const safeRenderStructure = (s, i) => { try { return renderStructureItem(s, i); } catch(e){ return '<p class="error-message">Error rendering structure item.</p>'; }}; const uniqueVulns = vulnerabilities.filter((v, i, a) => a.findIndex(t => t?.type === v?.type && t?.context === v?.context) === i); const uniqueIssues = securityIssues.filter((v, i, a) => a.findIndex(t => t?.type === v?.type && t?.context === v?.context) === i); const score = reportData.securityScore ?? summary.securityScore ?? 100; const { riskLevel, riskColor } = safeGetRisk(score); const summarySection = document.createElement('div'); summarySection.className = 'report-section report-summary'; summarySection.innerHTML = `<h4 class="report-section-title">Analysis Summary - <span class="report-endpoint-title">${safeEscape(endpointDisplay)}</span></h4><div class="summary-grid"><div class="security-score-container"><h5 class="risk-score-title">Risk Score:</h5><div class="security-score ${riskColor}" title="Score: ${score} (${riskLevel})"><div class="security-score-value">${score}</div><div class="security-score-label">${riskLevel}</div></div></div><div class="summary-metrics"><div class="metric"><span class="metric-label">Msgs</span><span class="metric-value">${summary.messagesAnalyzed ?? 'N/A'}</span></div><div class="metric"><span class="metric-label">Structs</span><span class="metric-value">${structures?.length ?? 0}</span></div><div class="metric"><span class="metric-label">Sinks</span><span class="metric-value">${uniqueVulns?.length ?? 0}</span></div><div class="metric"><span class="metric-label">Issues</span><span class="metric-value">${uniqueIssues?.length ?? 0}</span></div><div class="metric"><span class="metric-label">Payloads</span><span class="metric-value">${payloads?.length ?? 0}</span></div></div></div><div class="recommendations"><h5 class="report-subsection-title">Recommendation</h5><p class="recommendation-text">${safeEscape(safeGetRec(score, reportData))}</p></div>`; content.appendChild(summarySection); if (bestHandler?.handler) { const handlerSection = document.createElement('div'); handlerSection.className = 'report-section report-handler'; handlerSection.innerHTML = `<details class="report-details"><summary class="report-summary-toggle"><strong>Analyzed Handler</strong><span class="handler-meta">(Cat: ${safeEscape(bestHandler.category || 'N/A')} | Score: ${bestHandler.score?.toFixed(1) || 'N/A'})</span><span class="toggle-icon">▶</span></summary><div class="report-code-block handler-code"><pre><code>${safeEscape(bestHandler.handler)}</code></pre></div></details>`; content.appendChild(handlerSection); } const findingsSection = document.createElement('div'); findingsSection.className = 'report-section report-findings'; let findingsHTML = '<h4 class="report-section-title">Findings</h4>'; if (originChecks.length > 0) { findingsHTML += `<div class="subsection"><h5 class="report-subsection-title">Origin Validation (${originChecks.length})</h5><table class="report-table"><thead><tr><th>Check Type</th><th>Strength</th><th>Compared Value</th><th>Snippet</th></tr></thead><tbody>`; originChecks.forEach(check => { const type = check?.type || '?'; const strength = check?.strength || 'N/A'; const value = check?.value !== null && check?.value !== undefined ? String(check.value).substring(0, 100) : 'N/A'; const snippetHTML = check?.snippet ? `<code class="context-snippet">${safeEscape(check.snippet)}</code>` : 'N/A'; let strengthClass = strength.toLowerCase(); if(strength === 'Missing') strengthClass = 'critical'; else if(strength === 'Weak') strengthClass = 'high'; else if(strength === 'Medium') strengthClass = 'medium'; else if(strength === 'Strong') strengthClass = 'negligible'; else strengthClass='low'; findingsHTML += `<tr class="severity-row-${strengthClass}"><td>${safeEscape(type)}</td><td><span class="severity-badge severity-${strengthClass}">${safeEscape(strength)}</span></td><td><code>${safeEscape(value)}</code></td><td>${snippetHTML}</td></tr>`; }); findingsHTML += `</tbody></table></div>`; } if (uniqueVulns.length > 0) { findingsHTML += `<div class="subsection"><h5 class="report-subsection-title">DOM XSS Sinks Detected (${uniqueVulns.length})</h5><table class="report-table"><thead><tr><th>Sink</th><th>Severity</th><th>Context Snippet</th></tr></thead><tbody>`; uniqueVulns.forEach(vuln => { const type = vuln?.type || '?'; const severity = vuln?.severity || 'N/A'; const contextHTML = vuln?.context || ''; findingsHTML += `<tr class="severity-row-${severity.toLowerCase()}"><td>${safeEscape(type)}</td><td><span class="severity-badge severity-${severity.toLowerCase()}">${safeEscape(severity)}</span></td><td class="context-snippet-cell">${contextHTML}</td></tr>`; }); findingsHTML += `</tbody></table></div>`; } if (uniqueIssues.length > 0) { findingsHTML += `<div class="subsection"><h5 class="report-subsection-title">Other Security Issues (${uniqueIssues.length})</h5><table class="report-table"><thead><tr><th>Issue</th><th>Severity</th><th>Context Snippet</th></tr></thead><tbody>`; uniqueIssues.forEach(issue => { const type = issue?.type || '?'; const severity = issue?.severity || 'N/A'; const contextHTML = issue?.context || ''; findingsHTML += `<tr class="severity-row-${severity.toLowerCase()}"><td>${safeEscape(type)}</td><td><span class="severity-badge severity-${severity.toLowerCase()}">${safeEscape(severity)}</span></td><td class="context-snippet-cell">${contextHTML}</td></tr>`; }); findingsHTML += `</tbody></table></div>`; } if (!originChecks.length && !uniqueVulns.length && !uniqueIssues.length) findingsHTML += '<p class="no-findings-text">No significant findings detected.</p>'; findingsSection.innerHTML = findingsHTML; content.appendChild(findingsSection); if (dataFlows?.length > 0) { const flowSection = document.createElement('div'); flowSection.className = 'report-section report-dataflow'; flowSection.innerHTML = ` <h4 class="report-section-title">Data Flow</h4> <table class="report-table dataflow-table"> <thead> <tr> <th>Source Property</th> <th>Sink / Target</th> <th>Conditions</th> <th>Code Snippet</th> </tr> </thead> <tbody> </tbody> </table>`; const tbody = flowSection.querySelector('tbody'); if (tbody) dataFlows.forEach(flow => { const prop = flow?.sourcePath || '?'; const sink = flow?.destinationContext || '?'; const context = flow?.fullCodeSnippet || flow?.taintedNodeSnippet || ''; const displayProp = prop === '(root)' ? '(root data)' : `event.data.${safeEscape(prop)}`; const conditions = flow?.requiredConditionsForFlow || []; let conditionsHtml = 'None'; if (conditions.length > 0) conditionsHtml = conditions.map(c => { let valStr = safeEscape(String(c.value)); if (typeof c.value === 'string') valStr = `'${valStr}'`; return `<code>${safeEscape(c.path)} ${safeEscape(c.op)} ${valStr}</code>`; }).join('<br>'); const rowHtml = ` <tr> <td><code>${displayProp}</code></td> <td>${safeEscape(sink)}</td> <td>${conditionsHtml}</td> <td><code class="context-snippet">${safeEscape(context)}</code></td> </tr>`; tbody.insertAdjacentHTML('beforeend', rowHtml); }); else flowSection.innerHTML += '<p class="error-message">Error rendering data flow table body.</p>'; content.appendChild(flowSection); } if (payloads?.length > 0) { const payloadSection = document.createElement('div'); payloadSection.className = 'report-section report-payloads'; payloadSection.innerHTML = `<h4 class="report-section-title">Generated Payloads (${payloads.length})</h4><div id="payloads-list" class="payloads-list report-list">${payloads.slice(0, 10).map((p, i) => safeRenderPayload(p, i)).join('')}</div>${payloads.length > 10 ? `<button id="showAllPayloadsBtn" class="control-button secondary-button show-more-btn">Show All ${payloads.length}</button>` : ''}`; content.appendChild(payloadSection); } if (structures?.length > 0) { const structureSection = document.createElement('div'); structureSection.className = 'report-section report-structures'; let structuresHTML = `<h4 class="report-section-title">Unique Msg Structures (${structures.length})</h4><div class="structures-list report-list">`; structures.slice(0, 3).forEach((s, i) => { structuresHTML += safeRenderStructure(s, i); }); structuresHTML += `</div>`; if (structures.length > 3) structuresHTML += `<button id="showAllStructuresBtn" class="control-button secondary-button show-more-btn">Show All ${structures.length}</button>`; structureSection.innerHTML = structuresHTML; content.appendChild(structureSection); } const buttonContainer = document.createElement('div'); buttonContainer.style.cssText = 'margin-top:20px; display: flex; justify-content: center; gap: 15px;'; const exportJsonBtn = document.createElement('button'); exportJsonBtn.textContent = 'Export JSON'; exportJsonBtn.className = 'control-button secondary-button'; exportJsonBtn.addEventListener('click', (e) => { e.stopPropagation(); try { const jsonData = JSON.stringify(reportData, null, 2); const blob = new Blob([jsonData], { type: 'application/json' }); const url = URL.createObjectURL(blob); const a = document.createElement('a'); const safeFilename = (analysisStorageKey || 'frogpost_report').replace(/[^a-z0-9_\-.]/gi, '_'); a.href = url; a.download = `${safeFilename}.json`; document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url); } catch (exportError) { alert("Failed to export report as JSON."); } }); const closeBtnInside = document.createElement('button'); closeBtnInside.textContent = 'Close Report'; closeBtnInside.className = 'control-button secondary-button'; closeBtnInside.onclick = () => { document.querySelector('.trace-panel-backdrop')?.remove(); panel.remove(); }; buttonContainer.appendChild(exportJsonBtn); buttonContainer.appendChild(closeBtnInside); content.appendChild(buttonContainer); attachReportEventListeners(panel, reportData); } catch (renderError) { content.innerHTML = `<p class="error-message">Error rendering report details: ${renderError.message}</p>`; }
+function displayReport(reportData, panel) {
+    try {
+        panel.innerHTML = '';
+    } catch (clearError) {
+        panel.innerHTML = '<p class="error-message">Internal error clearing report panel.</p>';
+        return;
+    }
+    let content;
+    try {
+        content = document.createElement('div');
+        content.className = 'trace-results-content';
+        panel.appendChild(content);
+    } catch (contentError) {
+        panel.innerHTML = '<p class="error-message">Internal error creating report content area.</p>';
+        return;
+    }
+    if (!reportData || typeof reportData !== 'object') {
+        content.innerHTML = '<p class="error-message">Error: Invalid or missing report data.</p>';
+        return;
+    }
+    try {
+        const details = reportData.details || {};
+        const summary = reportData.summary || {};
+        const bestHandler = details.bestHandler || reportData.bestHandler || reportData.analyzedHandler;
+        const vulnerabilities = [...(details.sinks || []), ...(reportData.vulnerabilities || [])];
+        const securityIssues = [...(details.securityIssues || []), ...(reportData.securityIssues || [])];
+        const dataFlows = details.dataFlows || [];
+        const payloads = details.payloads || [];
+        const structures = details.uniqueStructures || [];
+        const endpointDisplay = reportData.endpoint || reportData.originalEndpointKey || 'Unknown';
+        const analysisStorageKey = reportData.analysisStorageKey || 'report';
+        const originChecks = details.originValidationChecks || [];
+        const safeEscape = (str) => { try { return window.escapeHTML(String(str ?? '')); } catch(e){ return '[Error]'; }};
+        const safeGetRisk = (score) => { try { return getRiskLevelAndColor(score); } catch(e){ return { riskLevel: 'Error', riskColor: 'critical' }; }};
+        const safeGetRec = (score, data) => { try { return getRecommendationText(score, data); } catch(e){ return 'Error generating recommendation.'; }};
+        const safeRenderPayload = (p, i) => { try { return renderPayloadItem(p, i); } catch(e){ return '<p class="error-message">Error rendering payload item.</p>'; }};
+        const safeRenderStructure = (s, i) => { try { return renderStructureItem(s, i); } catch(e){ return '<p class="error-message">Error rendering structure item.</p>'; }};
+        const uniqueVulns = vulnerabilities.filter((v, i, a) => a.findIndex(t => t?.type === v?.type && t?.context === v?.context) === i);
+        const uniqueIssues = securityIssues.filter((v, i, a) => a.findIndex(t => t?.type === v?.type && t?.context === v?.context) === i);
+        const score = reportData.securityScore ?? summary.securityScore ?? 100;
+        const { riskLevel, riskColor } = safeGetRisk(score);
+
+        const summarySection = document.createElement('div');
+        summarySection.className = 'report-section report-summary';
+        summarySection.innerHTML = `
+            <h4 class="report-section-title">Analysis Summary - <span class="report-endpoint-title">${safeEscape(endpointDisplay)}</span></h4>
+            <div class="summary-grid">
+                <div class="security-score-container">
+                    <h5 class="risk-score-title">Risk Score:</h5>
+                    <div class="security-score ${riskColor}" title="Score: ${score} (${riskLevel})">
+                        <div class="security-score-value">${score}</div>
+                        <div class="security-score-label">${riskLevel}</div>
+                    </div>
+                </div>
+                <div class="summary-metrics">
+                    <div class="metric"><span class="metric-label">Msgs</span><span class="metric-value">${summary.messagesAnalyzed ?? 'N/A'}</span></div>
+                    <div class="metric"><span class="metric-label">Structs</span><span class="metric-value">${structures?.length ?? 0}</span></div>
+                    <div class="metric"><span class="metric-label">Sinks</span><span class="metric-value">${uniqueVulns?.length ?? 0}</span></div>
+                    <div class="metric"><span class="metric-label">Issues</span><span class="metric-value">${uniqueIssues?.length ?? 0}</span></div>
+                    <div class="metric"><span class="metric-label">Payloads</span><span class="metric-value">${payloads?.length ?? 0}</span></div>
+                </div>
+            </div>
+            <div class="recommendations">
+                <h5 class="report-subsection-title">Recommendation</h5>
+                <p class="recommendation-text">${safeEscape(safeGetRec(score, reportData))}</p>
+            </div>`;
+        content.appendChild(summarySection);
+
+        if (bestHandler?.handler) {
+            const handlerSection = document.createElement('div');
+            handlerSection.className = 'report-section report-handler';
+            handlerSection.innerHTML = `
+                <details class="report-details">
+                    <summary class="report-summary-toggle"><strong>Analyzed Handler</strong><span class="handler-meta">(Cat: ${safeEscape(bestHandler.category || 'N/A')} | Score: ${bestHandler.score?.toFixed(1) || 'N/A'})</span><span class="toggle-icon">▶</span></summary>
+                    <div class="report-code-block handler-code"><pre><code>${safeEscape(bestHandler.handler)}</code></pre></div>
+                </details>`;
+            content.appendChild(handlerSection);
+        }
+
+        const findingsSection = document.createElement('div');
+        findingsSection.className = 'report-section report-findings';
+        let findingsHTML = '<h4 class="report-section-title">Findings</h4>';
+
+        if (originChecks.length > 0) {
+            findingsHTML += `<div class="subsection"><h5 class="report-subsection-title">Origin Validation (${originChecks.length})</h5><table class="report-table"><thead><tr><th>Check Type</th><th>Strength</th><th>Compared Value</th><th>Snippet</th></tr></thead><tbody>`;
+            originChecks.forEach(check => {
+                const type = check?.type || '?';
+                const strength = check?.strength || 'N/A';
+                const value = check?.comparedValue !== null && check?.comparedValue !== undefined ? String(check.comparedValue).substring(0, 100) : 'N/A';
+                const snippetHTML = check?.rawSnippet ? `<code class="context-snippet">${safeEscape(check.rawSnippet)}</code>` : 'N/A';
+                let strengthClass = strength.toLowerCase();
+                if(strength === 'Missing') strengthClass = 'critical'; else if(strength === 'Weak') strengthClass = 'high'; else if(strength === 'Medium') strengthClass = 'medium'; else if(strength === 'Strong') strengthClass = 'negligible'; else strengthClass='low';
+                findingsHTML += `<tr class="severity-row-${strengthClass}"><td>${safeEscape(type)}</td><td><span class="severity-badge severity-${strengthClass}">${safeEscape(strength)}</span></td><td><code>${safeEscape(value)}</code></td><td>${snippetHTML}</td></tr>`;
+            });
+            findingsHTML += `</tbody></table></div>`;
+        }
+
+        if (uniqueVulns.length > 0) {
+            findingsHTML += `<div class="subsection"><h5 class="report-subsection-title">DOM XSS Sinks Detected (${uniqueVulns.length})</h5><table class="report-table"><thead><tr><th>Sink</th><th>Severity</th><th>Context Snippet</th></tr></thead><tbody>`;
+            uniqueVulns.forEach(vuln => {
+                const type = vuln?.type || '?'; const severity = vuln?.severity || 'N/A'; const contextHTML = vuln?.context || '';
+                findingsHTML += `<tr class="severity-row-${severity.toLowerCase()}"><td>${safeEscape(type)}</td><td><span class="severity-badge severity-${severity.toLowerCase()}">${safeEscape(severity)}</span></td><td class="context-snippet-cell">${contextHTML}</td></tr>`;
+            });
+            findingsHTML += `</tbody></table></div>`;
+        }
+
+        if (uniqueIssues.length > 0) {
+            findingsHTML += `<div class="subsection"><h5 class="report-subsection-title">Other Security Issues (${uniqueIssues.length})</h5><table class="report-table"><thead><tr><th>Issue</th><th>Severity</th><th>Context Snippet</th></tr></thead><tbody>`;
+            uniqueIssues.forEach(issue => {
+                const type = issue?.type || '?'; const severity = issue?.severity || 'N/A'; const contextHTML = issue?.context || '';
+                findingsHTML += `<tr class="severity-row-${severity.toLowerCase()}"><td>${safeEscape(type)}</td><td><span class="severity-badge severity-${severity.toLowerCase()}">${safeEscape(severity)}</span></td><td class="context-snippet-cell">${contextHTML}</td></tr>`;
+            });
+            findingsHTML += `</tbody></table></div>`;
+        }
+
+        if (!originChecks.length && !uniqueVulns.length && !uniqueIssues.length) { findingsHTML += '<p class="no-findings-text">No significant findings detected.</p>'; }
+        findingsSection.innerHTML = findingsHTML;
+        content.appendChild(findingsSection);
+
+        if (dataFlows?.length > 0) {
+            const flowSection = document.createElement('div');
+            flowSection.className = 'report-section report-dataflow';
+            flowSection.innerHTML = ` <h4 class="report-section-title">Data Flow</h4> <table class="report-table dataflow-table"> <thead> <tr> <th>Source Property</th> <th>Sink / Target</th> <th>Conditions</th> <th>Code Snippet</th> </tr> </thead> <tbody> </tbody> </table>`;
+            const tbody = flowSection.querySelector('tbody');
+            if (tbody) {
+                dataFlows.forEach(flow => {
+                    const prop = flow?.sourcePath || '?'; const sink = flow?.destinationContext || '?'; const context = flow?.fullCodeSnippet || flow?.taintedNodeSnippet || ''; const displayProp = prop === '(root)' ? '(root data)' : `event.data.${safeEscape(prop)}`; const conditions = flow?.requiredConditionsForFlow || [];
+                    let conditionsHtml = 'None'; if (conditions.length > 0) { conditionsHtml = conditions.map(c => { let valStr = safeEscape(String(c.value)); if (typeof c.value === 'string') valStr = `'${valStr}'`; return `<code>${safeEscape(c.path)} ${safeEscape(c.op)} ${valStr}</code>`; }).join('<br>'); }
+                    const rowHtml = ` <tr> <td><code>${displayProp}</code></td> <td>${safeEscape(sink)}</td> <td>${conditionsHtml}</td> <td><code class="context-snippet">${safeEscape(context)}</code></td> </tr>`; tbody.insertAdjacentHTML('beforeend', rowHtml);
+                });
+            } else { flowSection.innerHTML += '<p class="error-message">Error rendering data flow table body.</p>'; }
+            content.appendChild(flowSection);
+        }
+
+        if (payloads?.length > 0) {
+            const payloadSection = document.createElement('div');
+            payloadSection.className = 'report-section report-payloads';
+            payloadSection.innerHTML = `<h4 class="report-section-title">Generated Payloads (${payloads.length})</h4><div id="payloads-list" class="payloads-list report-list">${payloads.slice(0, 10).map((p, i) => safeRenderPayload(p, i)).join('')}</div>${payloads.length > 10 ? `<button id="showAllPayloadsBtn" class="control-button secondary-button show-more-btn">Show All ${payloads.length}</button>` : ''}`;
+            content.appendChild(payloadSection);
+        }
+
+        if (structures?.length > 0) {
+            const structureSection = document.createElement('div');
+            structureSection.className = 'report-section report-structures';
+            let structuresHTML = `<h4 class="report-section-title">Unique Msg Structures (${structures.length})</h4><div class="structures-list report-list">`;
+            structures.slice(0, 3).forEach((s, i) => { structuresHTML += safeRenderStructure(s, i); }); structuresHTML += `</div>`;
+            if (structures.length > 3) { structuresHTML += `<button id="showAllStructuresBtn" class="control-button secondary-button show-more-btn">Show All ${structures.length}</button>`; }
+            structureSection.innerHTML = structuresHTML;
+            content.appendChild(structureSection);
+        }
+
+        const buttonContainer = document.createElement('div'); buttonContainer.style.cssText = 'margin-top:20px; display: flex; justify-content: center; gap: 15px;'; const exportJsonBtn = document.createElement('button'); exportJsonBtn.textContent = 'Export JSON'; exportJsonBtn.className = 'control-button secondary-button'; exportJsonBtn.addEventListener('click', (e) => { e.stopPropagation(); try { const jsonData = JSON.stringify(reportData, null, 2); const blob = new Blob([jsonData], { type: 'application/json' }); const url = URL.createObjectURL(blob); const a = document.createElement('a'); const safeFilename = (analysisStorageKey || 'frogpost_report').replace(/[^a-z0-9_\-.]/gi, '_'); a.href = url; a.download = `${safeFilename}.json`; document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url); } catch (exportError) { alert("Failed to export report as JSON."); } }); const closeBtnInside = document.createElement('button'); closeBtnInside.textContent = 'Close Report'; closeBtnInside.className = 'control-button secondary-button'; closeBtnInside.onclick = () => { document.querySelector('.trace-panel-backdrop')?.remove(); panel.remove(); }; buttonContainer.appendChild(exportJsonBtn); buttonContainer.appendChild(closeBtnInside); content.appendChild(buttonContainer);
+        attachReportEventListeners(panel, reportData);
+
+    } catch (renderError) {
+        content.innerHTML = `<p class="error-message">Error rendering report details: ${renderError.message}</p>`;
+        console.error("Error rendering report:", renderError);
+    }
 }
 
 function showFullPayloadModal(payloadItem) {
