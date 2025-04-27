@@ -1,7 +1,7 @@
 /**
  * FrogPost Extension
  * Originally Created by thisis0xczar/Lidor JFrog AppSec Team
- * Refined on: 2025-04-21
+ * Refined on: 2025-04-27
  */
 (function(global) {
     const JWT_REGEX = /eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g;
@@ -9,12 +9,14 @@
 
     class ImprovedMessageFuzzer {
         constructor() {
-            this.payloads = []; this.messageStructures = []; this.vulnerablePaths = []; this.maxPayloadsPerField = 30; this.callbackUrl = null; this.originValidationChecks = [];
+            this.payloads = [];
+            this.staticAnalysisResults = null;this.messageStructures = []; this.vulnerablePaths = []; this.maxPayloadsPerField = 30; this.callbackUrl = null; this.originValidationChecks = [];
             this.fuzzerConfig = { enableSmartFuzzing: true, enableDumbFuzzing: true, enablePrototypePollution: true, enableOriginFuzzing: true, enableCallbackFuzzing: true, maxTotalPayloads: 2000, randomizePayloadSelection: true, dumbFuzzingPayloadsPerField: 30, payloadDistribution: { xss: 0.6, callback: 0.2, pollution: 0.1, origin: 0.1 } };
         }
         isPlainObject(obj) { if (typeof obj !== 'object' || obj === null) return false; let proto = Object.getPrototypeOf(obj); if (proto === null) return true; let baseProto = proto; while (Object.getPrototypeOf(baseProto) !== null) baseProto = Object.getPrototypeOf(baseProto); return proto === baseProto; }
 
         initialize(messages, handlerCode, sinks = [], targetUrl = null, callbackUrl = null, originChecks = []) {
+            this.isSilentHandler = !this.messages?.some(msg => typeof msg?.data !== 'undefined');
             this.messages = Array.isArray(messages) ? messages : []; this.handlerCode = handlerCode || ''; this.targetUrl = targetUrl; this.callbackUrl = callbackUrl; this.originValidationChecks = Array.isArray(originChecks) ? originChecks : []; this.messageStructures = [];
             if (this.messages?.length > 0) this.messages.forEach((msg) => { let data = msg.data !== undefined ? msg.data : msg; });
             this.vulnerablePaths = (sinks || []).map(sink => { let targetProperty = "message"; if (sink.property) targetProperty = sink.property; else if (sink.path && sink.path !== '(root)') targetProperty = sink.path; else if (sink.context && typeof sink.context === 'string') { const ctxMatch = sink.context.match(/(?:event|e|msg|message)\.data\.([a-zA-Z0-9_$.[\]]+)/); if (ctxMatch?.[1]) targetProperty = ctxMatch[1]; } return { path: targetProperty, fullPath: `event.data.${targetProperty}`, sinkType: sink.type || sink.name || "unknown", severity: sink.severity?.toLowerCase() || "high", }; }).filter(p => p.path);
@@ -29,32 +31,256 @@
 
         runPayloadGeneration() {
             this.payloads = [];
+
             return new Promise((resolve) => {
                 chrome.storage.session.get(['customXssPayloads', 'callback_url'], (result) => {
-                    const customPayloads = result.customXssPayloads || []; const callbackUrl = result.callback_url || this.callbackUrl; if (callbackUrl) this.callbackUrl = callbackUrl;
+                    const customPayloads = result.customXssPayloads || [];
+                    const callbackUrl = result.callback_url || this.callbackUrl;
+                    if (callbackUrl) this.callbackUrl = callbackUrl;
+
+                    const hasDomSinks = (this.staticAnalysisResults?.sinks || []).length > 0;
+                    const shouldUseStructuredPayloads = !this.isSilentHandler || hasDomSinks;
+
                     if (customPayloads.length > 0) {
-                        if (this.messageStructures.length > 0) { for (const struct of this.messageStructures) { if (!struct || !struct.original) continue; if (struct.type === 'object') { const paths = this.vulnerablePaths.length > 0 ? this.vulnerablePaths.map(p => p.path) : (struct.pathsToFuzz || []).map(p => p.path); if (paths.length > 0) { for (const path of paths) { if (this.payloads.length >= this.fuzzerConfig.maxTotalPayloads) break; for (const payload of customPayloads) { if (this.payloads.length >= this.fuzzerConfig.maxTotalPayloads) break; try { const modMsg = JSON.parse(JSON.stringify(struct.original)); this.setNestedValue(modMsg, path, payload); this.payloads.push({ type: 'custom-structured', payload: modMsg, targetPath: path, description: `Custom payload in structured message` }); } catch (e) {} } } } else { const objCopy = JSON.parse(JSON.stringify(struct.original)); const bestProp = this.findBestStringProperty(objCopy); if (bestProp) { for (const payload of customPayloads) { if (this.payloads.length >= this.fuzzerConfig.maxTotalPayloads) break; try { const modMsg = JSON.parse(JSON.stringify(struct.original)); this.setNestedValue(modMsg, bestProp, payload); this.payloads.push({ type: 'custom-auto-path', payload: modMsg, targetPath: bestProp, description: `Custom payload auto-targeting ${bestProp}` }); } catch (e) {} } } else { for (const payload of customPayloads) { if (this.payloads.length >= this.fuzzerConfig.maxTotalPayloads) break; this.payloads.push({ type: 'custom-raw', payload: payload, description: 'Custom raw payload (no suitable structure)' }); } } } } else if (struct.type === 'raw_string') { for (const payload of customPayloads) { if (this.payloads.length >= this.fuzzerConfig.maxTotalPayloads) break; this.payloads.push({ type: 'custom-raw', payload: payload, description: 'Custom raw payload' }); } } } }
-                        else { for (const payload of customPayloads) { if (this.payloads.length >= this.fuzzerConfig.maxTotalPayloads) break; this.payloads.push({ type: 'custom-raw', payload: payload, description: 'Custom raw payload (no structures)' }); } }
-                        if (this.payloads.length === 0) customPayloads.forEach(p => { if (this.payloads.length >= this.fuzzerConfig.maxTotalPayloads) return; this.payloads.push({ type: 'custom-raw', payload: p, description: 'Custom raw payload (fallback)' }); });
-                        if (this.fuzzerConfig.enableCallbackFuzzing && this.callbackUrl) this.generateCallbackPayloads();
-                        if (this.fuzzerConfig.enableOriginFuzzing) this.generateOriginFuzzingPayloads();
+                        if (this.messageStructures.length > 0) {
+                            for (const struct of this.messageStructures) {
+                                if (!struct || !struct.original) continue;
+
+                                if (shouldUseStructuredPayloads) {
+                                    if (struct.type === 'object') {
+                                        const paths = this.vulnerablePaths.length > 0
+                                            ? this.vulnerablePaths.map(p => p.path)
+                                            : (struct.pathsToFuzz || []).map(p => p.path);
+
+                                        if (paths.length > 0) {
+                                            for (const path of paths) {
+                                                if (this.payloads.length >= this.fuzzerConfig.maxTotalPayloads) break;
+                                                for (const payload of customPayloads) {
+                                                    if (this.payloads.length >= this.fuzzerConfig.maxTotalPayloads) break;
+                                                    try {
+                                                        const modMsg = JSON.parse(JSON.stringify(struct.original));
+                                                        this.setNestedValue(modMsg, path, payload);
+                                                        this.payloads.push({
+                                                            type: 'custom-structured',
+                                                            payload: modMsg,
+                                                            targetPath: path,
+                                                            description: `Custom payload in structured message`
+                                                        });
+                                                    } catch (e) {}
+                                                }
+                                            }
+                                        } else {
+                                            const bestProp = this.findBestStringProperty(struct.original);
+                                            if (bestProp) {
+                                                for (const payload of customPayloads) {
+                                                    if (this.payloads.length >= this.fuzzerConfig.maxTotalPayloads) break;
+                                                    try {
+                                                        const modMsg = JSON.parse(JSON.stringify(struct.original));
+                                                        this.setNestedValue(modMsg, bestProp, payload);
+                                                        this.payloads.push({
+                                                            type: 'custom-auto-path',
+                                                            payload: modMsg,
+                                                            targetPath: bestProp,
+                                                            description: `Custom payload auto-targeting ${bestProp}`
+                                                        });
+                                                    } catch (e) {}
+                                                }
+                                            } else {
+                                                for (const payload of customPayloads) {
+                                                    if (this.payloads.length >= this.fuzzerConfig.maxTotalPayloads) break;
+                                                    this.payloads.push({
+                                                        type: 'custom-raw',
+                                                        payload: payload,
+                                                        description: 'Custom raw payload (no suitable structure)'
+                                                    });
+                                                }
+                                            }
+                                        }
+                                    } else if (struct.type === 'raw_string') {
+                                        for (const payload of customPayloads) {
+                                            if (this.payloads.length >= this.fuzzerConfig.maxTotalPayloads) break;
+                                            this.payloads.push({
+                                                type: 'custom-raw',
+                                                payload: payload,
+                                                description: 'Custom raw payload'
+                                            });
+                                        }
+                                    }
+                                } else {
+                                    if (struct.type === 'raw_string') {
+                                        for (const payload of customPayloads) {
+                                            if (this.payloads.length >= this.fuzzerConfig.maxTotalPayloads) break;
+                                            this.payloads.push({
+                                                type: 'custom-raw',
+                                                payload: payload,
+                                                description: 'Silent handler: raw payload'
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            for (const payload of customPayloads) {
+                                if (this.payloads.length >= this.fuzzerConfig.maxTotalPayloads) break;
+                                this.payloads.push({
+                                    type: 'custom-raw',
+                                    payload: payload,
+                                    description: 'Custom raw payload (no structures)'
+                                });
+                            }
+                        }
+
+                        if (this.payloads.length === 0) {
+                            customPayloads.forEach(p => {
+                                if (this.payloads.length >= this.fuzzerConfig.maxTotalPayloads) return;
+                                this.payloads.push({
+                                    type: 'custom-raw',
+                                    payload: p,
+                                    description: 'Custom raw payload (fallback)'
+                                });
+                            });
+                        }
+
+                        if (this.fuzzerConfig.enableCallbackFuzzing && this.callbackUrl) {
+                            this.generateCallbackPayloads();
+                        }
+                        if (this.fuzzerConfig.enableOriginFuzzing) {
+                            this.generateOriginFuzzingPayloads();
+                        }
+
                     } else {
                         const allXssPayloads = window.FuzzingPayloads?.XSS || [];
                         const payloadList = allXssPayloads;
-                        for (const struct of this.messageStructures) { if (!struct || !struct.original) continue; if (struct.type === 'object') { if (this.fuzzerConfig.enableSmartFuzzing && this.vulnerablePaths && this.vulnerablePaths.length > 0) this.generateSmartObjectPayloads(struct, this.vulnerablePaths, payloadList); if (this.fuzzerConfig.enableDumbFuzzing) this.generateDumbObjectPayloads(struct, payloadList); if (this.fuzzerConfig.enablePrototypePollution) this.generatePrototypePollutionPayloads(struct); } else if (struct.type === 'raw_string') this.generateRawStringPayloads(struct.original, payloadList); }
-                        if (this.fuzzerConfig.enableCallbackFuzzing && this.callbackUrl) this.generateCallbackPayloads();
-                        if (this.fuzzerConfig.enableOriginFuzzing) this.generateOriginFuzzingPayloads();
-                        if (this.fuzzerConfig.forceMinimumPayloads && typeof this.fuzzerConfig.forceMinimumPayloads === 'number' && this.payloads.length < this.fuzzerConfig.forceMinimumPayloads) this.generateAdditionalPayloads(this.fuzzerConfig.forceMinimumPayloads - this.payloads.length, payloadList);
+
+                        for (const struct of this.messageStructures) {
+                            if (!struct || !struct.original) continue;
+
+                            if (shouldUseStructuredPayloads) {
+                                if (struct.type === 'object') {
+                                    if (this.fuzzerConfig.enableSmartFuzzing && this.vulnerablePaths?.length > 0) {
+                                        this.generateSmartObjectPayloads(struct, this.vulnerablePaths, payloadList);
+                                    }
+                                    if (this.fuzzerConfig.enableDumbFuzzing) {
+                                        this.generateDumbObjectPayloads(struct, payloadList);
+                                    }
+                                    if (this.fuzzerConfig.enablePrototypePollution) {
+                                        this.generatePrototypePollutionPayloads(struct);
+                                    }
+                                } else if (struct.type === 'raw_string') {
+                                    this.generateRawStringPayloads(struct.original, payloadList);
+                                }
+                            } else {
+                                if (struct.type === 'raw_string') {
+                                    this.generateRawStringPayloads(struct.original, payloadList);
+                                }
+                            }
+                        }
+
+                        if (this.fuzzerConfig.enableCallbackFuzzing && this.callbackUrl) {
+                            this.generateCallbackPayloads();
+                        }
+                        if (this.fuzzerConfig.enableOriginFuzzing) {
+                            this.generateOriginFuzzingPayloads();
+                        }
+
+                        if (this.fuzzerConfig.forceMinimumPayloads &&
+                            typeof this.fuzzerConfig.forceMinimumPayloads === 'number' &&
+                            this.payloads.length < this.fuzzerConfig.forceMinimumPayloads) {
+                            this.generateAdditionalPayloads(
+                                this.fuzzerConfig.forceMinimumPayloads - this.payloads.length,
+                                payloadList
+                            );
+                        }
                     }
-                    const typeStats = {}; this.payloads.forEach(p => { const type = p.type || 'unknown'; typeStats[type] = (typeStats[type] || 0) + 1; });
-                    console.log(`[Fuzzer] Completed payload generation. Total: ${this.payloads.length}`); Object.entries(typeStats).forEach(([type, count]) => console.log(`  - ${type}: ${count}`)); resolve(this.payloads);
+
+                    const typeStats = {};
+                    this.payloads.forEach(p => {
+                        const type = p.type || 'unknown';
+                        typeStats[type] = (typeStats[type] || 0) + 1;
+                    });
+
+                    console.log(`[Fuzzer] ✅ Completed payload generation. Total: ${this.payloads.length}`);
+                    Object.entries(typeStats).forEach(([type, count]) =>
+                        console.log(`  - ${type}: ${count}`)
+                    );
+
+                    resolve(this.payloads);
                 });
             });
         }
 
+
         findBestStringProperty(obj, path = '') { if (!obj || typeof obj !== 'object') return null; const htmlProps = ['html', 'content', 'message', 'text', 'body', 'data', 'value', 'src', 'url', 'href']; for (const prop of htmlProps) if (typeof obj[prop] === 'string') return path ? `${path}.${prop}` : prop; for (const key in obj) if (typeof obj[key] === 'string') return path ? `${path}.${key}` : key; for (const key in obj) { if (obj[key] && typeof obj[key] === 'object') { const nestedPath = path ? `${path}.${key}` : key; const res = this.findBestStringProperty(obj[key], nestedPath); if (res) return res; } } const keys = Object.keys(obj); return keys.length > 0 ? (path ? `${path}.${keys[0]}` : keys[0]) : null; }
         generateSmartObjectPayloads(struct, vulnPaths, payloadList) { if (!struct || struct.type !== 'object' || !struct.original || !vulnPaths || vulnPaths.length === 0 || !payloadList || payloadList.length === 0) return; const base = JSON.parse(JSON.stringify(struct.original)); let count = 0; const maxPerSink = Math.min(this.maxPayloadsPerField, Math.floor(this.fuzzerConfig.maxTotalPayloads / (vulnPaths.length || 1))); for (const vuln of vulnPaths) { let target = vuln.path; if (target === 'data' && vuln.fullPath && vuln.fullPath !== 'event.data') { const m = vuln.fullPath.match(/(?:event|e|msg|message)\.data\.([a-zA-Z0-9_$.[\]]+)/); if (m?.[1]) target = m[1]; } if (!target || target === '') { const strFields = Object.entries(struct.fieldTypes || {}).filter(([,t])=>t==='string').map(([f])=>f); const susFields=strFields.filter(f=>/html|script|content|message|url|src/i.test(f)); target=susFields[0]||strFields[0]; if(!target)continue; } let relPayloads=[]; const sinkType=vuln.sinkType?.toLowerCase()||''; if(window.FuzzingPayloads.SINK_SPECIFIC){ if(sinkType.includes('eval'))relPayloads=window.FuzzingPayloads.SINK_SPECIFIC.eval||[]; else if(sinkType.includes('innerhtml'))relPayloads=window.FuzzingPayloads.SINK_SPECIFIC.innerHTML||[]; else if(sinkType.includes('write'))relPayloads=window.FuzzingPayloads.SINK_SPECIFIC.document_write||[]; else if(sinkType.includes('settimeout'))relPayloads=window.FuzzingPayloads.SINK_SPECIFIC.setTimeout||[]; else if(sinkType.includes('setinterval'))relPayloads=window.FuzzingPayloads.SINK_SPECIFIC.setInterval||[]; else if(sinkType.includes('location')||sinkType.includes('href'))relPayloads=window.FuzzingPayloads.SINK_SPECIFIC.location_href||[];} if(!relPayloads.length)relPayloads=payloadList; if(this.fuzzerConfig.randomizePayloadSelection)relPayloads=[...relPayloads].sort(()=>0.5-Math.random()); const usePayloads=relPayloads.slice(0,maxPerSink); for(const p of usePayloads){if(count>=this.fuzzerConfig.maxTotalPayloads)return; try{const modMsg=JSON.parse(JSON.stringify(base)); this.setNestedValue(modMsg,target,p); this.payloads.push({type:'smart',sinkType:vuln.sinkType,targetPath:target,fullPath:vuln.fullPath,payload:modMsg,severity:vuln.severity||'high'}); count++;}catch{}} } }
-        generateDumbObjectPayloads(struct, payloadList) { if (!struct || struct.type !== 'object' || !struct.original || !payloadList || payloadList.length === 0 || !this.fuzzerConfig.enableDumbFuzzing) return; const base = JSON.parse(JSON.stringify(struct.original)); const fields = this.extractAllFields(base); const strFields = fields.filter(f => { let curr=base; const parts=f.split('.'); try{for(let i=0;i<parts.length-1;i++){if(curr[parts[i]]===undefined||curr[parts[i]]===null)return false;curr=curr[parts[i]];}const last=parts[parts.length-1];const val=curr[last]; return typeof val==='string'||val===null||val===undefined;}catch{return false;} }); const susPats = [/html/i,/script/i,/content/i,/message/i,/url/i,/src/i,/href/i,/code/i,/exec/i,/eval/i,/callback/i,/function/i,/source/i,/target/i,/payload/i,/template/i,/markup/i,/auth/i,/token/i,/key/i,/secret/i,/pass/i,/user/i,/admin/i]; const priFields = strFields.sort((a,b)=>{const aSus=susPats.some(p=>p.test(a));const bSus=susPats.some(p=>p.test(b));return aSus&&!bSus?-1:!aSus&&bSus?1:0;}); const fieldsFuzz = Math.min(priFields.length, 50); const perField = Math.min(this.fuzzerConfig.dumbFuzzingPayloadsPerField, Math.floor(this.fuzzerConfig.maxTotalPayloads / (fieldsFuzz || 1))); let total = 0; for (let i=0; i<priFields.length && i<fieldsFuzz; i++) { const field = priFields[i]; let selPayloads = this.fuzzerConfig.randomizePayloadSelection ? [...payloadList].sort(()=>0.5-Math.random()).slice(0,perField) : payloadList.slice(0,perField); for (const p of selPayloads) { if (total >= this.fuzzerConfig.maxTotalPayloads) return; try { const modMsg=JSON.parse(JSON.stringify(base)); this.setNestedValue(modMsg, field, p); this.payloads.push({ type: 'dumb', field: field, targetPath: field, payload: modMsg, severity: 'medium' }); total++; } catch {} } } }
+
+        generateDumbObjectPayloads(struct, payloadList) {
+            if (!struct || struct.type !== 'object' || !struct.original || !payloadList || payloadList.length === 0 || !this.fuzzerConfig.enableDumbFuzzing) {
+                return;
+            }
+
+            const base = JSON.parse(JSON.stringify(struct.original));
+            const fields = this.extractAllFields(base);
+
+            const strFields = fields.filter(f => {
+                let curr = base;
+                const parts = f.split('.');
+                try {
+                    for (let i = 0; i < parts.length - 1; i++) {
+                        if (curr[parts[i]] === undefined || curr[parts[i]] === null) return false;
+                        curr = curr[parts[i]];
+                    }
+                    const last = parts[parts.length - 1];
+                    const val = curr[last];
+                    return typeof val === 'string' || val === null || val === undefined;
+                } catch {
+                    return false;
+                }
+            });
+
+            const susPats = [/html/i, /script/i, /content/i, /message/i, /url/i, /src/i, /href/i, /code/i, /exec/i, /eval/i, /callback/i, /function/i, /source/i, /target/i, /payload/i, /template/i, /markup/i, /auth/i, /token/i, /key/i, /secret/i, /pass/i, /user/i, /admin/i];
+            const priFields = strFields.sort((a, b) => {
+                const aSus = susPats.some(p => p.test(a));
+                const bSus = susPats.some(p => p.test(b));
+                return aSus && !bSus ? -1 : !aSus && bSus ? 1 : 0;
+            });
+
+            const fieldsFuzz = Math.min(priFields.length, 50);
+            const perField = Math.min(this.fuzzerConfig.dumbFuzzingPayloadsPerField, Math.floor(this.fuzzerConfig.maxTotalPayloads / (fieldsFuzz || 1)));
+
+            let total = 0;
+
+            for (let i = 0; i < priFields.length && i < fieldsFuzz; i++) {
+                const field = priFields[i];
+
+                let selPayloads = this.fuzzerConfig.randomizePayloadSelection
+                    ? [...payloadList].sort(() => 0.5 - Math.random()).slice(0, perField)
+                    : payloadList.slice(0, perField);
+
+                for (const payload of selPayloads) {
+                    if (total >= this.fuzzerConfig.maxTotalPayloads) return;
+
+                    try {
+                        const modMsg = JSON.parse(JSON.stringify(base));
+                        this.setNestedValue(modMsg, field, payload);
+
+                        this.payloads.push({
+                            type: 'dumb-structured',
+                            field: field,
+                            targetPath: field,
+                            payload: modMsg,
+                            severity: 'medium',
+                            description: `Dumb structured payload targeting '${field}'`
+                        });
+
+                        total++;
+                    } catch (e) {
+                        console.error(`[Fuzzer] Failed dumb payload at field '${field}':`, e);
+                    }
+                }
+            }
+        }
+
+
         generateRawStringPayloads(orig, payloadList) { if (typeof orig !== 'string' || !payloadList || payloadList.length === 0) return; const max = Math.min(this.maxPayloadsPerField, 30); let count = 0; const selPayloads = this.fuzzerConfig.randomizePayloadSelection ? [...payloadList].sort(()=>0.5-Math.random()).slice(0, max) : payloadList.slice(0, max); for (const p of selPayloads) { if (count >= this.fuzzerConfig.maxTotalPayloads) return; this.payloads.push({ type: 'raw_string_replace', payload: p, severity: 'high', isRawString: true, original: orig }); count++; if (count >= this.fuzzerConfig.maxTotalPayloads) return; const variants = [`${p}${orig}`, `${orig}${p}`]; if (orig.length > 10) { const mid=Math.floor(orig.length/2); variants.push(orig.substring(0,mid)+p+orig.substring(mid)); } for (const inj of variants) { if (count >= this.fuzzerConfig.maxTotalPayloads) return; this.payloads.push({ type: `raw_string_inject`, payload: inj, severity: 'high', isRawString: true, original: orig }); count++; } } }
         generateCallbackPayloads() { if (!this.callbackUrl || !window.FuzzingPayloads?.CALLBACK_URL) return; const templates = window.FuzzingPayloads.CALLBACK_URL; for (const tmpl of templates) { if (this.payloads.length >= this.fuzzerConfig.maxTotalPayloads) return; const pStr = tmpl.replace(/%%CALLBACK_URL%%/g, this.callbackUrl); for (const struct of this.messageStructures) { if (struct.type === 'object' && struct.original) { const paths = this.vulnerablePaths.length>0?this.vulnerablePaths:Object.entries(struct.fieldTypes||{}).filter(([,t])=>t==='string').slice(0,5).map(([p])=>({path:p,sinkType:'generic_string',severity:'medium'})); if (paths.length===0&&struct.fields?.length>0) paths.push({path:struct.fields[0],sinkType:'first_field',severity:'low'}); for (const vuln of paths) { if (this.payloads.length >= this.fuzzerConfig.maxTotalPayloads) return; try { const target = vuln.path; if (!target) continue; const modMsg = JSON.parse(JSON.stringify(struct.original)); this.setNestedValue(modMsg, target, pStr); this.payloads.push({ type: 'callback_url_object', sinkType: vuln.sinkType, targetPath: target, fullPath: vuln.fullPath, payload: modMsg, severity: 'critical' }); } catch {} } } else if (struct.type === 'raw_string') { if (this.payloads.length >= this.fuzzerConfig.maxTotalPayloads) return; this.payloads.push({ type: 'callback_url_raw', payload: pStr, severity: 'critical', isRawString: true, original: struct.original }); if (this.payloads.length >= this.fuzzerConfig.maxTotalPayloads) return; this.payloads.push({ type: 'callback_url_combined', payload: `${struct.original||''}${pStr}`, severity: 'critical', isRawString: true, original: struct.original }); } } } }
         generateOriginFuzzingPayloads() { if (!this.fuzzerConfig.enableOriginFuzzing) return; let genOrigins = new Set(['null', 'https://evil.com', 'data:text/html,foo', 'blob:http://localhost/123']); let targetOrigin = null; try { if(this.targetUrl) targetOrigin = new URL(this.targetUrl).origin; } catch {} this.originValidationChecks.forEach(check => { if ((check.type==='Strict Equality'||check.type==='Loose Equality') && typeof check.value==='string' && check.value.startsWith('http')) { try { const url=new URL(check.value); genOrigins.add(url.origin); genOrigins.add(`${url.protocol}//${url.hostname}:${url.port||(url.protocol==='https:'?443:80)}`); genOrigins.add(`${url.protocol==='https:'?'http:':'https:'}//${url.hostname}`); genOrigins.add(`${url.origin}/`); genOrigins.add(` ${url.origin}`); if(url.hostname!=='localhost') genOrigins.add(`${url.protocol}//sub.${url.hostname}`); } catch {} } else if (check.type?.includes('Method Call') && typeof check.value === 'string') { if (check.type.includes('endsWith')) genOrigins.add(`https://test${check.value}.evil.com`); if (check.type.includes('startsWith')) genOrigins.add(`${check.value}.evil.com`); if (check.type.includes('includes')||check.type.includes('indexOf')) genOrigins.add(`https://prefix-${check.value}-suffix.com`); } else if (check.type?.includes('Lookup') && check.value) { genOrigins.add(`https://${check.value}.evil.com/`); } }); if(targetOrigin) genOrigins.add(targetOrigin); for (const origin of genOrigins) { if (this.payloads.length >= this.fuzzerConfig.maxTotalPayloads) break; let applied = false; for (const struct of this.messageStructures) { if (this.payloads.length >= this.fuzzerConfig.maxTotalPayloads) break; if (struct.type==='object'&&struct.original) { try { const modMsg=JSON.parse(JSON.stringify(struct.original)); const keys=['origin','senderOrigin','sourceOrigin']; let found=false; for(const k of keys){if(modMsg.hasOwnProperty(k)){this.setNestedValue(modMsg,k,origin);found=true;break;}} if(!found)modMsg.origin=origin; this.payloads.push({type:'origin_fuzzing',payload:modMsg,severity:'medium',targetOriginAttempt:origin}); applied=true; } catch {} } } if (!applied) { this.payloads.push({type:'origin_fuzzing_raw',payload:origin,severity:'low',targetOriginAttempt:origin}); } } }

@@ -1,7 +1,7 @@
 /**
  * FrogPost Extension
  * Originally Created by thisis0xczar/Lidor JFrog AppSec Team
- * Refined on: 2025-04-21
+ * Refined on: 2025-04-27
  */
 window.frogPostState = {
     frameConnections: new Map(),
@@ -75,7 +75,7 @@ function sanitizeMessageData(data) {
     if (!data) return data;
     if (typeof data === 'string') { try { const parsed = JSON.parse(data); return sanitizeMessageData(parsed); } catch (e) { return sanitizeString(data); } }
     if (Array.isArray(data)) { return data.map(item => sanitizeMessageData(item)); }
-    if (typeof data === 'object' && data !== null) { const sanitized = {}; for (const [key, value] of Object.entries(data)) sanitized[key] = sanitizeMessageData(value); return sanitized; }
+    if (typeof data === 'object') { const sanitized = {}; for (const [key, value] of Object.entries(data)) sanitized[key] = sanitizeMessageData(value); return sanitized; }
     return data;
 }
 
@@ -469,7 +469,63 @@ function clearCustomPayloads() {
 }
 
 async function launchFuzzerEnvironment(targetUrl, handlerCode, messages, payloads, traceReportData, fuzzerOptions, analysisKeyForReport) {
-    let serverStarted = false; try { if (!analysisKeyForReport) throw new Error("Internal error: Missing analysis key for launching fuzzer."); if (!traceReportData) throw new Error(`Internal error: Trace report data missing.`); if (!targetUrl || !handlerCode || !messages || !payloads || !fuzzerOptions) throw new Error("Internal error: Missing data for launching fuzzer."); await chrome.runtime.sendMessage({ type: "startServer" }); await new Promise(resolve => setTimeout(resolve, 1500)); let attempts = 0; while (!serverStarted && attempts < 3) { attempts++; try { const health = await fetch('http://127.0.0.1:1337/health', { method: 'GET', cache: 'no-store', signal: AbortSignal.timeout(800) }); if (health.ok) serverStarted = true; else await new Promise(r => setTimeout(r, 700)); } catch(err) { await new Promise(r => setTimeout(r, 700)); } } if (!serverStarted) throw new Error("Fuzzer server did not start."); const config = { target: targetUrl, messages: messages, handler: handlerCode, payloads: payloads, traceData: { ...(traceReportData || {}), details: { ...(traceReportData?.details || {}), originValidationChecks: traceReportData?.details?.originValidationChecks || [] } }, callbackUrl: fuzzerOptions.callbackUrl, fuzzerOptions: { autoStart: fuzzerOptions.autoStart, useCustomPayloads: fuzzerOptions.useCustomPayloads, enableCallbackFuzzing: fuzzerOptions.enableCallbackFuzzing } }; const response = await fetch('http://127.0.0.1:1337/current-config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(config), signal: AbortSignal.timeout(5000) }); if (!response.ok) { const errorText = await response.text(); throw new Error(`Config update failed: ${response.statusText} - ${errorText}`); } const tab = await chrome.tabs.create({ url: 'http://127.0.0.1:1337/' }); const cleanupListener = (tabId, removeInfo) => { if (tabId === tab.id) { chrome.runtime.sendMessage({ type: "stopServer" }).catch(e => {}); chrome.tabs.onRemoved.removeListener(cleanupListener); } }; chrome.tabs.onRemoved.addListener(cleanupListener); return true; } catch (error) { log.error("[Launch Fuzzer Env] Caught error:", error); alert(`Fuzzer Launch Failed: ${error.message}`); if (serverStarted === false) try { await chrome.runtime.sendMessage({ type: "stopServer" }); } catch {} return false; }
+    let serverStarted = false;
+    try {
+        if (!analysisKeyForReport) throw new Error("Internal error: Missing analysis key for launching fuzzer.");
+        if (!traceReportData) throw new Error(`Internal error: Trace report data missing.`);
+        if (!targetUrl || !handlerCode || !messages || !payloads || !fuzzerOptions) throw new Error("Internal error: Missing data for launching fuzzer.");
+
+        await chrome.runtime.sendMessage({ type: "startServer" });
+        await new Promise(resolve => setTimeout(resolve, 1500));
+        let attempts = 0;
+        while (!serverStarted && attempts < 3) {
+            attempts++;
+            try { const health = await fetch('http://127.0.0.1:1337/health', { method: 'GET', cache: 'no-store', signal: AbortSignal.timeout(800) }); if (health.ok) serverStarted = true; else await new Promise(r => setTimeout(r, 700)); } catch(err) { await new Promise(r => setTimeout(r, 700)); }
+        }
+        if (!serverStarted) throw new Error("Fuzzer server did not start.");
+
+        const config = {
+            target: targetUrl,
+            messages: messages, // Assuming messages are already simple objects/strings
+            handler: handlerCode,
+            payloads: payloads, // Assuming payloads are simple objects/strings
+            traceData: {
+                endpoint: traceReportData.endpoint,
+                originalEndpointKey: traceReportData.originalEndpointKey,
+                analysisStorageKey: traceReportData.analysisStorageKey,
+                timestamp: traceReportData.timestamp,
+                securityScore: traceReportData.securityScore,
+                details: {
+                    payloadsGeneratedCount: traceReportData.details?.payloadsGeneratedCount,
+                    uniqueStructures: traceReportData.details?.uniqueStructures, // Might need sanitization if examples contain complex objects
+                    staticAnalysisUsed: traceReportData.details?.staticAnalysisUsed,
+                    messagesAvailable: traceReportData.details?.messagesAvailable,
+                },
+                summary: traceReportData.summary // Summary should be safe
+            },
+            callbackUrl: fuzzerOptions.callbackUrl,
+            fuzzerOptions: {
+                autoStart: fuzzerOptions.autoStart,
+                useCustomPayloads: fuzzerOptions.useCustomPayloads,
+                enableCallbackFuzzing: fuzzerOptions.enableCallbackFuzzing
+            }
+        };
+
+        log.debug("[Launch Fuzzer Env] Sending sanitized config:", config);
+
+        const response = await fetch('http://127.0.0.1:1337/current-config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(config), signal: AbortSignal.timeout(5000) }); // Stringify the sanitized config
+        if (!response.ok) { const errorText = await response.text(); throw new Error(`Config update failed: ${response.statusText} - ${errorText}`); }
+
+        const tab = await chrome.tabs.create({ url: 'http://127.0.0.1:1337/' });
+        const cleanupListener = (tabId, removeInfo) => { if (tabId === tab.id) { chrome.runtime.sendMessage({ type: "stopServer" }).catch(e => {}); chrome.tabs.onRemoved.removeListener(cleanupListener); } };
+        chrome.tabs.onRemoved.addListener(cleanupListener);
+        return true;
+    } catch (error) {
+        log.error("[Launch Fuzzer Env] Caught error:", error);
+        alert(`Fuzzer Launch Failed: ${error.message}`);
+        if (serverStarted === false) try { await chrome.runtime.sendMessage({ type: "stopServer" }); } catch {}
+        return false;
+    }
 }
 
 async function saveRandomPostMessages(endpointKey, messagesToSave = null) {
