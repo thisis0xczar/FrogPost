@@ -1,7 +1,7 @@
 /**
  * FrogPost Extension
  * Originally Created by thisis0xczar/Lidor JFrog AppSec Team
- * Refined on: 2025-04-21
+ * Refined on: 2025-04-27
  */
 (() => {
     const FORWARDER_FLAG = '__frogPostForwarderInjected_v2';

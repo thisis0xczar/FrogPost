@@ -1,7 +1,7 @@
 /**
  * FrogPost Extension
  * Originally Created by thisis0xczar/Lidor JFrog AppSec Team
- * Refined on: 2025-04-17
+ * Refined on: 2025-04-27
  */
 const STORAGE_KEYS = {
     sinks: 'customSinks',

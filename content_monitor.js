@@ -1,7 +1,7 @@
 /**
  * FrogPost Extension
  * Originally Created by thisis0xczar/Lidor JFrog AppSec Team
- * Refined on: 2025-04-21
+ * Refined on: 2025-04-27
  */
 (() => {
     const MONITOR_FLAG = '__frogPostMonitorInjected_v3';
@@ -63,7 +63,7 @@
     function isSuspiciousMutation(mutation) { try { if (mutation.type === 'childList') { for (const node of mutation.addedNodes) { if (node.nodeType === Node.ELEMENT_NODE) { const nodeName = node.nodeName.toUpperCase(); if (SUSPICIOUS_TAGS.has(nodeName)) { return { reason: `Added suspicious tag: <${nodeName}>`, nodeInfo: node.outerHTML?.substring(0, 150) }; } if (node.matches && node.matches('[onerror], [onload], [onclick], [onmouseover], [onfocus]')) { return { reason: `Added node with suspicious event handler`, nodeInfo: node.outerHTML.substring(0, 100) }; } const suspiciousAttr = node.getAttributeNames().find(attr => SUSPICIOUS_ATTRS.has(attr.toLowerCase())); if(suspiciousAttr) { return { reason: `Added node with suspicious attribute: ${suspiciousAttr}`, nodeInfo: getElementDescription(node), attributeValue: node.getAttribute(suspiciousAttr)?.substring(0, 50) }; } for(const attrName of node.getAttributeNames()) { const lowerAttrName = attrName.toLowerCase(); if (SUSPICIOUS_SRC_HREF_ATTRS.has(lowerAttrName)) { const value = node.getAttribute(attrName); if(value && SUSPICIOUS_ATTR_VALUES.test(value)) { return { reason: `Added node with suspicious protocol in attribute: ${lowerAttrName}`, nodeInfo: getElementDescription(node), attributeValue: value.substring(0, 50) }; } } } if (nodeName === 'SCRIPT' && node.innerHTML?.length > 0) { return { reason: `Added script tag with content`, nodeInfo: node.outerHTML?.substring(0, 150) }; } } } } else if (mutation.type === 'attributes') { const attrName = mutation.attributeName?.toLowerCase(); const targetNode = mutation.target; if (targetNode?.nodeType !== Node.ELEMENT_NODE) return null; const targetDesc = getElementDescription(targetNode); if (SUSPICIOUS_ATTRS.has(attrName)) { const value = targetNode.getAttribute(mutation.attributeName); return { reason: `Suspicious attribute modified/added: ${attrName}`, target: targetNode.nodeName, value: value?.substring(0, 100), nodeInfo: targetDesc }; } if (SUSPICIOUS_SRC_HREF_ATTRS.has(attrName)) { const value = targetNode.getAttribute(mutation.attributeName); if(value && SUSPICIOUS_ATTR_VALUES.test(value)) { return { reason: `Suspicious protocol set for attribute: ${attrName}`, target: targetNode.nodeName, value: value.substring(0, 100), nodeInfo: targetDesc }; } } } } catch(e) { console.warn("FrogPost Monitor: Error checking mutation", e); } return null; }
 
     const observerCallback = (mutationsList, observer) => {
-        let currentPayloadIndex = lastKnownPayloadIndexFromFuzzer; // Capture index at time of mutation batch
+        let currentPayloadIndex = lastKnownPayloadIndexFromFuzzer;
         for (const mutation of mutationsList) {
             const suspiciousDetail = isSuspiciousMutation(mutation);
             if (suspiciousDetail) {
