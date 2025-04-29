@@ -206,9 +206,7 @@ body {
 .metric { text-align: center; padding: 10px 8px; background: var(--bg-secondary); border-radius: 3px; border: 1px solid var(--border-color); transition: none; }
 .metric-label { display: block; font-size: 10px; color: var(--text-secondary); text-transform: uppercase; margin-bottom: 5px; letter-spacing: 0.5px; font-family: var(--font-sans); }
 .metric-value { display: block; font-size: 18px; font-weight: 600; color: var(--text-primary); font-family: var(--font-mono); }
-.recommendations { margin-top: 15px; }
 .report-subsection-title { font-size: 15px; margin-bottom: 8px; color: var(--text-primary); font-weight: 600; }
-.recommendation-text { font-size: 13px; line-height: 1.5; color: var(--text-secondary); }
 .trace-results-content .report-details { border: 1px solid var(--border-color); border-radius: 4px; margin-bottom: 12px; background-color: var(--bg-secondary); }
 .trace-results-content .report-summary-toggle { padding: 10px 12px; cursor: pointer; display: flex; justify-content: space-between; align-items: center; background-color: #3a3a3a; border-bottom: 1px solid transparent; transition: background-color 0.2s ease; }
 .trace-results-content .report-details[open] > .report-summary-toggle { border-bottom-color: var(--border-color); }

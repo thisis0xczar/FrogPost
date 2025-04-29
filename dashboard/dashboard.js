@@ -21,6 +21,7 @@ const log = {
 };
 window.log = log;
 
+const endpointsWithDetectedHandlers = new Set();
 const knownHandlerEndpoints = new Set();
 const endpointsWithHandlers = new Set();
 const buttonStates = new Map();
@@ -31,7 +32,9 @@ const launchInProgressEndpoints = new Set();
 let uiUpdateTimer = null;
 const DEBOUNCE_DELAY = 150;
 let showOnlySilentIframes = false;
-let hideSilentIframes = false;
+let debuggerApiModeEnabled = false;
+const DEBUGGER_MODE_STORAGE_KEY = 'debuggerApiModeEnabled';
+
 
 function printBanner() {
     console.log(`%c
@@ -43,6 +46,19 @@ function printBanner() {
                  |___/
 `, 'color: #4dd051; font-weight: bold;');
     log.info('Initializing dashboard...');
+}
+
+function updateDebuggerModeButton() {
+    const btn = document.getElementById('toggleDebuggerApiMode');
+    if (btn) {
+        btn.textContent = `Debugger Mode: ${debuggerApiModeEnabled ? 'ON' : 'OFF'}`;
+        btn.classList.toggle('debugger-mode-on', debuggerApiModeEnabled);
+        btn.classList.toggle('debugger-mode-off', !debuggerApiModeEnabled);
+        btn.classList.toggle('secondary', !debuggerApiModeEnabled);
+        btn.title = debuggerApiModeEnabled
+            ? "Debugger is currently attaching to web pages on load. Click to disable."
+            : "Attach debugger to web pages on load to find handlers (EXPERIMENTAL). Click to enable.";
+    }
 }
 
 function toggleDebugMode() {
@@ -64,6 +80,13 @@ function sanitizeString(str) {
     if (containsXss) { let sanitized = str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;"); return `[SANITIZED PAYLOAD] ${sanitized}`; }
     return str;
 }
+
+function isEndpointAlreadyScanned(endpoint) {
+    if (!endpoint) return false;
+    const key = getStorageKeyForUrl(endpoint);
+    return window.endpointsWithDetectedHandlers?.has(key);
+}
+window.isEndpointAlreadyScanned = isEndpointAlreadyScanned;
 
 function getBaseUrl(url) {
     try { const norm = normalizeEndpointUrl(url); return norm?.components ? norm.components.origin + norm.components.path : null; }
@@ -90,7 +113,7 @@ function normalizeEndpointUrl(url) {
         if (!url.includes('://') && !url.startsWith('//')) absUrl = 'https:' + url;
         else if (url.startsWith('//')) absUrl = 'https:' + url;
         const obj = new URL(absUrl);
-        if (['about:', 'chrome:', 'moz-extension:', 'chrome-extension:', 'blob:', 'data:'].includes(obj.protocol)) return { normalized: url, components: null, key: url };
+        if (['about:', 'chrome:', 'moz-extension:', 'blob:', 'data:'].includes(obj.protocol)) return { normalized: url, components: null, key: url };
         const origin = obj.origin || ''; const pathname = obj.pathname || ''; const search = obj.search || ''; const key = origin + pathname + search;
         return { normalized: key, components: { origin: origin, path: pathname, query: search, hash: obj.hash || '' }, key: key };
     } catch (e) { log.error(`[Normalize URL] Error: "${e.message}".`, { originalInput: url, urlUsedInConstructor: absUrl }); return { normalized: url, components: null, key: url }; }
@@ -113,7 +136,10 @@ function showToastNotification(message, type = 'error', duration = 5000) {
 
 function updateButton(button, state, options = {}) {
     if (!button) return;
-    const endpointKey = getStorageKeyForUrl(button.getAttribute('data-endpoint'));
+
+    const endpoint = button.getAttribute('data-endpoint');
+    const endpointKey = getStorageKeyForUrl(endpoint);
+
     if (endpointKey) buttonStates.set(endpointKey, { state, options });
 
     const states = {
@@ -121,19 +147,20 @@ function updateButton(button, state, options = {}) {
         csp: { text: '⏳', title: 'Checking CSP...', class: 'checking is-working' },
         analyze: { text: '⏳', title: 'Analyzing...', class: 'checking is-working' },
         launch: { text: '🚀', title: 'Launch Payload Testing', class: 'green' },
-        launching: { text: '🚀', title: 'Launching Fuzzer...', class: 'checking is-working launching' }, // <-- ADDED STATE
+        launching: { text: '🚀', title: 'Launching Fuzzer...', class: 'checking is-working launching' },
         success: { text: '✓', title: 'Check successful, handler found', class: 'success' },
         warning: { text: '⚠', title: options.errorMessage || 'Check completed with warnings', class: 'yellow' },
         error: { text: '✕', title: options.errorMessage || 'Check failed', class: 'red' }
     };
 
     let newState = states[state] || states.start;
+
     button.textContent = newState.text;
     button.title = newState.title;
     button.classList.remove(
         'default', 'checking', 'is-working', 'green', 'success', 'yellow', 'red',
         'has-critical-sinks', 'show-next-step-arrow', 'show-next-step-emoji',
-        'launching' // <-- Add 'launching' here
+        'launching'
     );
     button.classList.add(...newState.class.split(' '));
     button.style.animation = '';
@@ -142,8 +169,33 @@ function updateButton(button, state, options = {}) {
     if (state === 'launch' && options.hasCriticalSinks) button.classList.add('has-critical-sinks');
     if (options.showArrow) button.classList.add('show-next-step-arrow');
     if (options.showEmoji) button.classList.add('show-next-step-emoji');
+
+    if (endpoint && isEndpointAlreadyScanned(endpoint)) {
+        button.disabled = true;
+        button.title = "Handler already found (via Debugger Auto-Attach)";
+        button.textContent = '✓';
+        button.classList.remove('default', 'checking', 'is-working', 'green', 'yellow', 'red');
+        button.classList.add('success');
+    } else {
+        button.disabled = false;
+    }
 }
 window.updateButton = updateButton;
+
+(async function preloadDetectedHandlerEndpoints() {
+    try {
+        const result = await chrome.storage.session.get(['handler_endpoint_keys']);
+        if (result['handler_endpoint_keys']) {
+            for (const key of result['handler_endpoint_keys']) {
+                window.endpointsWithDetectedHandlers.add(key);
+            }
+            log.success(`[Dashboard] Loaded ${window.endpointsWithDetectedHandlers.size} detected handler endpoints`);
+        }
+    } catch (e) {
+        log.error("[Dashboard] Failed loading handler_endpoint_keys:", e);
+    }
+})();
+
 
 function updateTraceButton(button, state, options = {}) {
     if (!button) return; const endpointKey = getStorageKeyForUrl(button.getAttribute('data-endpoint')); if (endpointKey) traceButtonStates.set(endpointKey, { state, options });
@@ -265,26 +317,43 @@ function createActionButtonContainer(endpointKey) {
     const buttonContainer = document.createElement("div");
     buttonContainer.className = "button-container";
     const playButton = document.createElement("button");
-    playButton.className = "iframe-check-button default";
+    playButton.className = "iframe-check-button";
     playButton.setAttribute("data-endpoint", endpointKey);
     const traceButton = document.createElement("button");
-    traceButton.className = "iframe-trace-button disabled";
+    traceButton.className = "iframe-trace-button";
     traceButton.setAttribute("data-endpoint", endpointKey);
-    traceButton.setAttribute('disabled', 'true');
     const reportButton = document.createElement("button");
-    reportButton.className = "iframe-report-button disabled";
+    reportButton.className = "iframe-report-button";
     reportButton.setAttribute("data-endpoint", endpointKey);
-    const savedPlayStateInfo = buttonStates.get(endpointKey);
-    const savedTraceStateInfo = traceButtonStates.get(endpointKey);
-    const savedReportStateInfo = reportButtonStates.get(endpointKey);
-    updateButton(playButton, savedPlayStateInfo?.state || 'start', savedPlayStateInfo?.options || {});
-    const canTrace = playButton.classList.contains('success') || playButton.classList.contains('green') || playButton.classList.contains('launch');
-    updateTraceButton(traceButton, savedTraceStateInfo?.state || (canTrace ? 'default' : 'disabled'), savedTraceStateInfo?.options || {});
-    const canReport = traceButton.classList.contains('green') || traceButton.classList.contains('success');
-    updateReportButton(reportButton, savedReportStateInfo || (canReport ? 'default' : 'disabled'), endpointKey);
+
+    const isExtensionUrl = endpointKey.startsWith('chrome-extension://');
+    const handlerExists = endpointsWithDetectedHandlers.has(endpointKey); // Use the dashboard's Set
+    const traceInfo = traceButtonStates.get(endpointKey);
+    const reportInfo = reportButtonStates.get(endpointKey);
+
+    if (isExtensionUrl) {
+        if (handlerExists) {
+            updateButton(playButton, 'success');
+            updateTraceButton(traceButton, traceInfo?.state || 'default', traceInfo?.options || { showEmoji: true });
+            updateReportButton(reportButton, reportInfo || (traceButton.classList.contains('green') || traceButton.classList.contains('success') ? 'default' : 'disabled'), endpointKey);
+        } else {
+            updateButton(playButton, 'start');
+            updateTraceButton(traceButton, 'disabled');
+            updateReportButton(reportButton, 'disabled', endpointKey);
+        }
+    } else {
+        const savedPlayStateInfo = buttonStates.get(endpointKey);
+        updateButton(playButton, savedPlayStateInfo?.state || 'start', savedPlayStateInfo?.options || {});
+        const canTrace = playButton.classList.contains('success') || playButton.classList.contains('green') || playButton.classList.contains('launch');
+        updateTraceButton(traceButton, traceInfo?.state || (canTrace ? 'default' : 'disabled'), traceInfo?.options || {});
+        const canReport = traceButton.classList.contains('green') || traceButton.classList.contains('success');
+        updateReportButton(reportButton, reportInfo || (canReport ? 'default' : 'disabled'), endpointKey);
+    }
+
     playButton.addEventListener("click", (e) => { e.stopPropagation(); handlePlayButton(endpointKey, playButton); });
     traceButton.addEventListener("click", (e) => { e.stopPropagation(); if (!traceButton.hasAttribute('disabled') && !traceButton.classList.contains('checking')) window.handleTraceButton(endpointKey, traceButton); });
     reportButton.addEventListener("click", (e) => { e.stopPropagation(); if (!reportButton.classList.contains('disabled')) handleReportButton(endpointKey); });
+
     buttonContainer.appendChild(playButton);
     buttonContainer.appendChild(traceButton);
     buttonContainer.appendChild(reportButton);
@@ -471,8 +540,35 @@ function setupUIControls() {
     document.getElementById("checkAll")?.addEventListener("click", checkAllEndpoints); const debugButton = document.getElementById("debugToggle"); if (debugButton) { debugButton.addEventListener("click", toggleDebugMode); debugButton.textContent = debugMode ? 'Debug: ON' : 'Debug: OFF'; debugButton.className = debugMode ? 'control-button debug-on' : 'control-button debug-off'; }
     document.getElementById("refreshMessages")?.addEventListener("click", () => { chrome.runtime.sendMessage({ type: "fetchInitialState" }, (response) => { if (response?.success) { if (response.messages) { window.frogPostState.messages.length = 0; window.frogPostState.messages.push(...response.messages); } if (response.handlerEndpointKeys) { knownHandlerEndpoints.clear(); endpointsWithHandlers.clear(); response.handlerEndpointKeys.forEach(key => { knownHandlerEndpoints.add(key); endpointsWithHandlers.add(key); }); } log.info("Dashboard refreshed."); requestUiUpdate(); } else log.error("Failed refresh:", response?.error); }); });
     const uploadPayloadsButton = document.getElementById("uploadCustomPayloadsBtn"); const payloadFileInput = document.getElementById("customPayloadsFile"); if(uploadPayloadsButton && payloadFileInput){ uploadPayloadsButton.addEventListener('click', () => payloadFileInput.click()); payloadFileInput.addEventListener('change', handlePayloadFileSelect); }
-    document.getElementById("clearCustomPayloadsBtn")?.addEventListener('click', clearCustomPayloads); setupCallbackUrl(); updatePayloadStatus();
+    document.getElementById("clearCustomPayloadsBtn")?.addEventListener('click', clearCustomPayloads);
     document.getElementById("openOptionsBtn")?.addEventListener("click", () => { if (chrome.runtime.openOptionsPage) chrome.runtime.openOptionsPage(); else window.open(chrome.runtime.getURL("../options/options.html")); });
+    const debuggerModeBtn = document.getElementById('toggleDebuggerApiMode');
+    if (debuggerModeBtn) {
+        debuggerModeBtn.addEventListener('click', async () => {
+            const newState = !debuggerApiModeEnabled;
+            if (newState === true) {
+                const warningMessage = "WARNING:\n\nEnabling Debugger Mode will attach the browser's debugger to newly loaded web pages.\n\n- This WILL trigger a warning bar in the target tabs unless you launched Brave/Chrome with specific flags (--silent-debugger-extension-api).\n- It may significantly impact browser performance.\n- Use only for specific research or debugging purposes in controlled environments.\n\nDo you want to proceed?";
+                if (!confirm(warningMessage)) {
+                    return;
+                }
+            }
+            debuggerApiModeEnabled = newState;
+            updateDebuggerModeButton();
+            try {
+                await chrome.storage.local.set({ [DEBUGGER_MODE_STORAGE_KEY]: debuggerApiModeEnabled });
+                await chrome.runtime.sendMessage({ type: "setDebuggerMode", enabled: debuggerApiModeEnabled });
+                log.info(`Debugger API Mode ${debuggerApiModeEnabled ? 'ENABLED' : 'DISABLED'}`);
+                showToastNotification(`Debugger Mode ${debuggerApiModeEnabled ? 'Enabled' : 'Disabled'}`, debuggerApiModeEnabled ? 'warning' : 'info');
+            } catch (error) {
+                log.error("Error setting debugger mode state:", error);
+                showToastNotification("Error updating debugger mode", "error");
+                debuggerApiModeEnabled = !newState;
+                updateDebuggerModeButton();
+            }
+        });
+    }
+    setupCallbackUrl();
+    updatePayloadStatus();
 }
 
 async function handlePayloadFileSelect(event) {
@@ -573,73 +669,54 @@ async function showUrlModificationModal(originalUrl, failureReason) {
 
 
 async function handlePlayButton(endpoint, button, skipCheck = false) {
+    const originalFullEndpoint = endpoint;
     const endpointKey = button.getAttribute('data-endpoint');
     if (!endpointKey) { log.error("[Play Button] No endpoint key found."); updateButton(button, 'error'); return; }
-
-    const originalFullEndpoint = endpoint;
+    const isExtensionUrl = endpointKey.startsWith('chrome-extension://');
+    const handlerKnown = endpointsWithDetectedHandlers.has(endpointKey);
     const currentStateInfo = buttonStates.get(endpointKey);
 
+    if (isExtensionUrl && handlerKnown && currentStateInfo?.state !== 'launch') {
+        log.debug(`[Play Button] Handler already known via background detection for extension URL ${endpointKey}. Skipping discovery.`);
+        if (!button.classList.contains('success')) { updateButton(button, 'success'); }
+        const traceButton = button.closest('.button-container')?.querySelector('.iframe-trace-button');
+        if(traceButton?.classList.contains('disabled')) { updateTraceButton(traceButton, 'default', { showEmoji: true }); }
+        const reportButton = button.closest('.button-container')?.querySelector('.iframe-report-button');
+        if (reportButton){ const traceState = traceButtonStates.get(endpointKey)?.state; const reportState = reportButtonStates.get(endpointKey); const canReport = traceState === 'success' || traceState === 'green'; updateReportButton(reportButton, reportState || (canReport ? 'default' : 'disabled'), endpointKey); }
+        return;
+    }
+
     if (currentStateInfo?.state === 'launch') {
-        if (launchInProgressEndpoints.has(endpointKey)) {
-            log.debug(`[Play Button] Launch already in progress for ${endpointKey}`);
-            return;
-        }
+        if (launchInProgressEndpoints.has(endpointKey)) { log.debug(`[Play Button] Launch already in progress for ${endpointKey}`); return; }
         launchInProgressEndpoints.add(endpointKey);
         const traceButton = button.closest('.button-container')?.querySelector('.iframe-trace-button');
         let launchSuccess = false;
-
         try {
             updateButton(button, 'launching', currentStateInfo.options);
             showToastNotification("Preparing Fuzzer Environment...", "info", 3000);
-
             const successfulUrlStorageKey = `successful-url-${endpointKey}`;
             const successfulUrlResult = await new Promise(resolve => chrome.storage.local.get(successfulUrlStorageKey, resolve));
             const successfulUrl = successfulUrlResult[successfulUrlStorageKey] || originalFullEndpoint;
             const analysisKeyToUse = getStorageKeyForUrl(successfulUrl);
-
-            const [traceReport, storedPayloads, storedMessages] = await Promise.all([
-                window.traceReportStorage.getTraceReport(analysisKeyToUse),
-                window.traceReportStorage.getReportPayloads(analysisKeyToUse),
-                retrieveMessagesWithFallbacks(endpointKey) // Get messages associated with original endpoint key
-            ]);
-
+            const [traceReport, storedPayloads, storedMessages] = await Promise.all([ window.traceReportStorage.getTraceReport(analysisKeyToUse), window.traceReportStorage.getReportPayloads(analysisKeyToUse), retrieveMessagesWithFallbacks(endpointKey) ]);
             if (!traceReport) throw new Error(`No trace report found for ${analysisKeyToUse}. Run Play & Trace again.`);
             const handlerCode = traceReport?.analyzedHandler?.handler || traceReport?.analyzedHandler?.code;
             if (!handlerCode) throw new Error('Handler code missing in trace report.');
-
             const payloads = storedPayloads || traceReport?.details?.payloads || traceReport?.payloads || [];
             let messagesForFuzzer = [];
-            if (Array.isArray(storedMessages) && storedMessages.length > 0) {
-                messagesForFuzzer = storedMessages;
-            } else if (traceReport?.details?.uniqueStructures) {
-                messagesForFuzzer = traceReport.details.uniqueStructures.flatMap(s => s.examples || []);
-            }
-
+            if (Array.isArray(storedMessages) && storedMessages.length > 0) { messagesForFuzzer = storedMessages; }
+            else if (traceReport?.details?.uniqueStructures) { messagesForFuzzer = traceReport.details.uniqueStructures.flatMap(s => s.examples || []); }
             const callbackStorageData = await new Promise(resolve => chrome.storage.session.get([CALLBACK_URL_STORAGE_KEY], resolve));
             const currentCallbackUrl = callbackStorageData[CALLBACK_URL_STORAGE_KEY] || null;
             const customPayloadsResult = await new Promise(resolve => chrome.storage.session.get('customXssPayloads', result => resolve(result.customXssPayloads)));
             const useCustomPayloads = customPayloadsResult && customPayloadsResult.length > 0;
-
-            const fuzzerOptions = {
-                autoStart: true, // Can be configured if needed
-                useCustomPayloads: useCustomPayloads,
-                enableCallbackFuzzing: !!currentCallbackUrl,
-                callbackUrl: currentCallbackUrl
-            };
-
+            const fuzzerOptions = { autoStart: false, useCustomPayloads: useCustomPayloads, enableCallbackFuzzing: !!currentCallbackUrl, callbackUrl: currentCallbackUrl };
             launchSuccess = await launchFuzzerEnvironment(successfulUrl, handlerCode, messagesForFuzzer, payloads, traceReport, fuzzerOptions, analysisKeyToUse);
-
         } catch (error) {
-            log.error('[Launch Error]:', error?.message);
-            alert(`Fuzzer launch failed: ${error.message}`);
-            launchSuccess = false;
-            try { await chrome.runtime.sendMessage({ type: "stopServer" }); } catch {} // Use type for clarity
+            log.error(`[Launch Error for ${originalFullEndpoint}]:`, error?.message); alert(`Fuzzer launch failed: ${error.message}`); launchSuccess = false;
+            try { await chrome.runtime.sendMessage({ type: "stopServer" }); } catch {}
         } finally {
-            updateButton(button, launchSuccess ? 'launch' : 'error', { // Restore to launch on success, error on failure
-                ...currentStateInfo.options, // Keep original options like hasCriticalSinks
-                errorMessage: launchSuccess ? undefined : 'Fuzzer launch failed'
-            });
-
+            updateButton(button, launchSuccess ? 'launch' : 'error', { ...currentStateInfo?.options, errorMessage: launchSuccess ? undefined : 'Fuzzer launch failed' });
             launchInProgressEndpoints.delete(endpointKey);
             setTimeout(requestUiUpdate, 100);
         }
@@ -660,9 +737,8 @@ async function handlePlayButton(endpoint, button, skipCheck = false) {
     try {
         originalMessages = window.frogPostState.messages.filter(msg => { if (!msg?.origin || !msg?.destinationUrl) return false; const originKey = getStorageKeyForUrl(msg.origin); const destKey = getStorageKeyForUrl(msg.destinationUrl); return originKey === endpointKey || destKey === endpointKey; }).sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp)).slice(0, 50);
 
-        if (!skipCheck) {
-            updateButton(button, 'csp');
-            let cspResult = await performEmbeddingCheck(endpointUrlForAnalysis);
+        if (!skipCheck && !isExtensionUrl) { // Embedding check ONLY for non-extension URLs
+            updateButton(button, 'csp'); let cspResult = await performEmbeddingCheck(endpointUrlForAnalysis);
             if (!cspResult.embeddable) {
                 log.warn(`[Play] Embedding check failed for ${endpointUrlForAnalysis}: ${cspResult.status}`);
                 const isCspOrXfoError = cspResult.status.includes('X-Frame-Options') || cspResult.status.includes('CSP');
@@ -670,20 +746,17 @@ async function handlePlayButton(endpoint, button, skipCheck = false) {
                 if (isCspOrXfoError) {
                     const modalResult = await showUrlModificationModal(endpointUrlForAnalysis, cspResult.status);
                     if (modalResult.action === 'cancel') { updateButton(button, 'start'); throw new Error("User cancelled analysis"); }
-                    else if (modalResult.action === 'continue') { successfullyAnalyzedUrl = endpointUrlForAnalysis; updateButton(button, 'warning', { errorMessage: 'Proceeding despite embedding failure' }); throw new Error("Proceeding despite embedding failure (analysis skipped)"); }
-                    else if (modalResult.action === 'retry') {
-                        endpointUrlForAnalysis = modalResult.modifiedUrl; analysisStorageKey = getStorageKeyForUrl(endpointUrlForAnalysis);
-                        updateButton(button, 'csp');
-                        cspResult = await performEmbeddingCheck(endpointUrlForAnalysis);
-                        if (!cspResult.embeddable) { updateButton(button, 'error', { errorMessage: `Modified URL failed check: ${cspResult.status}` }); throw new Error("Modified URL failed embedding check"); }
-                        successfullyAnalyzedUrl = endpointUrlForAnalysis;
-                    } else { updateButton(button, 'start'); throw new Error("Embedding check failed - Unknown modal action"); }
-                } else { updateButton(button, 'error', { errorMessage: cspResult.status }); launchInProgressEndpoints.delete(endpointKey); setTimeout(requestUiUpdate, 50); return; }
-            } else { successfullyAnalyzedUrl = endpointUrlForAnalysis; }
-        } else { successfullyAnalyzedUrl = endpointUrlForAnalysis; }
+                    else if (modalResult.action === 'continue') { successfullyAnalyzedUrl = endpointUrlForAnalysis; analysisStorageKey = getStorageKeyForUrl(successfullyAnalyzedUrl); updateButton(button, 'warning', { errorMessage: 'Proceeding despite embedding failure' }); throw new Error("Proceeding despite embedding failure (analysis skipped)"); }
+                    else if (modalResult.action === 'retry') { endpointUrlForAnalysis = modalResult.modifiedUrl; analysisStorageKey = getStorageKeyForUrl(endpointUrlForAnalysis); updateButton(button, 'csp'); cspResult = await performEmbeddingCheck(endpointUrlForAnalysis); if (!cspResult.embeddable) { updateButton(button, 'error', { errorMessage: `Modified URL failed check: ${cspResult.status}` }); throw new Error("Modified URL failed embedding check"); } successfullyAnalyzedUrl = endpointUrlForAnalysis; }
+                    else { updateButton(button, 'start'); throw new Error("Embedding check failed - Unknown modal action"); }
+                } else { updateButton(button, 'error', { errorMessage: cspResult.status }); throw new Error(`Embedding check failed: ${cspResult.status}`); }
+            } else { successfullyAnalyzedUrl = endpointUrlForAnalysis; analysisStorageKey = getStorageKeyForUrl(successfullyAnalyzedUrl); }
+        } else {
+            successfullyAnalyzedUrl = endpointUrlForAnalysis;
+            analysisStorageKey = getStorageKeyForUrl(successfullyAnalyzedUrl);
+        }
 
         updateButton(button, 'analyze');
-        analysisStorageKey = getStorageKeyForUrl(successfullyAnalyzedUrl);
         await saveRandomPostMessages(endpointKey, originalMessages);
         const successfulUrlStorageKey = `successful-url-${endpointKey}`;
         await chrome.storage.local.set({ [successfulUrlStorageKey]: successfullyAnalyzedUrl });
@@ -697,15 +770,12 @@ async function handlePlayButton(endpoint, button, skipCheck = false) {
         if (validRuntimeListeners.length > 0) {
             const scorer = new HandlerExtractor().initialize(successfullyAnalyzedUrl, scoringMessages);
             let bestScore = -1; let bestListener = null;
-            validRuntimeListeners.forEach(listener => {
-                let handlerInfo = { handler: listener.code, category: listener.category || 'runtime-captured', source: listener.source || 'runtime', handlerNode: null, fullScriptContent: listener.code };
-                const score = scorer.scoreHandler(handlerInfo);
-                if (score > bestScore) { bestScore = score; bestListener = listener; } });
+            validRuntimeListeners.forEach(listener => { let handlerInfo = { handler: listener.code, category: listener.category || 'runtime-captured', source: listener.source || 'runtime', handlerNode: null, fullScriptContent: listener.code }; const score = scorer.scoreHandler(handlerInfo); if (score > bestScore) { bestScore = score; bestListener = listener; } });
             if (bestListener) foundHandlerObject = { handler: bestListener.code, category: bestListener.category || 'runtime-best-scored', score: bestScore, source: `runtime: ${bestListener.context || bestListener.source || 'unknown'}`, timestamp: bestListener.timestamp, stack: bestListener.stack, context: bestListener.context };
             else foundHandlerObject = null;
         }
 
-        if (!foundHandlerObject) {
+        if (!foundHandlerObject && !isExtensionUrl) {
             try {
                 const extractor = new HandlerExtractor().initialize(successfullyAnalyzedUrl, scoringMessages);
                 showToastNotification('Attaching debugger to analyze scripts...', 'info', 10000);
@@ -722,26 +792,34 @@ async function handlePlayButton(endpoint, button, skipCheck = false) {
             const finalBestHandlerKey = `best-handler-${analysisStorageKey}`;
             try {
                 if (typeof window.analyzeHandlerStatically === 'function') {
-                    const quickAnalysis = window.analyzeHandlerStatically(foundHandlerObject.handler);
-                    if(quickAnalysis?.analysis?.identifiedEventParam) {
-                        foundHandlerObject.eventParamName = quickAnalysis.analysis.identifiedEventParam;
-                    }
+                    try {
+                        const quickAnalysis = window.analyzeHandlerStatically(foundHandlerObject.handler);
+                        if(quickAnalysis?.analysis?.identifiedEventParam) { foundHandlerObject.eventParamName = quickAnalysis.analysis.identifiedEventParam; }
+                    } catch (quickAnalysisError) { log.warn("Quick analysis for event param failed", quickAnalysisError);}
                 }
                 await chrome.storage.local.set({ [finalBestHandlerKey]: foundHandlerObject });
                 const runtimeListKeyForUpdate = `runtime-listeners-${endpointKey}`;
-                try { const res = await new Promise(resolve => chrome.storage.local.get(runtimeListKeyForUpdate, resolve)); let listeners = res[runtimeListKeyForUpdate] || []; if (!listeners.some(l => l.code === foundHandlerObject.handler)) { listeners.push({ code: foundHandlerObject.handler, context: `selected-by-play (${foundHandlerObject.category})`, timestamp: Date.now(), source: foundHandlerObject.source }); if (listeners.length > 30) listeners = listeners.slice(-30); await chrome.storage.local.set({ [runtimeListKeyForUpdate]: listeners }); } if (!endpointsWithHandlers.has(endpointKey)) { endpointsWithHandlers.add(endpointKey); handlerStateUpdated = true; } } catch (e) { log.error("Failed updating runtime list after selection", e); }
+                try { const res = await new Promise(resolve => chrome.storage.local.get(runtimeListKeyForUpdate, resolve)); let listeners = res[runtimeListKeyForUpdate] || []; if (!listeners.some(l => l.code === foundHandlerObject.handler)) { listeners.push({ code: foundHandlerObject.handler, context: `selected-by-play (${foundHandlerObject.category})`, timestamp: Date.now(), source: foundHandlerObject.source }); if (listeners.length > 30) listeners = listeners.slice(-30); await chrome.storage.local.set({ [runtimeListKeyForUpdate]: listeners }); } if (!endpointsWithDetectedHandlers.has(endpointKey)) { endpointsWithDetectedHandlers.add(endpointKey); handlerStateUpdated = true; } } catch (e) { log.error("Failed updating runtime list after selection", e); }
                 updateButton(button, 'success');
                 const traceButton = button.closest('.button-container')?.querySelector('.iframe-trace-button');
                 if (traceButton) updateTraceButton(traceButton, 'default', { showEmoji: true });
                 if (reportButton) updateReportButton(reportButton, 'disabled', originalFullEndpoint);
             } catch (storageError) { log.error(`Failed to save handler (${finalBestHandlerKey}):`, storageError); updateButton(button, 'error', {errorMessage: 'Failed to save handler'}); const traceButton = button.closest('.button-container')?.querySelector('.iframe-trace-button'); if (traceButton) updateTraceButton(traceButton, 'disabled'); if (reportButton) updateReportButton(reportButton, 'disabled', originalFullEndpoint); }
-        } else { const failureMessage = `No usable handler found for ${endpointUrlForAnalysis}.`; updateButton(button, 'warning', { errorMessage: "No handler function found" }); const traceButton = button.closest('.button-container')?.querySelector('.iframe-trace-button'); if (traceButton) updateTraceButton(traceButton, 'disabled'); if (reportButton) updateReportButton(reportButton, 'disabled', originalFullEndpoint); }
+        } else {
+            if (!isExtensionUrl) {
+                const failureMessage = `No usable handler found for ${endpointUrlForAnalysis}.`; updateButton(button, 'warning', { errorMessage: "No handler function found" }); const traceButton = button.closest('.button-container')?.querySelector('.iframe-trace-button'); if (traceButton) updateTraceButton(traceButton, 'disabled'); if (reportButton) updateReportButton(reportButton, 'disabled', originalFullEndpoint);
+            }
+        }
         if (handlerStateUpdated) requestUiUpdate();
 
     } catch (error) {
-        if (error.message === "Proceeding despite embedding failure (analysis skipped)") { log.info(`[Play] Process stopped for ${endpointKey}: ${error.message}`); showToastNotification('Analysis skipped due to embedding restrictions. Button set to warning.', 'warning', 6000); const traceButton = button.closest('.button-container')?.querySelector('.iframe-trace-button'); if (traceButton) updateTraceButton(traceButton, 'disabled'); if (reportButton) updateReportButton(reportButton, 'disabled', originalFullEndpoint); }
-        else if (["User cancelled analysis", "Modified URL failed embedding check"].includes(error.message) || error.message?.startsWith('Embedding check failed:')) { log.info(`[Play] Process stopped for ${endpointKey}: ${error.message}`); const traceButton = button.closest('.button-container')?.querySelector('.iframe-trace-button'); if (traceButton) updateTraceButton(traceButton, 'disabled'); if (reportButton) updateReportButton(reportButton, 'disabled', originalFullEndpoint); }
-        else { log.error(`[Play Button Error] Unexpected error for key ${endpointKey}:`, error.message); if(!button.classList.contains('error') && !button.classList.contains('warning')) { updateButton(button, 'error', { errorMessage: 'Analysis error occurred' }); } showToastNotification(`Analysis Error: ${error.message.substring(0, 100)}`, 'error'); const traceButton = button.closest('.button-container')?.querySelector('.iframe-trace-button'); if (traceButton) updateTraceButton(traceButton, 'disabled'); if (reportButton) updateReportButton(reportButton, 'disabled', originalFullEndpoint); }
+        log.error(`[Play Button Error] Unexpected error for ${originalFullEndpoint}:`, error.message, error.stack);
+        if (error.message === "Proceeding despite embedding failure (analysis skipped)") { log.info(`[Play] Process stopped for ${endpointKey}: ${error.message}`); showToastNotification('Analysis skipped due to embedding restrictions. Button set to warning.', 'warning', 6000); }
+        else if (["User cancelled analysis", "Modified URL failed embedding check"].includes(error.message) || error.message?.startsWith('Embedding check failed:') || error.message?.startsWith('Header check failed:')) { log.info(`[Play] Process stopped for ${endpointKey}: ${error.message}`); updateButton(button, 'start'); }
+        else { if(!button.classList.contains('error') && !button.classList.contains('warning')) { updateButton(button, 'error', { errorMessage: 'Analysis error occurred' }); } showToastNotification(`Analysis Error: ${error.message.substring(0, 100)}`, 'error'); }
+        const traceButton = button.closest('.button-container')?.querySelector('.iframe-trace-button');
+        if (traceButton) updateTraceButton(traceButton, 'disabled');
+        if (reportButton) updateReportButton(reportButton, 'disabled', originalFullEndpoint);
     } finally {
         launchInProgressEndpoints.delete(endpointKey);
         setTimeout(requestUiUpdate, 150);
@@ -931,9 +1009,36 @@ async function handleReportButton(endpoint) {
 async function checkAllEndpoints() { const endpointButtons = document.querySelectorAll('.iframe-row .iframe-check-button'); for (const button of endpointButtons) { const endpointKey = button.getAttribute('data-endpoint'); if (endpointKey && !button.classList.contains('green') && !button.classList.contains('success')) { try { await handlePlayButton(endpointKey, button); await new Promise(resolve => setTimeout(resolve, 500)); } catch {} } } }
 
 async function populateInitialHandlerStates() {
-    try { const allData = await chrome.storage.local.get(null); endpointsWithHandlers.clear(); for (const key in allData) { if (key.startsWith('best-handler-')) { const handlerKey = key.substring('best-handler-'.length); if(handlerKey) endpointsWithHandlers.add(handlerKey); } } }
-    catch (error) { log.error("Error populating initial handler states:", error); }
-    finally { requestUiUpdate(); }
+    log.debug("Populating initial handler states...");
+    try {
+        const response = await new Promise((resolve) => {
+            chrome.runtime.sendMessage({ type: "fetchInitialState" }, (res) => {
+                if (chrome.runtime.lastError) resolve({ success: false, error: chrome.runtime.lastError.message });
+                else resolve(res);
+            });
+        });
+
+        endpointsWithDetectedHandlers.clear(); // Clear dashboard's copy first
+
+        if (response?.success) {
+            if (response.messages) {
+                window.frogPostState.messages.length = 0;
+                window.frogPostState.messages.push(...response.messages);
+            }
+            if (response.handlerEndpointKeys && Array.isArray(response.handlerEndpointKeys)) {
+                response.handlerEndpointKeys.forEach(key => endpointsWithDetectedHandlers.add(key));
+                log.debug(`Populated ${endpointsWithDetectedHandlers.size} handler keys from background state.`);
+            } else {
+                log.debug("No handler keys received from background state.");
+            }
+        } else {
+            log.warn("Could not fetch initial state from background:", response?.error);
+        }
+    } catch (error) {
+        log.error("Error populating initial handler states:", error);
+        endpointsWithDetectedHandlers.clear();
+    }
+    // DO NOT trigger UI update here, let the main DOMContentLoaded flow handle it
 }
 
 const traceReportStyles = `.trace-results-panel {} .trace-panel-backdrop {} .trace-panel-header {} .trace-panel-close {} .trace-results-content {} .report-section { margin-bottom: 30px; padding: 20px; background: #1a1d21; border-radius: 8px; box-shadow: 0 2px 5px rgba(0, 0, 0, 0.3); border: 1px solid #333; } .report-section-title { margin-top: 0; padding-bottom: 10px; border-bottom: 1px solid #444; color: #00e1ff; font-size: 1.3em; font-weight: 600; text-shadow: 0 0 5px rgba(0, 225, 255, 0.5); } .report-subsection-title { margin-top: 0; color: #a8b3cf; font-size: 1.1em; margin-bottom: 10px; } .report-summary .summary-grid { display: grid; grid-template-columns: auto 1fr; gap: 25px; align-items: center; margin-bottom: 20px; } .security-score-container { display: flex; justify-content: center; } .security-score { width: 90px; height: 90px; border-radius: 50%; display: flex; flex-direction: column; justify-content: center; align-items: center; text-align: center; color: #fff; font-weight: bold; background: conic-gradient(#e74c3c 0% 20%, #e67e22 20% 40%, #f39c12 40% 60%, #3498db 60% 80%, #2ecc71 80% 100%); position: relative; border: 3px solid #555; box-shadow: inset 0 0 10px rgba(0,0,0,0.5); } .security-score::before { content: ''; position: absolute; inset: 5px; background: #1a1d21; border-radius: 50%; z-index: 1; } .security-score div { position: relative; z-index: 2; } .security-score-value { font-size: 28px; line-height: 1; } .security-score-label { font-size: 12px; margin-top: 3px; text-transform: uppercase; letter-spacing: 0.5px; } .security-score.critical { border-color: #e74c3c; } .security-score.high { border-color: #e67e22; } .security-score.medium { border-color: #f39c12; } .security-score.low { border-color: #3498db; } .security-score.negligible { border-color: #2ecc71; } .summary-metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px 20px; } .metric { background-color: #252a30; padding: 10px; border-radius: 4px; text-align: center; border: 1px solid #3a3f44; } .metric-label { display: block; font-size: 11px; color: #a8b3cf; margin-bottom: 4px; text-transform: uppercase; } .metric-value { display: block; font-size: 18px; font-weight: bold; color: #fff; } .recommendations { margin-top: 15px; padding: 15px; background: rgba(0, 225, 255, 0.05); border-radius: 4px; border-left: 3px solid #00e1ff; } .recommendation-text { color: #d0d8e8; font-size: 13px; line-height: 1.6; margin: 0; } .report-code-block { background: #111316; border: 1px solid #333; border-radius: 4px; padding: 12px; overflow-x: auto; margin: 10px 0; max-height: 300px; } .report-code-block pre { margin: 0; } .report-code-block code { font-family: 'Courier New', Courier, monospace; font-size: 13px; color: #c4c4c4; white-space: pre; } .report-handler .handler-meta { font-size: 0.8em; color: #777; margin-left: 10px; } details.report-details { background: #22252a; border: 1px solid #3a3f44; border-radius: 4px; margin-bottom: 10px; } summary.report-summary-toggle { cursor: pointer; padding: 10px 15px; display: flex; justify-content: space-between; align-items: center; font-weight: 600; color: #d0d8e8; } summary.report-summary-toggle:focus { outline: none; box-shadow: 0 0 0 2px rgba(0, 225, 255, 0.5); } details[open] > summary.report-summary-toggle { border-bottom: 1px solid #3a3f44; } .toggle-icon { font-size: 1.2em; transition: transform 0.2s; } details[open] .toggle-icon { transform: rotate(90deg); } .report-details > div { padding: 15px; } .report-table { width: 100%; border-collapse: collapse; margin: 15px 0; background-color: #22252a; } .report-table th, .report-table td { padding: 10px 12px; text-align: left; border: 1px solid #3a3f44; font-size: 13px; color: #d0d8e8; } .report-table th { background-color: #2c313a; font-weight: bold; color: #fff; } .report-table td code { font-size: 12px; color: #a8b3cf; background-color: #111316; padding: 2px 4px; border-radius: 3px; white-space: pre-wrap; word-break: break-all; } .report-table .context-snippet { max-width: 400px; white-space: pre-wrap; word-break: break-all; display: inline-block; vertical-align: middle; } .severity-badge { display: inline-block; padding: 3px 8px; border-radius: 12px; font-size: 11px; font-weight: bold; text-transform: uppercase; } .severity-critical { background-color: #e74c3c; color: white; } .severity-high { background-color: #e67e22; color: white; } .severity-medium { background-color: #f39c12; color: #333; } .severity-low { background-color: #3498db; color: white; } .severity-row-critical td { background-color: rgba(231, 76, 60, 0.15); } .severity-row-high td { background-color: rgba(230, 126, 34, 0.15); } .severity-row-medium td { background-color: rgba(243, 156, 18, 0.1); } .severity-row-low td { background-color: rgba(52, 152, 219, 0.1); } .no-findings-text { color: #777; font-style: italic; padding: 10px 0; } .dataflow-table td:first-child code { font-weight: bold; color: #ffb86c; } .report-list { max-height: 400px; overflow-y: auto; padding-right: 10px; } .payload-item, .structure-item { background: #22252a; border: 1px solid #3a3f44; border-radius: 4px; margin-bottom: 15px; overflow: hidden; } .payload-header { padding: 8px 12px; background-color: #2c313a; color: #a8b3cf; font-size: 12px; } .payload-header strong { color: #fff; } .payload-meta { color: #8be9fd; margin: 0 5px; } .payload-item .report-code-block { margin: 0; border: none; border-top: 1px solid #3a3f44; border-radius: 0 0 4px 4px; } .structure-content { padding: 15px; } .structure-content p { margin: 0 0 10px 0; color: #d0d8e8; font-size: 13px; } .structure-content strong { color: #00e1ff; } .structure-content code { color: #a8b3cf; background-color: #111316; padding: 2px 4px; border-radius: 3px; } .show-more-btn { display: block; width: 100%; margin-top: 15px; text-align: center; background-color: #343a42; border: 1px solid #4a5058; color: #a8b3cf; } .show-more-btn:hover { background-color: #4a5058; color: #fff; } .control-button {} .secondary-button {} .error-message { color: #e74c3c; font-weight: bold; padding: 15px; background-color: rgba(231, 76, 60, 0.1); border: 1px solid #e74c3c; border-radius: 4px; } span.highlight-finding { background-color: rgba(255, 0, 0, 0.3); color: #ffdddd; font-weight: bold; padding: 1px 2px; border-radius: 2px; border: 1px solid rgba(255, 100, 100, 0.5); }`;
@@ -946,38 +1051,49 @@ window.addTraceReportStyles = addTraceReportStyles;
 function addProgressStyles() { if (!document.getElementById('frogpost-progress-styles')) { const styleEl = document.createElement('style'); styleEl.id = 'frogpost-progress-styles'; styleEl.textContent = progressStyles; document.head.appendChild(styleEl); } }
 window.addProgressStyles = addProgressStyles;
 
-window.addEventListener('DOMContentLoaded', () => {
-    const clearStoredMessages = () => { chrome.runtime.sendMessage({ type: "resetState" }); localStorage.removeItem('interceptedMessages'); window.frogPostState.messages.length = 0; window.frogPostState.frameConnections.clear(); buttonStates.clear(); reportButtonStates.clear(); traceButtonStates.clear(); window.frogPostState.activeUrl = null; };
-    clearStoredMessages();
-    const sidebarToggle = document.getElementById('sidebarToggle'); const controlSidebar = document.getElementById('controlSidebar'); if (sidebarToggle && controlSidebar) { if (!controlSidebar.classList.contains('open')) sidebarToggle.classList.add('animate-toggle'); sidebarToggle.addEventListener('click', () => { controlSidebar.classList.toggle('open'); sidebarToggle.classList.toggle('animate-toggle', !controlSidebar.classList.contains('open')); }); }
-    printBanner(); setupUIControls(); initializeMessageHandling(); populateInitialHandlerStates(); addTraceReportStyles(); addProgressStyles();
+window.addEventListener('DOMContentLoaded', async () => {
+    printBanner();
 
-    const filterInput = document.getElementById('endpointFilterInput');
-    if (filterInput) {
-        filterInput.addEventListener('input', requestUiUpdate);
-    } else {
-        log.error("Could not find endpoint filter input element (#endpointFilterInput)");
+    const sidebarToggle = document.getElementById('sidebarToggle');
+    const controlSidebar = document.getElementById('controlSidebar');
+    if (sidebarToggle && controlSidebar) {
+        if (!controlSidebar.classList.contains('open')) { sidebarToggle.classList.add('animate-toggle'); }
+        sidebarToggle.addEventListener('click', () => { controlSidebar.classList.toggle('open'); sidebarToggle.classList.toggle('animate-toggle', !controlSidebar.classList.contains('open')); });
     }
-
+    const filterInput = document.getElementById('endpointFilterInput');
+    if (filterInput) { filterInput.addEventListener('input', requestUiUpdate); }
+    else { log.error("Could not find endpoint filter input element (#endpointFilterInput)"); }
     const silentFilterToggle = document.getElementById('silentFilterToggle');
     if (silentFilterToggle) {
         const textSpan = silentFilterToggle.querySelector('.button-text');
         if (textSpan) textSpan.textContent = showOnlySilentIframes ? 'Silent Listeners On' : 'Silent Listeners Off';
         silentFilterToggle.classList.toggle('active', showOnlySilentIframes);
+        silentFilterToggle.addEventListener('click', () => { showOnlySilentIframes = !showOnlySilentIframes; silentFilterToggle.classList.toggle('active', showOnlySilentIframes); const textSpan = silentFilterToggle.querySelector('.button-text'); if (textSpan) textSpan.textContent = showOnlySilentIframes ? 'Silent Listeners On' : 'Silent Listeners Off'; log.info(`Silent iframe filter ${showOnlySilentIframes ? 'ON (Showing ONLY Silent)' : 'OFF (Showing All)'}.`); requestUiUpdate(); });
+    } else { log.error("Could not find silent filter toggle button (#silentFilterToggle)"); }
 
-        silentFilterToggle.addEventListener('click', () => {
-            showOnlySilentIframes = !showOnlySilentIframes;
-            silentFilterToggle.classList.toggle('active', showOnlySilentIframes);
-            const textSpan = silentFilterToggle.querySelector('.button-text');
-            if (textSpan) textSpan.textContent = showOnlySilentIframes ? 'Silent Listeners On' : 'Silent Listeners Off';
-            log.info(`Silent iframe filter ${showOnlySilentIframes ? 'ON (Showing ONLY Silent)' : 'OFF (Showing All)'}.`);
-            requestUiUpdate();
-        });
-    } else {
-        log.error("Could not find silent filter toggle button (#silentFilterToggle)");
+    initializeMessageHandling();
+    addTraceReportStyles();
+    addProgressStyles();
+
+    try {
+        const result = await chrome.storage.local.get([DEBUGGER_MODE_STORAGE_KEY]);
+        debuggerApiModeEnabled = result[DEBUGGER_MODE_STORAGE_KEY] || false;
+        log.info(`Initial Debugger Mode State loaded: ${debuggerApiModeEnabled}`);
+    } catch (error) {
+        log.error("Error loading debugger mode state:", error);
+        debuggerApiModeEnabled = false;
     }
 
-    requestUiUpdate();
+    setupUIControls();
+    updateDebuggerModeButton();
+    setupCallbackUrl();
+    updatePayloadStatus();
 
-    try { chrome.storage.session.get('customXssPayloads', (result) => { const storedPayloads = result.customXssPayloads; if (storedPayloads && storedPayloads.length > 0) { updatePayloadStatus(true, storedPayloads.length); if (window.FuzzingPayloads) { if (!window.FuzzingPayloads._originalXSS) window.FuzzingPayloads._originalXSS = [...window.FuzzingPayloads.XSS]; window.FuzzingPayloads.XSS = [...storedPayloads]; } } else { try { const localPayloads = localStorage.getItem('customXssPayloads'); if (localPayloads) { const parsed = JSON.parse(localPayloads); if (Array.isArray(parsed) && parsed.length > 0) { chrome.storage.session.set({ customXssPayloads: parsed }, () => { if (!chrome.runtime.lastError) { updatePayloadStatus(true, parsed.length); if (window.FuzzingPayloads) { if (!window.FuzzingPayloads._originalXSS) window.FuzzingPayloads._originalXSS = [...window.FuzzingPayloads.XSS]; window.FuzzingPayloads.XSS = [...parsed]; } } }); } } } catch {} } }); } catch (e) {}
+    await populateInitialHandlerStates();
+
+    try {
+        chrome.storage.session.get('customXssPayloads', (result) => { if (chrome.runtime.lastError) { log.warn("Error getting custom payloads status:", chrome.runtime.lastError.message); return; } const storedPayloads = result.customXssPayloads; const active = storedPayloads && storedPayloads.length > 0; updatePayloadStatus(active, active ? storedPayloads.length : 0); if (active && window.FuzzingPayloads) { if (!window.FuzzingPayloads._originalXSS) window.FuzzingPayloads._originalXSS = [...window.FuzzingPayloads.XSS]; window.FuzzingPayloads.XSS = [...storedPayloads]; } });
+    } catch (e) { log.error("Error checking custom payload status:", e); }
+
+    requestUiUpdate();
 });

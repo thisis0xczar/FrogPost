@@ -43,7 +43,94 @@ class HandlerTracer {
         }
         vulnerabilities.sinks = Array.from(foundSinks.values()); const originChecks = staticAnalysisData?.originChecks || []; const securityIssuesFromStatic = staticAnalysisData?.securityIssues || []; vulnerabilities.securityIssues.push(...securityIssuesFromStatic); let originCheckCoveredByStatic = originChecks.length > 0 || securityIssuesFromStatic.some(iss => iss.type.toLowerCase().includes('origin check') || iss.type.toLowerCase().includes('origin validation')); const patternBasedChecks = this.securityChecks.filter(c => c.pattern); const allPatternChecks = [...patternBasedChecks, ...this.loadedCustomChecks]; for (const check of allPatternChecks) { if (check.name.toLowerCase().includes('origin check') && originCheckCoveredByStatic) { continue; } if (check.pattern) { let regex; try { const flags = [...new Set(['g', 'm', 's', ...(check.pattern.flags?.split('') || [])])].join(''); regex = new RegExp(check.pattern, flags); } catch (e) { continue; } let match; while ((match = regex.exec(handlerCode)) !== null) { const exactMatchSnippet = match[0]; const rawContext = this.extractContext(handlerCode, match.index, exactMatchSnippet.length); let highlightedContextHTML = escapeHTML(rawContext); let highlightStartIndex = -1; let highlightEndIndex = -1; const matchIndexInRawContext = rawContext.indexOf(exactMatchSnippet); if (matchIndexInRawContext !== -1) { highlightStartIndex = matchIndexInRawContext; highlightEndIndex = highlightStartIndex + exactMatchSnippet.length; const partBefore = rawContext.substring(0, highlightStartIndex); const partMatch = rawContext.substring(highlightStartIndex, highlightEndIndex); const partAfter = rawContext.substring(highlightEndIndex); highlightedContextHTML = partBefore + '<span class="highlight-finding">' + escapeHTML(partMatch) + '</span>' + partAfter; } if (!vulnerabilities.securityIssues.some(iss => iss.type === check.name && iss.context.includes(escapeHTML(exactMatchSnippet)))) { vulnerabilities.securityIssues.push({ type: check.name, severity: check.severity, context: highlightedContextHTML, highlightStart: highlightStartIndex, highlightEnd: highlightEndIndex }); } if (!regex.global) break; } } } const uniqueIssues = new Map(); vulnerabilities.securityIssues.forEach(issue => { const key = `${issue.type}#${issue.context}`; if (!uniqueIssues.has(key)) { uniqueIssues.set(key, issue); } }); vulnerabilities.securityIssues = Array.from(uniqueIssues.values()); return vulnerabilities; }
     extractContext(codeToSearchIn, index, length) { const before = Math.max(0, index - 50); const after = Math.min(codeToSearchIn.length, index + length + 50); let context = codeToSearchIn.substring(before, after); context = context.replace(/\n|\r/g, "↵").trim(); return context; }
-    calculateRiskScore(analysisResults) { let penaltyScore = 0; const MAX_PENALTY = 100; if (!analysisResults) return 100; const sinks = analysisResults.sinks || []; const issues = analysisResults.securityIssues || []; const dataFlows = analysisResults.dataFlows || []; sinks.forEach(sink => { switch (sink.severity?.toLowerCase()) { case 'critical': penaltyScore += 35; break; case 'high': penaltyScore += 20; break; case 'medium': penaltyScore += 8; break; case 'low': penaltyScore += 2; break; default: penaltyScore += 1; break; } }); let mediumIssueCount = 0; issues.forEach(issue => { if (issue.type.toLowerCase().includes('origin check') || issue.type.toLowerCase().includes('origin validation issue')) { switch (issue.strength?.toLowerCase() || issue.severity?.toLowerCase()) { case 'missing': case 'weak': case 'critical': case 'high': penaltyScore += 15; break; case 'medium': penaltyScore += 5; break; case 'strong': case 'low': penaltyScore += 0; break; default: penaltyScore += 5; break; } } else { switch (issue.severity?.toLowerCase()) { case 'high': penaltyScore += 15; break; case 'medium': mediumIssueCount++; penaltyScore += 5 + Math.min(mediumIssueCount, 4); break; case 'low': penaltyScore += 3; break; default: penaltyScore += 1; break; } } }); if (dataFlows.length > 0) { let flowPenalty = 0; dataFlows.forEach(flow => { switch (flow.severity?.toLowerCase()) { case 'critical': flowPenalty += 5; break; case 'high': flowPenalty += 3; break; case 'medium': flowPenalty += 1; break; default: flowPenalty += 0.5; break; } }); penaltyScore += Math.min(flowPenalty, 25); } if (issues.some(issue => issue.type.toLowerCase().includes('window.parent') && issue.type.toLowerCase().includes('origin check'))) penaltyScore += 10; penaltyScore = Math.min(penaltyScore, MAX_PENALTY); let finalScore = Math.max(0, 100 - penaltyScore); return Math.round(finalScore); }
+
+    calculateRiskScore(analysisResults) {
+        let penaltyScore = 0;
+        const MAX_PENALTY = 100;
+        const STRONG_CHECK_REWARD = 25;
+        const MEDIUM_CHECK_REWARD = 10;
+        const WEAK_CHECK_PENALTY = 3;
+        const MISSING_CHECK_PENALTY = 20;
+
+
+        if (!analysisResults) return 0;
+
+        const sinks = analysisResults.sinks || [];
+        const issues = analysisResults.securityIssues || [];
+        const dataFlows = analysisResults.dataFlows || [];
+        const originChecks = analysisResults.details?.originValidationChecks || analysisResults.originChecks || [];
+
+        let hasStrongOriginCheck = false;
+        let hasMediumOriginCheck = false;
+        let hasWeakOriginCheck = false;
+        let explicitOriginChecksFound = originChecks.length > 0;
+
+        originChecks.forEach(check => {
+            switch (check.strength?.toLowerCase()) {
+                case 'strong':
+                    penaltyScore -= STRONG_CHECK_REWARD;
+                    hasStrongOriginCheck = true;
+                    break;
+                case 'medium':
+                    penaltyScore -= MEDIUM_CHECK_REWARD;
+                    hasMediumOriginCheck = true;
+                    break;
+                case 'weak':
+                    penaltyScore += WEAK_CHECK_PENALTY;
+                    hasWeakOriginCheck = true;
+                    break;
+            }
+        });
+
+        if (!explicitOriginChecksFound) {
+            const hasAnyOriginIssue = issues.some(issue => issue.type.toLowerCase().includes('origin check') || issue.type.toLowerCase().includes('origin validation issue'));
+            if (!hasAnyOriginIssue) {
+                penaltyScore += MISSING_CHECK_PENALTY;
+            } else {
+                issues.forEach(issue => { // Check regex-based issues if no static checks found
+                    if (issue.type.toLowerCase().includes('origin check') || issue.type.toLowerCase().includes('origin validation issue')) {
+                        switch (issue.severity?.toLowerCase()) {
+                            case 'critical': case 'high': penaltyScore += MISSING_CHECK_PENALTY; break;
+                            case 'medium': penaltyScore += WEAK_CHECK_PENALTY; break;
+                        }
+                    }
+                });
+            }
+        }
+
+        sinks.forEach(sink => {
+            switch (sink.severity?.toLowerCase()) {
+                case 'critical': penaltyScore += 35; break;
+                case 'high': penaltyScore += 20; break;
+                case 'medium': penaltyScore += 8; break;
+                case 'low': penaltyScore += 2; break;
+                default: penaltyScore += 1; break;
+            }
+        });
+
+        let mediumIssueCount = 0;
+        issues.forEach(issue => {
+            if (issue.type.toLowerCase().includes('origin check') || issue.type.toLowerCase().includes('origin validation issue')) { return; } // Skip ones handled above
+            switch (issue.severity?.toLowerCase()) {
+                case 'high': penaltyScore += 15; break;
+                case 'medium': mediumIssueCount++; penaltyScore += 5 + Math.min(mediumIssueCount, 4); break;
+                case 'low': penaltyScore += 3; break;
+                default: penaltyScore += 1; break;
+            }
+        });
+
+        if (dataFlows.length > 0) {
+            let flowPenalty = 0; dataFlows.forEach(flow => { switch (flow.severity?.toLowerCase()) { case 'critical': flowPenalty += 5; break; case 'high': flowPenalty += 3; break; case 'medium': flowPenalty += 1; break; default: flowPenalty += 0.5; break; } }); penaltyScore += Math.min(flowPenalty, 25);
+        }
+
+        if (issues.some(issue => issue.type.toLowerCase().includes('window.parent') && issue.type.toLowerCase().includes('origin check'))) { penaltyScore += 10; }
+
+        penaltyScore = Math.max(0, penaltyScore);
+        penaltyScore = Math.min(penaltyScore, MAX_PENALTY);
+        let finalScore = Math.max(0, 100 - penaltyScore);
+        return Math.round(finalScore);
+    }
+
 
     createStructureFromStaticAnalysis(staticAnalysisData) {
         log.debug("[Payload Gen] createStructureFromStaticAnalysis: Input staticAnalysisData:", staticAnalysisData);
