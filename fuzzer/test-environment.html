@@ -186,7 +186,7 @@
     if (stopBtn) stopBtn.disabled = !isRunning || disableAll;
     if (createPocBtn) createPocBtn.disabled = isRunning || disableAll || fuzzerPayloads.length === 0;
     if (clearLogBtn) clearLogBtn.disabled = disableAll;
-    if (modifyBtn) modifyBtn.disabled = isRunning || isExtensionTarget; // Disable modify if running or extension target
+    if (modifyBtn) modifyBtn.disabled = isRunning || isExtensionTarget;
   }
 
   function startFuzzing() {
@@ -199,17 +199,14 @@
     lastSentPayloadIndex = -1;
     try {
       if (isExtensionTarget) {
-        // Re-initialize fuzzer specifically for extension target if needed, or assume it's ready
         currentFuzzerInstance = window.SinkAwarePostMessageFuzzer.initialize(window.fuzzerConfig);
         if (!currentFuzzerInstance) throw new Error("Extension Fuzzer init failed.");
-        // Add a method to SinkAwarePostMessageFuzzer to handle sending via background
         currentFuzzerInstance.startExtensionFuzzing(targetTabId, () => {
           updateStatus("Extension Fuzzing completed/stopped.");
           isFuzzingRunning = false;
           setButtonState(false);
         });
       } else {
-        // Standard start for iframe targets
         currentFuzzerInstance.start(() => {
           updateStatus("Fuzzing completed/stopped.");
           isFuzzingRunning = false;
@@ -229,7 +226,7 @@
   function stopFuzzing() {
     if (!isFuzzingRunning) { updateStatus("Fuzzing is not running."); return; }
     if (currentFuzzerInstance && typeof currentFuzzerInstance.stop === 'function') {
-      currentFuzzerInstance.stop(); // This should clear the interval
+      currentFuzzerInstance.stop();
       updateStatus("Fuzzing stopped by user.");
     } else {
       updateStatus("Error: Cannot stop fuzzer instance.", true);
@@ -247,7 +244,7 @@
 
   function showModifyTargetModal() {
     const modalContainer = document.getElementById('modifyTargetModalContainer');
-    const currentTargetFrame = document.getElementById('targetFrame'); // Use standard iframe ID
+    const currentTargetFrame = document.getElementById('targetFrame');
     const currentUrl = currentTargetFrame ? currentTargetFrame.src : (window.fuzzerConfig?.target || '');
 
     if (!modalContainer) { console.error("Modal container not found!"); return; }
@@ -287,7 +284,7 @@
     modal.querySelector('#modalLoadBtn').onclick = () => {
       const newUrlInput = document.getElementById('newTargetUrlInput');
       const newUrl = newUrlInput.value.trim();
-      const targetFrame = document.getElementById('targetFrame'); // Get iframe again
+      const targetFrame = document.getElementById('targetFrame');
       const modalError = document.getElementById('modalError');
       modalError.style.display = 'none'; modalError.textContent = '';
 
@@ -302,12 +299,11 @@
         clearLog();
         targetFrame.src = newUrl;
         if(window.fuzzerConfig) window.fuzzerConfig.target = newUrl;
-        // Update header title if it contains the URL
         const titleElement = document.querySelector('.fuzzer-title');
         if (titleElement) {
           const codeElement = titleElement.querySelector('code');
           if (codeElement) codeElement.textContent = newUrl;
-          else titleElement.textContent = `FrogPost Fuzzer: ${newUrl}`; // Fallback if no code element
+          else titleElement.textContent = `FrogPost Fuzzer: ${newUrl}`;
         }
         setButtonState(false);
         closeModal();
@@ -346,7 +342,6 @@
         document.getElementById('targetFrameContainer').innerHTML = `<h3>Target Frame</h3><p style="padding:15px;">Targeting Extension Page (Tab ID: ${targetTabId}) - No preview available. Payloads will be sent via background debugger.</p>`;
         document.getElementById('modifyTargetBtn').style.display = 'none';
         document.getElementById('createPocButton').disabled = true;
-        // Initialize fuzzer for extension target (needed for start/stop)
         if (typeof window.SinkAwarePostMessageFuzzer !== 'undefined') {
           currentFuzzerInstance = window.SinkAwarePostMessageFuzzer.initialize(config);
           if (!currentFuzzerInstance) { throw new Error("Fuzzer initialization returned null for extension target."); }
@@ -354,7 +349,7 @@
             if (!this.isExecutingPayloads) {
               this.isExecutingPayloads = true;
               this._onCompleteCallback = onComplete;
-              const payloadsToExecute = this.generatePayloads(); // Use generated/loaded payloads
+              const payloadsToExecute = this.generatePayloads();
               let msgIdx = 0;
               const sendViaBackground = () => {
                 if (!this.isExecutingPayloads || msgIdx >= payloadsToExecute.length) {
@@ -375,7 +370,7 @@
                   }
                 } catch (error) { console.error(`[Fuzzer] Error processing payload index ${msgIdx}:`, error); }
                 msgIdx++;
-                this.payloadIntervalId = setTimeout(sendViaBackground, 100); // Use setTimeout for async calls
+                this.payloadIntervalId = setTimeout(sendViaBackground, 100);
               };
               this.payloadIntervalId = setTimeout(sendViaBackground, 100);
             }
@@ -387,13 +382,13 @@
             if (typeof this._onCompleteCallback === 'function') { try { this._onCompleteCallback(wasRunning); } catch(e) { console.error("Error in fuzzer completion callback:", e); } }
           };
         } else { updateStatus("Error: Fuzzer class not found.", true); setButtonState(false, true); return; }
-        setButtonState(false, fuzzerPayloads.length === 0); // Enable start if payloads exist
+        setButtonState(false, fuzzerPayloads.length === 0);
         if (fuzzerPayloads.length === 0) { updateStatus("Warning: No payloads loaded from trace report. Fuzzing disabled.", true); }
 
       } else { // Standard Web Page Target
         updateStatus(`Loaded configuration for target: ${config.target}. Payloads: ${fuzzerPayloads.length}`);
         const iframe = document.createElement('iframe');
-        iframe.id = 'targetFrame'; // Use standard ID
+        iframe.id = 'targetFrame';
         iframe.src = config.target;
         iframe.sandbox = "allow-scripts allow-modals allow-same-origin allow-popups allow-forms allow-top-navigation";
         const container = document.getElementById('targetFrameContainer');
@@ -459,13 +454,13 @@
         console.log("[Fuzzer Env] Received autoStart=true in config. Starting fuzzing.");
         setTimeout(startFuzzing, 500);
       } else {
-        setButtonState(false, fuzzerPayloads.length === 0); // Ensure start button is enabled if payloads exist
+        setButtonState(false, fuzzerPayloads.length === 0);
       }
 
     } catch (error) {
       updateStatus(`Fatal Error in Fuzzer Environment: ${error.message}`, true);
       console.error('Fatal Error in Fuzzer Environment:', error);
-      setButtonState(false, true); // Disable all buttons on fatal error
+      setButtonState(false, true);
     }
   });
 </script>
