@@ -579,3 +579,16 @@ body {
 .filter-toggle-button.active:hover {
     background-color: var(--accent-primary-hover);
 }
+.version-info {
+    padding: 5px 10px;
+    font-size: 0.8em;
+    color: var(--text-secondary);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+#check-version-button {
+    padding: 2px 6px;
+    font-size: 0.9em;
+    margin-left: 5px;
+}

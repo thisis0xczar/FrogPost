@@ -21,6 +21,7 @@ const log = {
 };
 window.log = log;
 
+let currentVersion = 'N/A';
 const endpointsWithDetectedHandlers = new Set();
 const knownHandlerEndpoints = new Set();
 const endpointsWithHandlers = new Set();
@@ -46,6 +47,94 @@ function printBanner() {
                  |___/
 `, 'color: #4dd051; font-weight: bold;');
     log.info('Initializing dashboard...');
+}
+
+function displayCurrentVersion() {
+    const versionDisplay = document.getElementById('current-version-display');
+    try {
+        currentVersion = chrome.runtime.getManifest().version;
+        if (versionDisplay) {
+            versionDisplay.textContent = currentVersion;
+        } else {
+            log.error("Version display element not found");
+        }
+    } catch (e) {
+        log.error("Failed to get manifest version", e);
+        if (versionDisplay) {
+            versionDisplay.textContent = 'Error';
+        }
+    }
+}
+
+async function checkLatestVersion() {
+    const checkButton = document.getElementById('check-version-button');
+    const statusDisplay = document.getElementById('update-status-display');
+    if (!checkButton || !statusDisplay) return;
+
+    checkButton.disabled = true;
+    checkButton.textContent = 'Checking...';
+    statusDisplay.textContent = '';
+    statusDisplay.style.color = '';
+
+    log.info('Checking for latest version via background script...');
+
+    try {
+        const releaseInfo = await new Promise((resolve, reject) => {
+            chrome.runtime.sendMessage({ type: "checkVersion" }, (response) => { // Use new message type
+                if (chrome.runtime.lastError) {
+                    reject(new Error(chrome.runtime.lastError.message || "Communication error"));
+                } else if (response?.success) {
+                    resolve(response);
+                } else {
+                    reject(new Error(response?.error || "Background script returned failure"));
+                }
+            });
+        });
+
+        if (!releaseInfo || !releaseInfo.tagName) {
+            throw new Error("Could not get valid release tag name from background script.");
+        }
+
+        const tagMatch = releaseInfo.tagName.match(/v?([\d.]+)/);
+        if (!tagMatch || !tagMatch[1]) {
+            throw new Error(`Could not parse version number from tag: ${releaseInfo.tagName}`);
+        }
+        const latestVersionTag = tagMatch[1];
+
+        const currentVersionNorm = currentVersion.toLowerCase().replace('v', '');
+
+        log.info(`Current version: ${currentVersionNorm}, Latest tag found on GitHub: ${latestVersionTag}`);
+
+        const currentParts = currentVersionNorm.split('.').map(Number);
+        const latestParts = latestVersionTag.split('.').map(Number);
+        let updateAvailable = false;
+
+        for (let i = 0; i < Math.max(currentParts.length, latestParts.length); i++) {
+            const currentPart = currentParts[i] || 0;
+            const latestPart = latestParts[i] || 0;
+            if (latestPart > currentPart) { updateAvailable = true; break; }
+            if (latestPart < currentPart) { break; }
+        }
+
+        if (updateAvailable) {
+            statusDisplay.innerHTML = `Update available: <a href="${releaseInfo.url || '#'}" target="_blank" title="Go to release page">v${latestVersionTag}</a>`;
+            statusDisplay.style.color = 'var(--success-color)';
+            showToastNotification(`Newer FrogPost version found: v${latestVersionTag}`, 'success');
+        } else {
+            statusDisplay.textContent = 'Up to date';
+            statusDisplay.style.color = 'var(--text-secondary)';
+            showToastNotification('FrogPost is up to date.', 'info');
+        }
+
+    } catch (error) {
+        log.error("Version check failed:", error);
+        statusDisplay.textContent = 'Check failed';
+        statusDisplay.style.color = 'var(--error-color)';
+        showToastNotification(`Version check failed: ${error.message}`, 'error');
+    } finally {
+        checkButton.disabled = false;
+        checkButton.textContent = 'Check Version';
+    }
 }
 
 function updateDebuggerModeButton() {
@@ -119,12 +208,6 @@ function normalizeEndpointUrl(url) {
             absUrl = 'https:' + url;
         }
 
-        if (!absUrl.startsWith('http://') && !absUrl.startsWith('https://')) {
-            if (!absUrl.startsWith('chrome-extension://') && !absUrl.startsWith('moz-extension://') ) {
-                log.debug(`[Normalize URL] Skipping URL constructor for non-web URL: ${url}`);
-            }
-            return { normalized: url, components: null, key: url };
-        }
 
         const obj = new URL(absUrl);
 
@@ -1437,6 +1520,9 @@ window.addProgressStyles = addProgressStyles;
 
 window.addEventListener('DOMContentLoaded', async () => {
     printBanner();
+    displayCurrentVersion();
+    document.getElementById('check-version-button')?.addEventListener('click', checkLatestVersion);
+
 
     const sidebarToggle = document.getElementById('sidebarToggle');
     const controlSidebar = document.getElementById('controlSidebar');

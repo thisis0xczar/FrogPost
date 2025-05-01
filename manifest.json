@@ -16,7 +16,8 @@
     "declarativeNetRequestFeedback"
   ],
   "host_permissions": [
-    "<all_urls>"
+    "<all_urls>",
+    "*://github.com/*"
   ],
   "options_page": "options/options.html",
   "background": {
