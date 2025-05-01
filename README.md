@@ -10,7 +10,7 @@ FrogPost is a powerful Chrome extension for testing and analyzing the security o
 
 ## Preview
 <p align="center" width="100%">
-    <img width="80%" src="FrogPost_hi.gif">
+    <img width="80%" src="FrogPost_final.gif">
 </p>
 
 ---
