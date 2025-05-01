@@ -1,7 +1,7 @@
 /**
  * FrogPost Extension
  * Originally Created by thisis0xczar/Lidor JFrog AppSec Team
- * Refined on: 2025-04-27
+ * Refined on: 2025-05-01
  */
 window.frogPostState = {
     frameConnections: new Map(),
@@ -34,7 +34,7 @@ const DEBOUNCE_DELAY = 150;
 let showOnlySilentIframes = false;
 let debuggerApiModeEnabled = false;
 const DEBUGGER_MODE_STORAGE_KEY = 'debuggerApiModeEnabled';
-
+const HANDLER_CONFIDENCE_THRESHOLD = 100;
 
 function printBanner() {
     console.log(`%c
@@ -109,14 +109,44 @@ function isValidUrl(url) {
 function normalizeEndpointUrl(url) {
     let absUrl = url;
     try {
-        if (!url || typeof url !== 'string' || ['access-denied-or-invalid', 'unknown-origin', 'null'].includes(url)) return { normalized: url, components: null, key: url };
-        if (!url.includes('://') && !url.startsWith('//')) absUrl = 'https:' + url;
-        else if (url.startsWith('//')) absUrl = 'https:' + url;
+        if (!url || typeof url !== 'string' || url.length < 5 || ['access-denied-or-invalid', 'unknown-origin', 'null'].includes(url)) {
+            return { normalized: url, components: null, key: url };
+        }
+
+        if (!url.includes('://') && !url.startsWith('//')) {
+            absUrl = 'https://' + url; // Default to https if no protocol
+        } else if (url.startsWith('//')) {
+            absUrl = 'https:' + url;
+        }
+
+        if (!absUrl.startsWith('http://') && !absUrl.startsWith('https://')) {
+            if (!absUrl.startsWith('chrome-extension://') && !absUrl.startsWith('moz-extension://') ) {
+                log.debug(`[Normalize URL] Skipping URL constructor for non-web URL: ${url}`);
+            }
+            return { normalized: url, components: null, key: url };
+        }
+
         const obj = new URL(absUrl);
-        if (['about:', 'chrome:', 'moz-extension:', 'blob:', 'data:'].includes(obj.protocol)) return { normalized: url, components: null, key: url };
-        const origin = obj.origin || ''; const pathname = obj.pathname || ''; const search = obj.search || ''; const key = origin + pathname + search;
+
+        if (['about:', 'blob:', 'data:'].includes(obj.protocol)) {
+            return { normalized: url, components: null, key: url };
+        }
+
+        const origin = obj.origin || '';
+        const pathname = obj.pathname || '';
+        const search = obj.search || '';
+        const key = origin && pathname ? (origin + pathname + search) : url;
+
         return { normalized: key, components: { origin: origin, path: pathname, query: search, hash: obj.hash || '' }, key: key };
-    } catch (e) { log.error(`[Normalize URL] Error: "${e.message}".`, { originalInput: url, urlUsedInConstructor: absUrl }); return { normalized: url, components: null, key: url }; }
+
+    } catch (e) {
+        if (!absUrl || absUrl.startsWith('http://') || absUrl.startsWith('https://')) {
+            log.error(`[Normalize URL] Error: "${e.message}".`, { originalInput: url, urlUsedInConstructor: absUrl });
+        } else {
+            log.debug(`[Normalize URL] Expected constructor skip for: ${url}`);
+        }
+        return { normalized: url, components: null, key: url };
+    }
 }
 window.normalizeEndpointUrl = normalizeEndpointUrl;
 
@@ -192,7 +222,7 @@ window.updateButton = updateButton;
             log.success(`[Dashboard] Loaded ${window.endpointsWithDetectedHandlers.size} detected handler endpoints`);
         }
     } catch (e) {
-        log.error("[Dashboard] Failed loading handler_endpoint_keys:", e);
+        log.info("[Dashboard] Failed loading handler_endpoint_keys:", e);
     }
 })();
 
@@ -292,17 +322,147 @@ function showEditModal(messageObject) {
 }
 
 function createMessageElement(msg) {
-    const item = document.createElement('div'); item.classList.add('message-item'); item.setAttribute('data-message-id', msg.messageId); const source = msg?.origin || 'Unknown Source'; const target = msg?.destinationUrl || 'Unknown Target'; const type = msg?.messageType || 'Unknown Type'; const sanitizedData = sanitizeMessageData(msg.data); let dataForDisplay; try { dataForDisplay = typeof sanitizedData === 'string' ? sanitizedData : JSON.stringify(sanitizedData, null, 2); } catch (e) { dataForDisplay = String(sanitizedData); }
-    const header = document.createElement("div"); header.className = "message-header"; const originDisplay = normalizeEndpointUrl(source)?.normalized || source; const destDisplay = normalizeEndpointUrl(target)?.normalized || target; const messageTypeDisplay = type.replace(/\s+/g, '-').toLowerCase(); header.innerHTML = `<strong>Origin:</strong> ${escapeHTML(originDisplay)}<br><strong>Destination:</strong> ${escapeHTML(destDisplay)}<br><strong>Time:</strong> ${new Date(msg.timestamp).toLocaleString()}<br><strong>Msg Type:</strong> <span class="message-type message-type-${messageTypeDisplay}">${escapeHTML(type)}</span>`;
-    const dataPre = document.createElement("pre"); dataPre.className = "message-data"; dataPre.textContent = dataForDisplay; const controls = document.createElement("div"); controls.className = "message-controls"; const originBtn = document.createElement("button"); originBtn.className = "send-origin"; originBtn.textContent = "Resend to Origin"; originBtn.addEventListener('click', () => sendMessageTo(getStorageKeyForUrl(source), originBtn)); const destBtn = document.createElement("button"); destBtn.className = "send-destination"; destBtn.textContent = "Resend to Destination"; destBtn.addEventListener('click', () => sendMessageTo(getStorageKeyForUrl(target), destBtn)); const editBtn = document.createElement("button"); editBtn.className = "edit-send"; editBtn.textContent = "Edit & Send"; editBtn.addEventListener('click', () => showEditModal(msg)); controls.appendChild(originBtn); controls.appendChild(destBtn); controls.appendChild(editBtn); item.appendChild(header); item.appendChild(dataPre); item.appendChild(controls); return item;
+    const item = document.createElement('div');
+    item.classList.add('message-item');
+    item.setAttribute('data-message-id', msg.messageId);
+
+    const source = msg?.origin || 'Unknown Source';
+    const target = msg?.destinationUrl || 'Unknown Target';
+    const type = msg?.messageType || 'Unknown Type';
+    const rawData = msg.data;
+    const sanitizedData = sanitizeMessageData(rawData);
+
+    let dataForDisplay;
+    try {
+        dataForDisplay = typeof sanitizedData === 'string' ? sanitizedData : JSON.stringify(sanitizedData, null, 2);
+    } catch (e) {
+        dataForDisplay = String(sanitizedData);
+    }
+
+    const header = document.createElement("div");
+    header.className = "message-header";
+    const originDisplay = normalizeEndpointUrl(source)?.normalized || source;
+    const destDisplay = normalizeEndpointUrl(target)?.normalized || target;
+    const messageTypeDisplay = String(type).replace(/\s+/g, '-').toLowerCase(); // Ensure type is string
+    header.innerHTML = `<strong>Origin:</strong> ${escapeHTML(originDisplay)}<br><strong>Destination:</strong> ${escapeHTML(destDisplay)}<br><strong>Time:</strong> ${new Date(msg.timestamp).toLocaleString()}<br><strong>Msg Type:</strong> <span class="message-type message-type-${messageTypeDisplay}">${escapeHTML(type)}</span>`;
+
+    const dataPre = document.createElement("pre");
+    dataPre.className = "message-data";
+    dataPre.textContent = dataForDisplay;
+
+    const controls = document.createElement("div");
+    controls.className = "message-controls";
+
+    const originBtn = document.createElement("button");
+    originBtn.className = "send-origin";
+    originBtn.textContent = "Resend to Origin";
+    originBtn.addEventListener('click', () => sendMessageTo(getStorageKeyForUrl(source), originBtn));
+
+    const destBtn = document.createElement("button");
+    destBtn.className = "send-destination";
+    destBtn.textContent = "Resend to Destination";
+    destBtn.addEventListener('click', () => sendMessageTo(getStorageKeyForUrl(target), destBtn));
+
+    const editBtn = document.createElement("button");
+    editBtn.className = "edit-send";
+    editBtn.textContent = "Edit & Send";
+    editBtn.addEventListener('click', () => showEditModal(msg));
+
+    const copyBtn = document.createElement("button");
+    copyBtn.className = "copy-data";
+    copyBtn.textContent = "Copy Data";
+    copyBtn.addEventListener('click', (event) => {
+        const buttonElement = event.target;
+        let dataToCopy;
+        try {
+            dataToCopy = (typeof rawData === 'string' || typeof rawData === 'number' || typeof rawData === 'boolean' || rawData === null)
+                ? String(rawData ?? '')
+                : JSON.stringify(rawData, null, 2);
+        } catch (e) {
+            dataToCopy = String(rawData);
+        }
+
+        navigator.clipboard.writeText(dataToCopy).then(() => {
+            const originalText = buttonElement.textContent;
+            buttonElement.textContent = 'Copied!';
+            buttonElement.classList.add('success');
+            setTimeout(() => {
+                buttonElement.textContent = originalText;
+                buttonElement.classList.remove('success');
+            }, 1500);
+        }).catch(err => {
+            const originalText = buttonElement.textContent;
+            buttonElement.textContent = 'Error!';
+            buttonElement.classList.add('error');
+            log.error("Failed to copy data:", err);
+            showToastNotification("Failed to copy data to clipboard.", "error");
+            setTimeout(() => {
+                buttonElement.textContent = originalText;
+                buttonElement.classList.remove('error');
+            }, 2000);
+        });
+    });
+
+    controls.appendChild(originBtn);
+    controls.appendChild(destBtn);
+    controls.appendChild(copyBtn);
+    controls.appendChild(editBtn);
+    
+    item.appendChild(header);
+    item.appendChild(dataPre);
+    item.appendChild(controls);
+
+    return item;
 }
 
 function updateMessageListForUrl(url) {
-    const messageList = document.getElementById('messagesList'); if (!messageList) return; const noMessagesDiv = messageList.querySelector('.no-messages'); messageList.querySelectorAll('.message-item').forEach(item => item.remove());
-    if (!url) { if (noMessagesDiv) { noMessagesDiv.style.display = 'block'; noMessagesDiv.textContent = 'Select an endpoint to view messages.'; } return; }
-    const normalizedUrlKey = getStorageKeyForUrl(url); const filteredMessages = window.frogPostState.messages.filter(msg => { if (!msg) return false; const originKey = msg.origin ? getStorageKeyForUrl(msg.origin) : null; const destKey = msg.destinationUrl ? getStorageKeyForUrl(msg.destinationUrl) : null; return originKey === normalizedUrlKey || destKey === normalizedUrlKey; });
-    if (filteredMessages.length === 0) { if (noMessagesDiv) { noMessagesDiv.style.display = 'block'; noMessagesDiv.textContent = `No messages found involving endpoint: ${url}`; } }
-    else { if (noMessagesDiv) noMessagesDiv.style.display = 'none'; const sortedMessages = [...filteredMessages].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp)); sortedMessages.forEach(msg => { const messageElement = createMessageElement(msg); if (messageElement) messageList.appendChild(messageElement); }); }
+    const messageList = document.getElementById('messagesList');
+    if (!messageList) return;
+    const noMessagesDiv = messageList.querySelector('.no-messages');
+    messageList.querySelectorAll('.message-item').forEach(item => item.remove());
+
+    const TEST_MESSAGE_KEY = "FrogPost";
+    const TEST_MESSAGE_VALUE = "BreakpointTest";
+
+    if (!url) {
+        if (noMessagesDiv) {
+            noMessagesDiv.style.display = 'block';
+            noMessagesDiv.textContent = 'Select an endpoint to view messages.';
+        }
+        return;
+    }
+
+    const normalizedUrlKey = getStorageKeyForUrl(url);
+    const relatedMessages = window.frogPostState.messages.filter(msg => {
+        if (!msg) return false;
+        const originKey = msg.origin ? getStorageKeyForUrl(msg.origin) : null;
+        const destKey = msg.destinationUrl ? getStorageKeyForUrl(msg.destinationUrl) : null;
+        return originKey === normalizedUrlKey || destKey === normalizedUrlKey;
+    });
+
+    const filteredMessagesToDisplay = relatedMessages.filter(msg => {
+        return !(typeof msg.data === 'object' && msg.data !== null && msg.data.hasOwnProperty(TEST_MESSAGE_KEY) && msg.data[TEST_MESSAGE_KEY] === TEST_MESSAGE_VALUE);
+    });
+
+
+    if (filteredMessagesToDisplay.length === 0) {
+        if (noMessagesDiv) {
+            noMessagesDiv.style.display = 'block';
+            const totalRelatedCount = relatedMessages.length;
+            if (totalRelatedCount > 0) { // If the only message was the test message
+                noMessagesDiv.textContent = `No organic messages found involving endpoint: ${url} (Internal test messages hidden).`;
+            } else {
+                noMessagesDiv.textContent = `No messages found involving endpoint: ${url}`;
+            }
+        }
+    } else {
+        if (noMessagesDiv) noMessagesDiv.style.display = 'none';
+        const sortedMessages = [...filteredMessagesToDisplay].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+        sortedMessages.forEach(msg => {
+            const messageElement = createMessageElement(msg);
+            if (messageElement) messageList.appendChild(messageElement);
+        });
+    }
 }
 
 function setActiveUrl(url) {
@@ -327,7 +487,7 @@ function createActionButtonContainer(endpointKey) {
     reportButton.setAttribute("data-endpoint", endpointKey);
 
     const isExtensionUrl = endpointKey.startsWith('chrome-extension://');
-    const handlerExists = endpointsWithDetectedHandlers.has(endpointKey); // Use the dashboard's Set
+    const handlerExists = endpointsWithDetectedHandlers.has(endpointKey);
     const traceInfo = traceButtonStates.get(endpointKey);
     const reportInfo = reportButtonStates.get(endpointKey);
 
@@ -508,21 +668,79 @@ function updateEndpointCounts() {
 
 function initializeMessageHandling() {
     chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-        if (!message?.type) return false; let needsUiUpdate = false;
+        if (!message?.type) return false;
+        let needsUiUpdate = false;
+        const TEST_MESSAGE_KEY = "FrogPost";
+        const TEST_MESSAGE_VALUE = "BreakpointTest";
+
         try {
             switch (message.type) {
-                case "newPostMessage": if (message.payload) { const newMsg = message.payload; const existingIndex = window.frogPostState.messages.findIndex(m => m.messageId === newMsg.messageId); if (existingIndex >= 0) window.frogPostState.messages[existingIndex] = newMsg; else window.frogPostState.messages.push(newMsg); needsUiUpdate = true; } break;
-                case "newFrameConnection": needsUiUpdate = true; break;
-                case "updateMessages": if (message.messages) { window.frogPostState.messages.length = 0; window.frogPostState.messages.push(...message.messages); needsUiUpdate = true; } break;
-                case "handlerCapturedForEndpoint": case "handlerEndpointDetected": if (message.payload?.endpointKey) { const key = message.payload.endpointKey; let addedNew = false; if (!endpointsWithHandlers.has(key)) { endpointsWithHandlers.add(key); addedNew = true; } if (!knownHandlerEndpoints.has(key)) { knownHandlerEndpoints.add(key); addedNew = true; } if(addedNew) needsUiUpdate = true; } break;
-            } if (needsUiUpdate) requestUiUpdate(); if (sendResponse) sendResponse({ success: true });
-        } catch (e) { log.error("[Dashboard Msg Handler] Error:", e); if (sendResponse) try { sendResponse({ success: false, error: e.message }); } catch(respErr){} } return true;
+                case "newPostMessage":
+                    if (message.payload) {
+                        const newMsg = message.payload;
+                        let isTestMessage = false;
+                        if (typeof newMsg.data === 'object' && newMsg.data !== null && newMsg.data.hasOwnProperty(TEST_MESSAGE_KEY) && newMsg.data[TEST_MESSAGE_KEY] === TEST_MESSAGE_VALUE) {
+                            isTestMessage = true;
+                            if(typeof log !== 'undefined') log.debug("[Message Listener] Ignoring internal breakpoint test message.");
+                        }
+
+                        if (!isTestMessage) {
+                            const existingIndex = window.frogPostState.messages.findIndex(m => m.messageId === newMsg.messageId);
+                            if (existingIndex >= 0) {
+                                window.frogPostState.messages[existingIndex] = newMsg;
+                            } else {
+                                window.frogPostState.messages.push(newMsg);
+                            }
+                            needsUiUpdate = true;
+                        }
+                    }
+                    break;
+                case "newFrameConnection":
+                    needsUiUpdate = true;
+                    break;
+                case "updateMessages":
+                    if (message.messages) {
+                        const filteredMessages = message.messages.filter(msg => !(typeof msg.data === 'object' && msg.data !== null && msg.data.hasOwnProperty(TEST_MESSAGE_KEY) && msg.data[TEST_MESSAGE_KEY] === TEST_MESSAGE_VALUE));
+                        window.frogPostState.messages.length = 0;
+                        window.frogPostState.messages.push(...filteredMessages);
+                        needsUiUpdate = true;
+                    }
+                    break;
+                case "handlerCapturedForEndpoint":
+                case "handlerEndpointDetected":
+                    if (message.payload?.endpointKey) {
+                        const key = message.payload.endpointKey;
+                        let addedNew = false;
+                        if (!endpointsWithHandlers.has(key)) { endpointsWithHandlers.add(key); addedNew = true; }
+                        if (!knownHandlerEndpoints.has(key)) { knownHandlerEndpoints.add(key); addedNew = true; }
+                        if(addedNew) needsUiUpdate = true;
+                    }
+                    break;
+            }
+            if (needsUiUpdate) requestUiUpdate();
+            if (sendResponse) { Promise.resolve().then(() => sendResponse({success: true})); return true; }
+
+        } catch (e) {
+            log.error("[Dashboard Msg Handler] Error:", e);
+            if (sendResponse) try { sendResponse({ success: false, error: e.message }); } catch(respErr){}
+        }
+        return true;
     });
+
     window.traceReportStorage.listAllReports().then(() => {
         chrome.runtime.sendMessage({ type: "fetchInitialState" }, (response) => {
             if (chrome.runtime.lastError) { log.error("[MsgListener] Error receiving fetchInitialState response:", chrome.runtime.lastError.message); requestUiUpdate(); return; }
-            if (response?.success) { if (response.messages) { window.frogPostState.messages.length = 0; window.frogPostState.messages.push(...response.messages); } if (response.handlerEndpointKeys) { knownHandlerEndpoints.clear(); endpointsWithHandlers.clear(); response.handlerEndpointKeys.forEach(key => { knownHandlerEndpoints.add(key); endpointsWithHandlers.add(key); }); } requestUiUpdate(); }
-            else { log.error("Failed to fetch initial state:", response?.error); requestUiUpdate(); }
+            if (response?.success) {
+                const TEST_MESSAGE_KEY = "FrogPost";
+                const TEST_MESSAGE_VALUE = "BreakpointTest";
+                if (response.messages) {
+                    const filteredMessages = response.messages.filter(msg => !(typeof msg.data === 'object' && msg.data !== null && msg.data.hasOwnProperty(TEST_MESSAGE_KEY) && msg.data[TEST_MESSAGE_KEY] === TEST_MESSAGE_VALUE));
+                    window.frogPostState.messages.length = 0;
+                    window.frogPostState.messages.push(...filteredMessages);
+                }
+                if (response.handlerEndpointKeys) { knownHandlerEndpoints.clear(); endpointsWithHandlers.clear(); response.handlerEndpointKeys.forEach(key => { knownHandlerEndpoints.add(key); endpointsWithHandlers.add(key); }); }
+                requestUiUpdate();
+            } else { log.error("Failed to fetch initial state:", response?.error); requestUiUpdate(); }
         });
     });
 }
@@ -658,8 +876,64 @@ async function saveRandomPostMessages(endpointKey, messagesToSave = null) {
     const storageKey = `saved-messages-${endpointKey}`; try { if (processedMessages.length > 0) await chrome.storage.local.set({ [storageKey]: processedMessages }); else await chrome.storage.local.remove(storageKey); return processedMessages; } catch (error) { log.error("Failed to save messages:", error); try { await chrome.storage.local.remove(storageKey); } catch {} return []; }
 }
 
-async function retrieveMessagesWithFallbacks(endpointKey) {
-    const primaryStorageKey = `saved-messages-${endpointKey}`; try { const result = await new Promise((resolve, reject) => { chrome.storage.local.get(primaryStorageKey, (storageResult) => { if (chrome.runtime.lastError) reject(chrome.runtime.lastError); else resolve(storageResult?.[primaryStorageKey] || null); }); }); if (result && Array.isArray(result) && result.length > 0) return result; else return []; } catch (e) { log.error(`[RetrieveMessages] Error for key ${primaryStorageKey}:`, e); return []; }
+async function retrieveMessagesWithFallbacks(primaryKey, originalKey = null) {
+    const storageKey = `saved-messages-${primaryKey}`;
+    let messages = [];
+    const keyToLog = originalKey || primaryKey;
+
+    try {
+        const result = await new Promise((resolve, reject) => {
+            chrome.storage.local.get(storageKey, (storageResult) => {
+                if (chrome.runtime.lastError) {
+                    log.warn(`[RetrieveMessages] Error getting from storage key ${storageKey}:`, chrome.runtime.lastError.message);
+                    resolve(null);
+                } else {
+                    resolve(storageResult?.[storageKey] || null);
+                }
+            });
+        });
+        if (result && Array.isArray(result) && result.length > 0) {
+            log.debug(`[RetrieveMessages] Retrieved ${result.length} messages from storage key ${storageKey} (for endpoint ${keyToLog})`);
+            messages = result;
+        }
+    } catch (e) {
+        log.error(`[RetrieveMessages] Error accessing storage for key ${storageKey} (for endpoint ${keyToLog}):`, e);
+    }
+
+    const retrievedMessageIds = new Set(messages.map(m => m.messageId));
+    const globalMessages = window.frogPostState.messages || [];
+
+    if(globalMessages.length > 0) {
+        log.debug(`[RetrieveMessages] Filtering ${globalMessages.length} global messages for endpoint ${keyToLog} using keys: Primary='${primaryKey}'${originalKey ? `, Original='${originalKey}'` : ''}`);
+        const fallbackKeys = new Set([primaryKey]);
+        if (originalKey && originalKey !== primaryKey) {
+            fallbackKeys.add(originalKey);
+        }
+
+        const filteredGlobalMessages = globalMessages.filter(msg => {
+            if (!msg || retrievedMessageIds.has(msg.messageId)) return false;
+            const originKey = msg.origin ? getStorageKeyForUrl(msg.origin) : null;
+            const destKey = msg.destinationUrl ? getStorageKeyForUrl(msg.destinationUrl) : null;
+            const originMatches = originKey && fallbackKeys.has(originKey);
+            const destMatches = destKey && fallbackKeys.has(destKey);
+            return originMatches || destMatches;
+        });
+
+        if(filteredGlobalMessages.length > 0){
+            log.debug(`[RetrieveMessages] Found ${filteredGlobalMessages.length} additional messages from global state for endpoint ${keyToLog}.`);
+            messages.push(...filteredGlobalMessages);
+            filteredGlobalMessages.forEach(m => retrievedMessageIds.add(m.messageId));
+        } else {
+            log.debug(`[RetrieveMessages] No additional messages found in global state for endpoint ${keyToLog}.`);
+        }
+    }
+
+
+    if (messages.length === 0) {
+        log.warn(`[RetrieveMessages] Retrieved 0 relevant messages for endpoint ${keyToLog} (Primary Key: ${primaryKey})`);
+    }
+
+    return messages.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
 }
 window.retrieveMessagesWithFallbacks = retrieveMessagesWithFallbacks;
 
@@ -667,45 +941,46 @@ async function showUrlModificationModal(originalUrl, failureReason) {
     return new Promise((resolve) => { const modalContainer = document.getElementById('urlModificationModalContainer'); if (!modalContainer) { resolve({ action: 'cancel', modifiedUrl: null }); return; } modalContainer.innerHTML = ''; const backdrop = document.createElement('div'); backdrop.className = 'modal-backdrop'; const modal = document.createElement('div'); modal.className = 'url-modification-modal'; let currentUrl = new URL(originalUrl); const params = new URLSearchParams(currentUrl.search); let paramInputs = {}; let paramsHTML = ''; if (Array.from(params.keys()).length > 0) { params.forEach((value, key) => { const inputId = `param-input-${key}`; paramsHTML += `<div class="url-param-row"><label for="${inputId}" class="url-param-label">${escapeHTML(key)}:</label><input type="text" id="${inputId}" class="url-param-input" value="${escapeHTML(value)}"></div>`; paramInputs[key] = inputId; }); } else paramsHTML = '<p class="url-modal-no-params">No query parameters found.</p>'; modal.innerHTML = `<div class="url-modal-header"><h4>Embedding Check Failed - Modify URL?</h4><button class="close-modal-btn">&times;</button></div><div class="url-modal-body"><p class="url-modal-reason"><strong>Reason:</strong> ${escapeHTML(failureReason)}</p><p class="url-modal-original"><strong>Original URL:</strong> <span class="url-display">${escapeHTML(originalUrl)}</span></p><hr><h5 class="url-modal-params-title">Edit Query Parameters:</h5><div class="url-params-editor">${paramsHTML}</div></div><div class="url-modal-footer"><button id="urlCancelBtn" class="control-button secondary-button">Cancel Analysis</button><button id="urlContinueBtn" class="control-button secondary-button orange-button">Analyze Original Anyway</button><button id="urlRetryBtn" class="control-button primary-button">Modify & Retry Analysis</button></div>`; modalContainer.appendChild(backdrop); modalContainer.appendChild(modal); const closeModal = (result) => { modalContainer.innerHTML = ''; resolve(result); }; modal.querySelector('.close-modal-btn').addEventListener('click', () => closeModal({ action: 'cancel', modifiedUrl: null })); backdrop.addEventListener('click', () => closeModal({ action: 'cancel', modifiedUrl: null })); modal.querySelector('#urlCancelBtn').addEventListener('click', () => closeModal({ action: 'cancel', modifiedUrl: null })); modal.querySelector('#urlContinueBtn').addEventListener('click', () => closeModal({ action: 'continue', modifiedUrl: originalUrl })); modal.querySelector('#urlRetryBtn').addEventListener('click', () => { const newParams = new URLSearchParams(); let changed = false; params.forEach((originalValue, key) => { const inputElement = document.getElementById(paramInputs[key]); const newValue = inputElement ? inputElement.value : originalValue; newParams.set(key, newValue); if (newValue !== originalValue) changed = true; }); if (!changed) { showToastNotification("No parameters were changed.", "info", 3000); return; } currentUrl.search = newParams.toString(); const modifiedUrlString = currentUrl.toString(); if (!isValidUrl(modifiedUrlString)) { showToastNotification("Modified URL is invalid.", "error", 4000); return; } closeModal({ action: 'retry', modifiedUrl: modifiedUrlString }); }); });
 }
 
-
 async function handlePlayButton(endpoint, button, skipCheck = false) {
     const originalFullEndpoint = endpoint;
     const endpointKey = button.getAttribute('data-endpoint');
-    if (!endpointKey) { log.error("[Play Button] No endpoint key found."); updateButton(button, 'error'); return; }
+    if (!endpointKey) {
+        log.error("[Play Button] No endpoint key found.");
+        updateButton(button, 'error');
+        return;
+    }
     const isExtensionUrl = endpointKey.startsWith('chrome-extension://');
     const handlerKnown = endpointsWithDetectedHandlers.has(endpointKey);
     const currentStateInfo = buttonStates.get(endpointKey);
-
-    if (isExtensionUrl && handlerKnown && currentStateInfo?.state !== 'launch') {
-        log.debug(`[Play Button] Handler already known via background detection for extension URL ${endpointKey}. Skipping discovery.`);
-        if (!button.classList.contains('success')) { updateButton(button, 'success'); }
-        const traceButton = button.closest('.button-container')?.querySelector('.iframe-trace-button');
-        if(traceButton?.classList.contains('disabled')) { updateTraceButton(traceButton, 'default', { showEmoji: true }); }
-        const reportButton = button.closest('.button-container')?.querySelector('.iframe-report-button');
-        if (reportButton){ const traceState = traceButtonStates.get(endpointKey)?.state; const reportState = reportButtonStates.get(endpointKey); const canReport = traceState === 'success' || traceState === 'green'; updateReportButton(reportButton, reportState || (canReport ? 'default' : 'disabled'), endpointKey); }
-        return;
-    }
+    const staticConfidenceThreshold = typeof HANDLER_CONFIDENCE_THRESHOLD !== 'undefined' ? HANDLER_CONFIDENCE_THRESHOLD : 100;
 
     if (currentStateInfo?.state === 'launch') {
-        if (launchInProgressEndpoints.has(endpointKey)) { log.debug(`[Play Button] Launch already in progress for ${endpointKey}`); return; }
+        if (launchInProgressEndpoints.has(endpointKey)) return;
         launchInProgressEndpoints.add(endpointKey);
-        const traceButton = button.closest('.button-container')?.querySelector('.iframe-trace-button');
         let launchSuccess = false;
         try {
             updateButton(button, 'launching', currentStateInfo.options);
             showToastNotification("Preparing Fuzzer Environment...", "info", 3000);
             const successfulUrlStorageKey = `successful-url-${endpointKey}`;
-            const successfulUrlResult = await new Promise(resolve => chrome.storage.local.get(successfulUrlStorageKey, resolve));
-            const successfulUrl = successfulUrlResult[successfulUrlStorageKey] || originalFullEndpoint;
-            const analysisKeyToUse = getStorageKeyForUrl(successfulUrl);
-            const [traceReport, storedPayloads, storedMessages] = await Promise.all([ window.traceReportStorage.getTraceReport(analysisKeyToUse), window.traceReportStorage.getReportPayloads(analysisKeyToUse), retrieveMessagesWithFallbacks(endpointKey) ]);
-            if (!traceReport) throw new Error(`No trace report found for ${analysisKeyToUse}. Run Play & Trace again.`);
+            let successfulUrlResult = await new Promise(resolve => chrome.storage.local.get(successfulUrlStorageKey, resolve));
+            let successfulUrl = successfulUrlResult[successfulUrlStorageKey];
+            let analysisKeyToUse = successfulUrl ? getStorageKeyForUrl(successfulUrl) : null;
+            if (!analysisKeyToUse) {
+                const mappingKey = `analyzed-url-for-${endpointKey}`;
+                const mappingResult = await new Promise(resolve => chrome.storage.local.get(mappingKey, resolve));
+                if (mappingResult && mappingResult[mappingKey]) {
+                    analysisKeyToUse = mappingResult[mappingKey];
+                    const mappedSuccessfulUrlKey = `successful-url-${analysisKeyToUse}`;
+                    successfulUrlResult = await new Promise(resolve => chrome.storage.local.get(mappedSuccessfulUrlKey, resolve));
+                    successfulUrl = successfulUrlResult[mappedSuccessfulUrlKey] || analysisKeyToUse;
+                } else { analysisKeyToUse = endpointKey; successfulUrl = originalFullEndpoint; }
+            }
+            const [traceReport, storedPayloads, storedMessages] = await Promise.all([ window.traceReportStorage.getTraceReport(analysisKeyToUse), window.traceReportStorage.getReportPayloads(analysisKeyToUse), retrieveMessagesWithFallbacks(analysisKeyToUse, endpointKey) ]);
+            if (!traceReport) throw new Error(`No trace report found for analysis key ${analysisKeyToUse}. Run Play & Trace again.`);
             const handlerCode = traceReport?.analyzedHandler?.handler || traceReport?.analyzedHandler?.code;
             if (!handlerCode) throw new Error('Handler code missing in trace report.');
             const payloads = storedPayloads || traceReport?.details?.payloads || traceReport?.payloads || [];
-            let messagesForFuzzer = [];
-            if (Array.isArray(storedMessages) && storedMessages.length > 0) { messagesForFuzzer = storedMessages; }
-            else if (traceReport?.details?.uniqueStructures) { messagesForFuzzer = traceReport.details.uniqueStructures.flatMap(s => s.examples || []); }
+            let messagesForFuzzer = Array.isArray(storedMessages) && storedMessages.length > 0 ? storedMessages : (traceReport?.details?.uniqueStructures ? traceReport.details.uniqueStructures.flatMap(s => s.examples || []) : []);
             const callbackStorageData = await new Promise(resolve => chrome.storage.session.get([CALLBACK_URL_STORAGE_KEY], resolve));
             const currentCallbackUrl = callbackStorageData[CALLBACK_URL_STORAGE_KEY] || null;
             const customPayloadsResult = await new Promise(resolve => chrome.storage.session.get('customXssPayloads', result => resolve(result.customXssPayloads)));
@@ -718,105 +993,175 @@ async function handlePlayButton(endpoint, button, skipCheck = false) {
         } finally {
             updateButton(button, launchSuccess ? 'launch' : 'error', { ...currentStateInfo?.options, errorMessage: launchSuccess ? undefined : 'Fuzzer launch failed' });
             launchInProgressEndpoints.delete(endpointKey);
-            setTimeout(requestUiUpdate, 100);
+            setTimeout(requestUiUpdate, 150);
         }
         return;
     }
+
 
     if (launchInProgressEndpoints.has(endpointKey)) return;
     launchInProgressEndpoints.add(endpointKey);
 
     const reportButton = button.closest('.button-container')?.querySelector('.iframe-report-button');
     let endpointUrlForAnalysis = originalFullEndpoint;
-    let analysisStorageKey = endpointKey;
+    let analysisStorageKey = getStorageKeyForUrl(endpointKey);
     let successfullyAnalyzedUrl = null;
     let handlerStateUpdated = false;
     let foundHandlerObject = null;
-    let originalMessages = [];
+    let analysisErrorMsg = '';
+    let performIframeCheck = false;
 
     try {
-        originalMessages = window.frogPostState.messages.filter(msg => { if (!msg?.origin || !msg?.destinationUrl) return false; const originKey = getStorageKeyForUrl(msg.origin); const destKey = getStorageKeyForUrl(msg.destinationUrl); return originKey === endpointKey || destKey === endpointKey; }).sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp)).slice(0, 50);
+        const originalMessages = await retrieveMessagesWithFallbacks(analysisStorageKey, endpointKey);
+        const testMessage = originalMessages.length > 0 ? originalMessages[0].data : {"FrogPost": "BreakpointTest"};
 
-        if (!skipCheck && !isExtensionUrl) { // Embedding check ONLY for non-extension URLs
-            updateButton(button, 'csp'); let cspResult = await performEmbeddingCheck(endpointUrlForAnalysis);
+        if (!skipCheck && !isExtensionUrl) {
+            updateButton(button, 'csp');
+            let cspResult;
+            try {
+                cspResult = await performEmbeddingCheck(endpointUrlForAnalysis);
+            } catch (headError) {
+                log.warn(`[Play] Initial HEAD request failed: ${headError.message}. Will try iframe check.`);
+                cspResult = { status: `HEAD Error: ${headError.message}`, className: 'yellow', embeddable: false };
+                performIframeCheck = true;
+            }
+
             if (!cspResult.embeddable) {
                 log.warn(`[Play] Embedding check failed for ${endpointUrlForAnalysis}: ${cspResult.status}`);
-                const isCspOrXfoError = cspResult.status.includes('X-Frame-Options') || cspResult.status.includes('CSP');
-                showToastNotification(`Embedding check failed: ${cspResult.status}`, 'error');
-                if (isCspOrXfoError) {
+                const statusString = String(cspResult.status).toLowerCase();
+                if (statusString.includes('404') || statusString.includes('405') || statusString.includes('403') || performIframeCheck) {
+                    log.info(`[Play] HEAD check failed (${cspResult.status}), attempting sandboxed iframe check as fallback...`);
+                    showToastNotification("HEAD check failed, trying iframe check...", "info", 4000);
+                    const iframeEmbeddable = await checkEmbeddingWithSandboxedIframe(endpointUrlForAnalysis);
+                    if (iframeEmbeddable) {
+                        log.success(`[Play] Iframe check suggests embeddable despite HEAD failure for ${endpointUrlForAnalysis}. Proceeding.`);
+                        successfullyAnalyzedUrl = endpointUrlForAnalysis;
+                        analysisStorageKey = getStorageKeyForUrl(successfullyAnalyzedUrl);
+                    } else {
+                        log.error(`[Play] Fallback iframe check also indicates non-embeddable for ${endpointUrlForAnalysis}.`);
+                        updateButton(button, 'error', { errorMessage: `HEAD failed & iframe blocked` });
+                        throw new Error("HEAD check failed and iframe check also failed.");
+                    }
+                } else if (cspResult.status.includes('X-Frame-Options') || cspResult.status.includes('CSP')) {
+                    showToastNotification(`Embedding check failed: ${cspResult.status}`, 'error');
                     const modalResult = await showUrlModificationModal(endpointUrlForAnalysis, cspResult.status);
                     if (modalResult.action === 'cancel') { updateButton(button, 'start'); throw new Error("User cancelled analysis"); }
                     else if (modalResult.action === 'continue') { successfullyAnalyzedUrl = endpointUrlForAnalysis; analysisStorageKey = getStorageKeyForUrl(successfullyAnalyzedUrl); updateButton(button, 'warning', { errorMessage: 'Proceeding despite embedding failure' }); throw new Error("Proceeding despite embedding failure (analysis skipped)"); }
-                    else if (modalResult.action === 'retry') { endpointUrlForAnalysis = modalResult.modifiedUrl; analysisStorageKey = getStorageKeyForUrl(endpointUrlForAnalysis); updateButton(button, 'csp'); cspResult = await performEmbeddingCheck(endpointUrlForAnalysis); if (!cspResult.embeddable) { updateButton(button, 'error', { errorMessage: `Modified URL failed check: ${cspResult.status}` }); throw new Error("Modified URL failed embedding check"); } successfullyAnalyzedUrl = endpointUrlForAnalysis; }
-                    else { updateButton(button, 'start'); throw new Error("Embedding check failed - Unknown modal action"); }
-                } else { updateButton(button, 'error', { errorMessage: cspResult.status }); throw new Error(`Embedding check failed: ${cspResult.status}`); }
-            } else { successfullyAnalyzedUrl = endpointUrlForAnalysis; analysisStorageKey = getStorageKeyForUrl(successfullyAnalyzedUrl); }
+                    else if (modalResult.action === 'retry') {
+                        endpointUrlForAnalysis = modalResult.modifiedUrl;
+                        analysisStorageKey = getStorageKeyForUrl(endpointUrlForAnalysis);
+                        updateButton(button, 'csp');
+                        cspResult = await performEmbeddingCheck(endpointUrlForAnalysis);
+                        if (!cspResult.embeddable) {
+                            updateButton(button, 'error', { errorMessage: `Modified URL failed check: ${cspResult.status}` });
+                            throw new Error("Modified URL failed embedding check");
+                        }
+                        successfullyAnalyzedUrl = endpointUrlForAnalysis;
+                    } else { updateButton(button, 'start'); throw new Error("Embedding check failed - Unknown modal action"); }
+                } else {
+                    updateButton(button, 'error', { errorMessage: cspResult.status });
+                    throw new Error(`Embedding check failed: ${cspResult.status}`);
+                }
+            } else {
+                successfullyAnalyzedUrl = endpointUrlForAnalysis;
+                analysisStorageKey = getStorageKeyForUrl(successfullyAnalyzedUrl);
+                log.success(`[Play] HEAD check passed for ${successfullyAnalyzedUrl}`);
+            }
         } else {
             successfullyAnalyzedUrl = endpointUrlForAnalysis;
             analysisStorageKey = getStorageKeyForUrl(successfullyAnalyzedUrl);
         }
 
+        if (!successfullyAnalyzedUrl) {
+            throw new Error("Failed to determine a valid URL for analysis after checks.");
+        }
+
         updateButton(button, 'analyze');
         await saveRandomPostMessages(endpointKey, originalMessages);
-        const successfulUrlStorageKey = `successful-url-${endpointKey}`;
+        const successfulUrlStorageKey = `successful-url-${analysisStorageKey}`;
         await chrome.storage.local.set({ [successfulUrlStorageKey]: successfullyAnalyzedUrl });
 
-        const runtimeListenerKey = `runtime-listeners-${endpointKey}`;
-        const runtimeResult = await new Promise(resolve => chrome.storage.local.get(runtimeListenerKey, resolve));
-        const runtimeListeners = runtimeResult ? runtimeResult[runtimeListenerKey] : null;
-        const validRuntimeListeners = runtimeListeners?.filter(l => l?.code && typeof l.code === 'string' && !l.code.includes('[native code]') && l.code.length > 25) || [];
-        const scoringMessages = originalMessages;
-
-        if (validRuntimeListeners.length > 0) {
-            const scorer = new HandlerExtractor().initialize(successfullyAnalyzedUrl, scoringMessages);
-            let bestScore = -1; let bestListener = null;
-            validRuntimeListeners.forEach(listener => { let handlerInfo = { handler: listener.code, category: listener.category || 'runtime-captured', source: listener.source || 'runtime', handlerNode: null, fullScriptContent: listener.code }; const score = scorer.scoreHandler(handlerInfo); if (score > bestScore) { bestScore = score; bestListener = listener; } });
-            if (bestListener) foundHandlerObject = { handler: bestListener.code, category: bestListener.category || 'runtime-best-scored', score: bestScore, source: `runtime: ${bestListener.context || bestListener.source || 'unknown'}`, timestamp: bestListener.timestamp, stack: bestListener.stack, context: bestListener.context };
-            else foundHandlerObject = null;
+        const extractor = new HandlerExtractor().initialize(successfullyAnalyzedUrl, originalMessages);
+        let potentialHandlers = [];
+        let discoveryErrorMsg = '';
+        log.debug(`[Play] Attempting initial handler discovery for ${successfullyAnalyzedUrl}`);
+        try {
+            if (!isExtensionUrl) {
+                potentialHandlers = await extractor.extractDynamicallyViaDebugger(successfullyAnalyzedUrl);
+                if (potentialHandlers.length === 0) log.warn("[Play] Initial dynamic discovery found no handlers.");
+                else log.info(`[Play] Initial dynamic discovery found ${potentialHandlers.length} potential handlers.`);
+            } else { log.info("[Play] Skipping initial dynamic discovery for extension URL."); }
+        } catch (discoveryError) {
+            log.error(`[Play] Initial handler discovery failed:`, discoveryError);
+            discoveryErrorMsg = discoveryError.message; potentialHandlers = [];
         }
 
-        if (!foundHandlerObject && !isExtensionUrl) {
+        if (potentialHandlers && potentialHandlers.length > 0 && !isExtensionUrl) {
+            log.info(`[Play] Attempting breakpoint execution confirmation for ${potentialHandlers.length} candidates...`);
+            showToastNotification(`Confirming handler via breakpoints...`, 'info', 10000);
+            updateButton(button, 'analyze');
             try {
-                const extractor = new HandlerExtractor().initialize(successfullyAnalyzedUrl, scoringMessages);
-                showToastNotification('Attaching debugger to analyze scripts...', 'info', 10000);
-                const dynamicHandlers = await extractor.extractDynamicallyViaDebugger(successfullyAnalyzedUrl);
-                if (dynamicHandlers && dynamicHandlers.length > 0) {
-                    foundHandlerObject = extractor.getBestHandler(dynamicHandlers);
-                    if (foundHandlerObject) foundHandlerObject.category = foundHandlerObject.category ? `debugger-${foundHandlerObject.category}` : 'debugger-extracted';
-                    else foundHandlerObject = null;
-                } else foundHandlerObject = null;
-            } catch (extractionError) { log.error(`[Play] Debugger extraction failed:`, extractionError); foundHandlerObject = null; }
+                potentialHandlers.forEach(h => { if (!h.handler && h.fullScriptContent && h.handlerNode) { try { h.handler = h.fullScriptContent.substring(h.handlerNode.start, h.handlerNode.end); } catch {} } });
+                const validCandidates = potentialHandlers.filter(h => h.handler);
+                if (validCandidates.length === 0) throw new Error("No valid handler candidates with code found for breakpoint setting.");
+                foundHandlerObject = await extractor.confirmHandlerViaBreakpointExecution(successfullyAnalyzedUrl, validCandidates, testMessage);
+                log.debug('[Play] Result from confirmHandlerViaBreakpointExecution:', foundHandlerObject ? { category: foundHandlerObject.category, hasHandler: !!foundHandlerObject.handler, score: foundHandlerObject.score } : null);
+                if (foundHandlerObject) { log.success(`[Play] Handler confirmed via breakpoint execution.`); }
+                else { log.warn(`[Play] Breakpoint confirmation did not identify a single handler. Falling back to scoring.`); foundHandlerObject = extractor.getBestHandler(potentialHandlers); if(foundHandlerObject) log.info(`[Play] Selected best handler via scoring fallback.`); else log.warn(`[Play] Scoring fallback also failed to select a handler.`); }
+            } catch (breakpointError) {
+                log.error(`[Play] Breakpoint confirmation failed:`, breakpointError); analysisErrorMsg = breakpointError.message; log.info(`[Play] Falling back to scoring potential handlers due to breakpoint error.`); foundHandlerObject = extractor.getBestHandler(potentialHandlers); if(!foundHandlerObject) log.warn(`[Play] Scoring fallback also failed to select a handler after breakpoint error.`);
+            }
+        } else if (potentialHandlers && potentialHandlers.length > 0) {
+            log.info(`[Play] Skipping breakpoint confirmation (Extension URL or no initial candidates). Selecting best via scoring.`);
+            foundHandlerObject = extractor.getBestHandler(potentialHandlers);
+        } else {
+            log.warn(`[Play] No potential handlers found during initial discovery. ${discoveryErrorMsg}`);
+            analysisErrorMsg = discoveryErrorMsg || 'No potential handlers found.'; foundHandlerObject = null;
         }
 
+        log.debug(`[Play] Final check. foundHandlerObject is null? ${foundHandlerObject === null}. Has .handler prop? ${foundHandlerObject ? !!foundHandlerObject.handler : 'N/A'}`);
         if (foundHandlerObject?.handler) {
             const finalBestHandlerKey = `best-handler-${analysisStorageKey}`;
             try {
-                if (typeof window.analyzeHandlerStatically === 'function') {
-                    try {
-                        const quickAnalysis = window.analyzeHandlerStatically(foundHandlerObject.handler);
-                        if(quickAnalysis?.analysis?.identifiedEventParam) { foundHandlerObject.eventParamName = quickAnalysis.analysis.identifiedEventParam; }
-                    } catch (quickAnalysisError) { log.warn("Quick analysis for event param failed", quickAnalysisError);}
+                if (typeof window.analyzeHandlerStatically === 'function' && foundHandlerObject.handler) {
+                    try { const quickAnalysis = window.analyzeHandlerStatically(foundHandlerObject.handler); if (quickAnalysis?.analysis?.identifiedEventParam) foundHandlerObject.eventParamName = quickAnalysis.analysis.identifiedEventParam; }
+                    catch (quickAnalysisError) { log.warn("Quick analysis for event param failed", quickAnalysisError); }
                 }
+                if (analysisStorageKey !== endpointKey) {
+                    const mappingKey = `analyzed-url-for-${endpointKey}`;
+                    await chrome.storage.local.set({ [mappingKey]: analysisStorageKey });
+                    log.debug(`[Play] Stored mapping: ${mappingKey} -> ${analysisStorageKey}`);
+                } else { const mappingKey = `analyzed-url-for-${endpointKey}`; await chrome.storage.local.remove(mappingKey); }
                 await chrome.storage.local.set({ [finalBestHandlerKey]: foundHandlerObject });
-                const runtimeListKeyForUpdate = `runtime-listeners-${endpointKey}`;
-                try { const res = await new Promise(resolve => chrome.storage.local.get(runtimeListKeyForUpdate, resolve)); let listeners = res[runtimeListKeyForUpdate] || []; if (!listeners.some(l => l.code === foundHandlerObject.handler)) { listeners.push({ code: foundHandlerObject.handler, context: `selected-by-play (${foundHandlerObject.category})`, timestamp: Date.now(), source: foundHandlerObject.source }); if (listeners.length > 30) listeners = listeners.slice(-30); await chrome.storage.local.set({ [runtimeListKeyForUpdate]: listeners }); } if (!endpointsWithDetectedHandlers.has(endpointKey)) { endpointsWithDetectedHandlers.add(endpointKey); handlerStateUpdated = true; } } catch (e) { log.error("Failed updating runtime list after selection", e); }
+                if (!endpointsWithDetectedHandlers.has(endpointKey)) { endpointsWithDetectedHandlers.add(endpointKey); handlerStateUpdated = true; }
+                log.success(`[Play] Successfully identified and saved handler for ${analysisStorageKey}. Category: ${foundHandlerObject.category}, Score: ${foundHandlerObject.score ?? 'N/A'}`);
                 updateButton(button, 'success');
                 const traceButton = button.closest('.button-container')?.querySelector('.iframe-trace-button');
                 if (traceButton) updateTraceButton(traceButton, 'default', { showEmoji: true });
                 if (reportButton) updateReportButton(reportButton, 'disabled', originalFullEndpoint);
-            } catch (storageError) { log.error(`Failed to save handler (${finalBestHandlerKey}):`, storageError); updateButton(button, 'error', {errorMessage: 'Failed to save handler'}); const traceButton = button.closest('.button-container')?.querySelector('.iframe-trace-button'); if (traceButton) updateTraceButton(traceButton, 'disabled'); if (reportButton) updateReportButton(reportButton, 'disabled', originalFullEndpoint); }
-        } else {
-            if (!isExtensionUrl) {
-                const failureMessage = `No usable handler found for ${endpointUrlForAnalysis}.`; updateButton(button, 'warning', { errorMessage: "No handler function found" }); const traceButton = button.closest('.button-container')?.querySelector('.iframe-trace-button'); if (traceButton) updateTraceButton(traceButton, 'disabled'); if (reportButton) updateReportButton(reportButton, 'disabled', originalFullEndpoint);
+            } catch (storageError) {
+                log.error(`Failed to save handler (${finalBestHandlerKey}):`, storageError);
+                updateButton(button, 'error', { errorMessage: 'Failed to save handler' });
+                const traceButton = button.closest('.button-container')?.querySelector('.iframe-trace-button');
+                if (traceButton) updateTraceButton(traceButton, 'disabled');
+                if (reportButton) updateReportButton(reportButton, 'disabled', originalFullEndpoint);
             }
+        } else {
+            log.warn(`[Play] Final failure check: No usable handler object available.`);
+            const failureMessage = `No usable handler confirmed for ${endpointUrlForAnalysis}. ${analysisErrorMsg}`;
+            log.warn(`[Play] ${failureMessage}`);
+            updateButton(button, 'warning', { errorMessage: `No handler confirmed. ${analysisErrorMsg}`.trim() });
+            const traceButton = button.closest('.button-container')?.querySelector('.iframe-trace-button');
+            if (traceButton) updateTraceButton(traceButton, 'disabled');
+            if (reportButton) updateReportButton(reportButton, 'disabled', originalFullEndpoint);
         }
         if (handlerStateUpdated) requestUiUpdate();
 
     } catch (error) {
         log.error(`[Play Button Error] Unexpected error for ${originalFullEndpoint}:`, error.message, error.stack);
-        if (error.message === "Proceeding despite embedding failure (analysis skipped)") { log.info(`[Play] Process stopped for ${endpointKey}: ${error.message}`); showToastNotification('Analysis skipped due to embedding restrictions. Button set to warning.', 'warning', 6000); }
-        else if (["User cancelled analysis", "Modified URL failed embedding check"].includes(error.message) || error.message?.startsWith('Embedding check failed:') || error.message?.startsWith('Header check failed:')) { log.info(`[Play] Process stopped for ${endpointKey}: ${error.message}`); updateButton(button, 'start'); }
-        else { if(!button.classList.contains('error') && !button.classList.contains('warning')) { updateButton(button, 'error', { errorMessage: 'Analysis error occurred' }); } showToastNotification(`Analysis Error: ${error.message.substring(0, 100)}`, 'error'); }
+        if (error.message === "Proceeding despite embedding failure (analysis skipped)") { log.info(`[Play] Process stopped for ${endpointKey}: ${error.message}`); /* Button already set */ showToastNotification('Analysis skipped due to embedding restrictions. Button set to warning.', 'warning', 6000); }
+        else if (["User cancelled analysis", "Modified URL failed embedding check", "Embedding check failed and iframe check also failed."].includes(error.message) || error.message?.startsWith('Embedding check failed:') || error.message?.startsWith('Header check failed:')) { log.info(`[Play] Process stopped for ${endpointKey}: ${error.message}`); if (!button.classList.contains('error')) updateButton(button, 'start'); } // Reset to start only if not already error
+        else { if (!button.classList.contains('error') && !button.classList.contains('warning')) { updateButton(button, 'error', { errorMessage: 'Analysis error occurred' }); } showToastNotification(`Analysis Error: ${error.message.substring(0, 100)}`, 'error'); }
         const traceButton = button.closest('.button-container')?.querySelector('.iframe-trace-button');
         if (traceButton) updateTraceButton(traceButton, 'disabled');
         if (reportButton) updateReportButton(reportButton, 'disabled', originalFullEndpoint);
@@ -824,6 +1169,46 @@ async function handlePlayButton(endpoint, button, skipCheck = false) {
         launchInProgressEndpoints.delete(endpointKey);
         setTimeout(requestUiUpdate, 150);
     }
+}
+
+async function checkEmbeddingWithSandboxedIframe(url) {
+    return new Promise((resolve) => {
+        log.debug(`[Iframe Check] Attempting sandboxed iframe load for ${url}`);
+        let iframe = document.createElement('iframe');
+        iframe.sandbox = 'allow-scripts allow-modals allow-same-origin allow-popups allow-forms allow-top-navigation';
+        iframe.style.display = 'none';
+        let timeoutId = null;
+        let resolved = false;
+
+        const cleanup = (result) => {
+            if (resolved) return;
+            resolved = true;
+            clearTimeout(timeoutId);
+            iframe.onload = null;
+            iframe.onerror = null;
+            if (iframe.parentNode) {
+                iframe.parentNode.removeChild(iframe);
+            }
+            log.debug(`[Iframe Check] Result for ${url}: ${result}`);
+            resolve(result);
+        };
+
+        iframe.onload = () => {
+            cleanup(true);
+        };
+
+        iframe.onerror = () => {
+            cleanup(false);
+        };
+
+        timeoutId = setTimeout(() => {
+            log.warn(`[Iframe Check] Timeout waiting for iframe load/error for ${url}`);
+            cleanup(false);
+        }, 5000);
+
+        iframe.src = url;
+        document.body.appendChild(iframe);
+    });
 }
 
 function getRiskLevelAndColor(score) { if (score <= 20) return { riskLevel: 'Critical', riskColor: 'critical' }; if (score <= 40) return { riskLevel: 'High', riskColor: 'high' }; if (score <= 60) return { riskLevel: 'Medium', riskColor: 'medium' }; if (score <= 80) return { riskLevel: 'Low', riskColor: 'low' }; return { riskLevel: 'Good', riskColor: 'negligible' }; }
@@ -1018,7 +1403,7 @@ async function populateInitialHandlerStates() {
             });
         });
 
-        endpointsWithDetectedHandlers.clear(); // Clear dashboard's copy first
+        endpointsWithDetectedHandlers.clear();
 
         if (response?.success) {
             if (response.messages) {
@@ -1038,7 +1423,6 @@ async function populateInitialHandlerStates() {
         log.error("Error populating initial handler states:", error);
         endpointsWithDetectedHandlers.clear();
     }
-    // DO NOT trigger UI update here, let the main DOMContentLoaded flow handle it
 }
 
 const traceReportStyles = `.trace-results-panel {} .trace-panel-backdrop {} .trace-panel-header {} .trace-panel-close {} .trace-results-content {} .report-section { margin-bottom: 30px; padding: 20px; background: #1a1d21; border-radius: 8px; box-shadow: 0 2px 5px rgba(0, 0, 0, 0.3); border: 1px solid #333; } .report-section-title { margin-top: 0; padding-bottom: 10px; border-bottom: 1px solid #444; color: #00e1ff; font-size: 1.3em; font-weight: 600; text-shadow: 0 0 5px rgba(0, 225, 255, 0.5); } .report-subsection-title { margin-top: 0; color: #a8b3cf; font-size: 1.1em; margin-bottom: 10px; } .report-summary .summary-grid { display: grid; grid-template-columns: auto 1fr; gap: 25px; align-items: center; margin-bottom: 20px; } .security-score-container { display: flex; justify-content: center; } .security-score { width: 90px; height: 90px; border-radius: 50%; display: flex; flex-direction: column; justify-content: center; align-items: center; text-align: center; color: #fff; font-weight: bold; background: conic-gradient(#e74c3c 0% 20%, #e67e22 20% 40%, #f39c12 40% 60%, #3498db 60% 80%, #2ecc71 80% 100%); position: relative; border: 3px solid #555; box-shadow: inset 0 0 10px rgba(0,0,0,0.5); } .security-score::before { content: ''; position: absolute; inset: 5px; background: #1a1d21; border-radius: 50%; z-index: 1; } .security-score div { position: relative; z-index: 2; } .security-score-value { font-size: 28px; line-height: 1; } .security-score-label { font-size: 12px; margin-top: 3px; text-transform: uppercase; letter-spacing: 0.5px; } .security-score.critical { border-color: #e74c3c; } .security-score.high { border-color: #e67e22; } .security-score.medium { border-color: #f39c12; } .security-score.low { border-color: #3498db; } .security-score.negligible { border-color: #2ecc71; } .summary-metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px 20px; } .metric { background-color: #252a30; padding: 10px; border-radius: 4px; text-align: center; border: 1px solid #3a3f44; } .metric-label { display: block; font-size: 11px; color: #a8b3cf; margin-bottom: 4px; text-transform: uppercase; } .metric-value { display: block; font-size: 18px; font-weight: bold; color: #fff; } .recommendations { margin-top: 15px; padding: 15px; background: rgba(0, 225, 255, 0.05); border-radius: 4px; border-left: 3px solid #00e1ff; } .recommendation-text { color: #d0d8e8; font-size: 13px; line-height: 1.6; margin: 0; } .report-code-block { background: #111316; border: 1px solid #333; border-radius: 4px; padding: 12px; overflow-x: auto; margin: 10px 0; max-height: 300px; } .report-code-block pre { margin: 0; } .report-code-block code { font-family: 'Courier New', Courier, monospace; font-size: 13px; color: #c4c4c4; white-space: pre; } .report-handler .handler-meta { font-size: 0.8em; color: #777; margin-left: 10px; } details.report-details { background: #22252a; border: 1px solid #3a3f44; border-radius: 4px; margin-bottom: 10px; } summary.report-summary-toggle { cursor: pointer; padding: 10px 15px; display: flex; justify-content: space-between; align-items: center; font-weight: 600; color: #d0d8e8; } summary.report-summary-toggle:focus { outline: none; box-shadow: 0 0 0 2px rgba(0, 225, 255, 0.5); } details[open] > summary.report-summary-toggle { border-bottom: 1px solid #3a3f44; } .toggle-icon { font-size: 1.2em; transition: transform 0.2s; } details[open] .toggle-icon { transform: rotate(90deg); } .report-details > div { padding: 15px; } .report-table { width: 100%; border-collapse: collapse; margin: 15px 0; background-color: #22252a; } .report-table th, .report-table td { padding: 10px 12px; text-align: left; border: 1px solid #3a3f44; font-size: 13px; color: #d0d8e8; } .report-table th { background-color: #2c313a; font-weight: bold; color: #fff; } .report-table td code { font-size: 12px; color: #a8b3cf; background-color: #111316; padding: 2px 4px; border-radius: 3px; white-space: pre-wrap; word-break: break-all; } .report-table .context-snippet { max-width: 400px; white-space: pre-wrap; word-break: break-all; display: inline-block; vertical-align: middle; } .severity-badge { display: inline-block; padding: 3px 8px; border-radius: 12px; font-size: 11px; font-weight: bold; text-transform: uppercase; } .severity-critical { background-color: #e74c3c; color: white; } .severity-high { background-color: #e67e22; color: white; } .severity-medium { background-color: #f39c12; color: #333; } .severity-low { background-color: #3498db; color: white; } .severity-row-critical td { background-color: rgba(231, 76, 60, 0.15); } .severity-row-high td { background-color: rgba(230, 126, 34, 0.15); } .severity-row-medium td { background-color: rgba(243, 156, 18, 0.1); } .severity-row-low td { background-color: rgba(52, 152, 219, 0.1); } .no-findings-text { color: #777; font-style: italic; padding: 10px 0; } .dataflow-table td:first-child code { font-weight: bold; color: #ffb86c; } .report-list { max-height: 400px; overflow-y: auto; padding-right: 10px; } .payload-item, .structure-item { background: #22252a; border: 1px solid #3a3f44; border-radius: 4px; margin-bottom: 15px; overflow: hidden; } .payload-header { padding: 8px 12px; background-color: #2c313a; color: #a8b3cf; font-size: 12px; } .payload-header strong { color: #fff; } .payload-meta { color: #8be9fd; margin: 0 5px; } .payload-item .report-code-block { margin: 0; border: none; border-top: 1px solid #3a3f44; border-radius: 0 0 4px 4px; } .structure-content { padding: 15px; } .structure-content p { margin: 0 0 10px 0; color: #d0d8e8; font-size: 13px; } .structure-content strong { color: #00e1ff; } .structure-content code { color: #a8b3cf; background-color: #111316; padding: 2px 4px; border-radius: 3px; } .show-more-btn { display: block; width: 100%; margin-top: 15px; text-align: center; background-color: #343a42; border: 1px solid #4a5058; color: #a8b3cf; } .show-more-btn:hover { background-color: #4a5058; color: #fff; } .control-button {} .secondary-button {} .error-message { color: #e74c3c; font-weight: bold; padding: 15px; background-color: rgba(231, 76, 60, 0.1); border: 1px solid #e74c3c; border-radius: 4px; } span.highlight-finding { background-color: rgba(255, 0, 0, 0.3); color: #ffdddd; font-weight: bold; padding: 1px 2px; border-radius: 2px; border: 1px solid rgba(255, 100, 100, 0.5); }`;

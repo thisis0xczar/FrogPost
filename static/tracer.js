@@ -1,7 +1,7 @@
 /**
  * FrogPost Extension
  * Originally Created by thisis0xczar/Lidor JFrog AppSec Team
- * Refined on: 2025-04-27
+ * Refined on: 2025-05-01
  */
 
 const DATA_PROP = 'data';
@@ -200,15 +200,19 @@ class HandlerTracer {
         const safeStaticData = staticAnalysisData || {};
         let accessedEventDataPathsSet = safeStaticData.accessedEventDataPaths instanceof Set ? safeStaticData.accessedEventDataPaths : new Set(Array.isArray(safeStaticData.accessedEventDataPaths) ? safeStaticData.accessedEventDataPaths : []);
         const requiredConditionsForSinkPath = safeStaticData.requiredConditions || {};
-        const externalStateAccesses = safeStaticData.externalStateAccesses || []; const indirectCalls = safeStaticData.indirectCalls || []; const isStateDependentHandler = externalStateAccesses.length > 0 || indirectCalls.length > 0;
+        const externalStateAccesses = safeStaticData.externalStateAccesses || [];
+        const indirectCalls = safeStaticData.indirectCalls || [];
+        const isStateDependentHandler = externalStateAccesses.length > 0 || indirectCalls.length > 0;
         const analysisSucceeded = !!staticAnalysisData;
 
-        log.debug("[Payload Gen] Starting generation. Analysis succeeded:", analysisSucceeded);
-        log.debug("[Payload Gen] Required Conditions Map:", requiredConditionsForSinkPath);
-        log.debug("[Payload Gen] Accessed Paths (Set):", accessedEventDataPathsSet);
-        log.debug("[Payload Gen] Potential Sinks (from static analysis):", staticAnalysisData?.potentialSinks);
+        const generatedPayloads = [];
+        const handledSmartObjectPaths = new Set();
+        const handledDumbObjectPaths = new Set();
+        const handledTypePaths = new Set();
+        const handledStructureGuessPaths = new Set();
+        const handledRawStringSmart = new Set();
+        const handledRawStringDumb = new Set();
 
-        const generatedPayloads = []; const handledSmartObjectPaths = new Set(); const handledDumbObjectPaths = new Set(); const handledTypePaths = new Set(); const handledStructureGuessPaths = new Set(); const handledRawStringSmart = new Set(); const handledRawStringDumb = new Set();
         const shuffleArray = arr => [...arr].sort(() => 0.5 - Math.random());
         const { sinkCategoryToPayloadMap, customPayloadsActive, allCallbackPayloads, typeFuzzPayloads } = await this._getPayloadLists();
         let synthesizedBase = null;
@@ -225,32 +229,25 @@ class HandlerTracer {
 
         if (analysisSucceeded && staticAnalysisData) {
             try {
-                log.debug("[Payload Gen] Attempting structure synthesis from static analysis...");
                 const synthesizedStructureObject = this.createStructureFromStaticAnalysis(staticAnalysisData);
-                log.debug("[Payload Gen] Result of createStructureFromStaticAnalysis:", synthesizedStructureObject);
-
                 if (synthesizedStructureObject && typeof synthesizedStructureObject === 'object' && synthesizedStructureObject.fields?.size > 0) {
                     let synthesizedPaths = [];
                     try {
                         if (synthesizedStructureObject.properties) {
                             const extractPaths = (props, currentPrefix = '') => {
                                 Object.entries(props).forEach(([key, details]) => {
-                                    if (!details || typeof details !== 'object') { log.warn(`[Payload Gen] Invalid node detail found for key ${key} at path ${currentPrefix}`); return; }
+                                    if (!details || typeof details !== 'object') return;
                                     const newPath = currentPrefix ? `${currentPrefix}.${key}` : key;
                                     synthesizedPaths.push({ path: newPath, type: details.expectedType || 'unknown' });
-                                    if (details.properties && Object.keys(details.properties).length > 0) { extractPaths(details.properties, newPath); }
-                                    else if (details.itemDetails?.properties && Object.keys(details.itemDetails.properties).length > 0){ extractPaths(details.itemDetails.properties, `${newPath}[*]`); }
+                                    if (details.properties && Object.keys(details.properties).length > 0) extractPaths(details.properties, newPath);
+                                    else if (details.itemDetails?.properties && Object.keys(details.itemDetails.properties).length > 0) extractPaths(details.itemDetails.properties, `${newPath}[*]`);
                                 });
                             };
                             extractPaths(synthesizedStructureObject.properties);
                         } else if (synthesizedStructureObject.fields) {
                             synthesizedPaths.push(...Array.from(synthesizedStructureObject.fields).map(f => ({ path: f, type: 'unknown' })));
                         }
-                        log.debug(`[Payload Gen] Extracted ${synthesizedPaths.length} paths from synthesized structure.`);
-                    } catch (extractError) {
-                        log.error("[Payload Gen] Error during path extraction from synthesized structure:", extractError);
-                        synthesizedPaths = [];
-                    }
+                    } catch (extractError) { synthesizedPaths = []; }
 
                     if (synthesizedPaths.length > 0) {
                         synthesizedBase = {
@@ -259,235 +256,236 @@ class HandlerTracer {
                             baseObject: synthesizedStructureObject.example || {},
                             paths: synthesizedPaths
                         };
-                        log.success("[Payload Gen] Successfully created synthesized base object WITH paths.");
-                    } else {
-                        log.warn("[Payload Gen] Failed to extract paths from synthesized structure. Cannot use for smart fuzzing.");
-                        synthesizedBase = null;
-                    }
-                } else {
-                    log.warn("[Payload Gen] Static analysis/synthesis did not yield a usable structure object.");
-                    synthesizedBase = null;
-                }
-            } catch(e) {
-                log.error("[Payload Gen] Error during structure synthesis block:", e);
-                synthesizedBase = null;
-            }
+                    } else { synthesizedBase = null; }
+                } else { synthesizedBase = null; }
+            } catch(e) { synthesizedBase = null; }
         }
 
         const hasObservedObjects = objectStructuresFromMessages.length > 0;
         const hasObservedStrings = rawStringStructures.length > 0;
         const hasSynthesized = !!synthesizedBase;
-
-        log.debug(`[Payload Gen] State: hasObservedObjects=${hasObservedObjects}, hasObservedStrings=${hasObservedStrings}, hasSynthesized=${hasSynthesized}, analysisOK=${analysisSucceeded}`);
+        const baseStructureAvailable = hasObservedObjects || hasSynthesized;
 
         if (!hasObservedObjects && !hasObservedStrings && !hasSynthesized) {
-            log.warn("[Payload Gen] No observed messages and no synthesized structure. Falling back to raw payloads.");
             const fallbackPayloadList = shuffleArray(sinkCategoryToPayloadMap['default'] || []).slice(0, 50);
             fallbackPayloadList.forEach(p => { if (generatedPayloads.length < this.MAX_PAYLOADS_TOTAL && typeof p === 'string') { const isCallback = allCallbackPayloads.includes(p); const pType = isCallback ? 'callback-raw-fallback' : (customPayloadsActive ? 'custom-raw-fallback' : 'xss-raw-fallback'); generatedPayloads.push({ type: pType, payload: p, targetPath: 'raw', sinkType: 'unknown', description: `Raw payload (no base structure found)`, baseSource: 'fallback' }); } });
-            const uniquePayloads = []; const seenPayloads = new Set(); for(const p of generatedPayloads) { let key; try { key = typeof p.payload === 'object' && p.payload !== null ? JSON.stringify(p.payload) : String(p.payload); } catch { key = String(p.payload); } if(!seenPayloads.has(key)){ uniquePayloads.push(p); seenPayloads.add(key); } } log.info(`[Payload Gen] Final payload count (fallback): ${uniquePayloads.length}`); return uniquePayloads.slice(0, this.MAX_PAYLOADS_TOTAL);
+            const uniquePayloads = []; const seenPayloads = new Set(); for(const p of generatedPayloads) { let key = typeof p.payload === 'object' && p.payload !== null ? JSON.stringify(p.payload) : String(p.payload); if(!seenPayloads.has(key)){ uniquePayloads.push(p); seenPayloads.add(key); } } return uniquePayloads.slice(0, this.MAX_PAYLOADS_TOTAL);
         }
 
         const pathToAnalysisInfoMap = new Map();
         const allPathsFromStatic = new Set(accessedEventDataPathsSet);
-        (vulnerabilities.sinks || []).forEach(sink => { const relativePath = sink.sourcePath || sink.path; if (relativePath && relativePath !== '(root)' && relativePath !== '(root_data)' && relativePath !== '(parsed_root)' && !relativePath.startsWith('(parsed ')) { allPathsFromStatic.add(relativePath); const sinkSeverity = this.severityOrder[sink.severity?.toLowerCase()] || 0; const conditionsFromStatic = requiredConditionsForSinkPath[relativePath]?.conditions || sink.conditions || []; const existingEntry = pathToAnalysisInfoMap.get(relativePath); if (!existingEntry || sinkSeverity > (existingEntry.severity || 0)) { pathToAnalysisInfoMap.set(relativePath, { sink: sink, conditions: [...conditionsFromStatic], severity: sinkSeverity }); } else { conditionsFromStatic.forEach(newCond => { if (!existingEntry.conditions.some(c => JSON.stringify(c) === JSON.stringify(newCond))) { existingEntry.conditions.push(newCond); } }); if (sinkSeverity > existingEntry.severity) { existingEntry.severity = sinkSeverity; existingEntry.sink = sink; } } } });
+        (vulnerabilities.sinks || []).forEach(sink => { const relativePath = sink.sourcePath || sink.path; if (relativePath && relativePath !== '(root)' && relativePath !== '(root_data)' && relativePath !== '(parsed_root)' && !relativePath.startsWith('(parsed ')) { allPathsFromStatic.add(relativePath); const sinkSeverity = this.severityOrder[sink.severity?.toLowerCase()] || 0; const conditionsFromStatic = requiredConditionsForSinkPath[relativePath]?.conditions || sink.conditions || []; const existingEntry = pathToAnalysisInfoMap.get(relativePath); if (!existingEntry || sinkSeverity > (existingEntry.severity || 0)) { pathToAnalysisInfoMap.set(relativePath, { sink: sink, conditions: [...conditionsFromStatic], severity: sinkSeverity }); } else { conditionsFromStatic.forEach(newCond => { if (!existingEntry.conditions.some(c => JSON.stringify(c) === JSON.stringify(newCond))) { existingEntry.conditions.push(newCond); }}); if (sinkSeverity > existingEntry.severity) { existingEntry.severity = sinkSeverity; existingEntry.sink = sink; } } } });
         if (analysisSucceeded && requiredConditionsForSinkPath) { Object.entries(requiredConditionsForSinkPath).forEach(([relativePath, conditionInfo]) => { if (relativePath && Array.isArray(conditionInfo?.conditions) && conditionInfo.conditions.length > 0) { allPathsFromStatic.add(relativePath); const conditions = conditionInfo.conditions; if (!pathToAnalysisInfoMap.has(relativePath)) { pathToAnalysisInfoMap.set(relativePath, { sink: null, conditions: [...conditions], severity: 0 }); } else { const existingEntry = pathToAnalysisInfoMap.get(relativePath); conditions.forEach(newCond => { if (!existingEntry.conditions.some(c => JSON.stringify(c) === JSON.stringify(newCond))) { existingEntry.conditions.push(newCond); } }); } } }); }
 
         const prioritizedPaths = Array.from(allPathsFromStatic).filter(p => p && p !== '(root)' && p !== '(root_data)' && p !== '(parsed_root)' && !p.startsWith('(parsed '));
         const sinkPathsToFuzz = prioritizedPaths.filter(path => pathToAnalysisInfoMap.get(path)?.sink).sort((a, b) => (pathToAnalysisInfoMap.get(b)?.severity || 0) - (pathToAnalysisInfoMap.get(a)?.severity || 0));
-        const conditionPathsOnly = prioritizedPaths.filter(path => !pathToAnalysisInfoMap.get(path)?.sink && pathToAnalysisInfoMap.get(path)?.conditions?.length > 0);
+        let smartPayloadsGenerated = 0;
 
-        log.debug("[Payload Gen] Paths with identified SINKS for Smart Fuzzing:", sinkPathsToFuzz);
-        log.debug("[Payload Gen] Paths with Conditions ONLY for Smart Fuzzing:", conditionPathsOnly);
-        log.debug("[Payload Gen] Path Analysis Map Content:", pathToAnalysisInfoMap);
 
-        let smartPayloadsGenerated = false;
-
-        if (hasSynthesized && analysisSucceeded && sinkPathsToFuzz.length > 0) {
-            log.debug(`[Payload Gen] Attempting Smart fuzzing on SYNTHESIZED structure for sink paths: ${sinkPathsToFuzz.join(', ')}`);
-            let payloadsGeneratedInThisBlock = 0;
-            let globalTypeConditions = [];
-            if(requiredConditionsForSinkPath) {
-                Object.values(requiredConditionsForSinkPath).forEach(pathInfo => { if(pathInfo?.conditions) { pathInfo.conditions.forEach(cond => { if ((cond.op === '===' || cond.op === '==') && typeof cond.value === 'string' && cond.path && (cond.path === 'type' || cond.path === 'action' || cond.path === 'kind' || cond.path === 'cmd')) { if (!globalTypeConditions.some(existing => JSON.stringify(existing) === JSON.stringify(cond))) { globalTypeConditions.push(cond); log.debug(`[Payload Gen/Synth] Found potential global type condition:`, cond); } } }); } });
-            }
-            for (const targetPath of sinkPathsToFuzz) {
-                if (generatedPayloads.length >= this.MAX_PAYLOADS_TOTAL) break;
-                const analysisInfo = pathToAnalysisInfoMap.get(targetPath);
-                if (!analysisInfo || !analysisInfo.sink) continue;
-                const directConditions = analysisInfo.conditions || [];
-                const combinedConditions = [...directConditions];
-                globalTypeConditions.forEach(globalCond => { if (!directConditions.some(directCond => JSON.stringify(directCond) === JSON.stringify(globalCond))) { combinedConditions.push(globalCond); } });
-                const { sink } = analysisInfo;
-                const pathMightExistInSynth = synthesizedBase.paths.some(p => p.path === targetPath || targetPath.startsWith(p.path + '.') || targetPath.startsWith(p.path + '['));
-                if (!pathMightExistInSynth) { log.debug(`[Payload Gen/Synth] Path ${targetPath} not found in synthesized structure. Skipping.`); continue; }
-                const sinkCategory = sink?.category || 'generic';
-                const sinkSeverity = sink?.severity || 'Low';
-                const payloadList = sinkCategoryToPayloadMap[sinkCategory] || sinkCategoryToPayloadMap['default'];
-                const limitedPayloads = shuffleArray(payloadList).slice(0, this.MAX_PAYLOADS_PER_SINK_PATH);
-                let baseJson = {};
-                try {
-                    if (combinedConditions && combinedConditions.length > 0) { log.debug(`[Payload Gen/Synth] Applying ${combinedConditions.length} condition(s) (direct + heuristic) for path '${targetPath}'...`, combinedConditions); baseJson = this._satisfyConditions({}, combinedConditions); log.debug(`[Payload Gen/Synth] Base JSON after conditions for '${targetPath}':`, JSON.stringify(baseJson)); }
-                    else { log.debug(`[Payload Gen/Synth] No conditions found or applied for path '${targetPath}'.`); baseJson = {}; }
-                } catch (e) { log.error(`[Payload Gen/Synth] Error satisfying conditions for ${targetPath}: ${e.message}. Skipping path.`); continue; }
-                const relativeTargetPath = sink.sourcePath;
-                if (!relativeTargetPath) { log.warn(`[Payload Gen/Synth] Missing relative source path for sink ${sink.name} targeting ${targetPath}. Skipping payloads for this sink.`); continue; }
-                log.debug(`[Payload Gen/Synth] Targeting relative path '${relativeTargetPath}' for sink ${sink.name}`);
-                for (const payload of limitedPayloads) {
-                    if (generatedPayloads.length >= this.MAX_PAYLOADS_TOTAL) break;
-                    try {
-                        const finalMessage = this._deepCopy(baseJson);
-                        this.setNestedValue(finalMessage, relativeTargetPath, payload);
-                        if (payloadsGeneratedInThisBlock < 2) { log.debug(`[Payload Gen/Synth] Generated payload example for path '${relativeTargetPath}':`, JSON.stringify(finalMessage)); }
-                        const isCallback = allCallbackPayloads.includes(payload); const isEncoding = (window.FuzzingPayloads?.ENCODING || []).includes(payload); let pType = customPayloadsActive ? 'custom-smart-synth' : 'smart-synth'; if (isCallback) pType += '-callback'; else if (isEncoding) pType += '-encoding'; else pType += '-xss';
-                        generatedPayloads.push({ type: pType, payload: finalMessage, targetPath: relativeTargetPath, sinkType: sink?.name || 'N/A', sinkSeverity: sinkSeverity, description: `Targeted JSON payload from synthesized structure for path ${relativeTargetPath}`, baseSource: 'static-analysis' });
-                        payloadsGeneratedInThisBlock++;
-                    } catch (e) { log.error(`[Payload Gen/Synth] Error creating/setting payload for path ${relativeTargetPath}: ${e.message}`); }
-                }
-            }
-            if (payloadsGeneratedInThisBlock > 0) { smartPayloadsGenerated = true; log.success(`[Payload Gen/Synth] Smart fuzzing on synthesized structure generated ${payloadsGeneratedInThisBlock} payloads.`); }
-            else { log.warn(`[Payload Gen/Synth] Smart fuzzing on synthesized structure attempted but generated 0 payloads.`); }
-        }
-
-        if (hasObservedObjects && sinkPathsToFuzz.length > 0) {
-            log.debug("[Payload Gen] Attempting Smart Object fuzzing based on observed messages for sink paths.");
-            let payloadsGeneratedInThisBlock = 0;
-            for (const baseStructInfo of objectStructuresFromMessages) {
+        if (sinkPathsToFuzz.length > 0 && baseStructureAvailable) {
+            const structuresToFuzz = hasSynthesized ? [synthesizedBase] : objectStructuresFromMessages;
+            for (const baseStructInfo of structuresToFuzz) {
                 if (generatedPayloads.length >= this.MAX_PAYLOADS_TOTAL) break;
                 const baseObject = baseStructInfo.baseObject;
                 const structurePaths = new Set((baseStructInfo.paths || []).map(p => p.path));
-                const baseIdentifier = baseStructInfo.source + '|' + baseStructInfo.structure.keySignature;
+                const baseIdentifier = baseStructInfo.source + '|' + (baseStructInfo.structure.keySignature || 'no-sig');
+
                 for (const targetPath of sinkPathsToFuzz) {
                     if (generatedPayloads.length >= this.MAX_PAYLOADS_TOTAL) break;
                     const handledKey = targetPath + '|' + baseIdentifier; if (handledSmartObjectPaths.has(handledKey)) continue;
-                    const analysisInfo = pathToAnalysisInfoMap.get(targetPath); if (!analysisInfo || !analysisInfo.sink) continue;
-                    const pathMightExist = structurePaths.has(targetPath) || targetPath.includes('__proto__') || Array.from(structurePaths).some(sp => targetPath.startsWith(sp + '.') || targetPath.startsWith(sp + '[')); if (!pathMightExist) continue;
-                    const { sink, conditions } = analysisInfo; const sinkCategory = sink?.category || 'generic'; const sinkSeverity = sink?.severity || 'Low'; const payloadList = sinkCategoryToPayloadMap[sinkCategory] || sinkCategoryToPayloadMap['default']; const limitedPayloads = shuffleArray(payloadList).slice(0, this.MAX_PAYLOADS_PER_SINK_PATH);
-                    let baseForPath; try { baseForPath = this._deepCopy(baseObject); if (conditions && conditions.length > 0) { baseForPath = this._satisfyConditions(baseForPath, conditions); } } catch (e) { continue; }
+
+                    const analysisInfo = pathToAnalysisInfoMap.get(targetPath);
+                    if (!analysisInfo || !analysisInfo.sink) continue;
+
+                    const pathMightExist = structurePaths.has(targetPath) || targetPath.includes('__proto__') || Array.from(structurePaths).some(sp => targetPath.startsWith(sp + '.') || targetPath.startsWith(sp + '['));
+                    if (!pathMightExist) continue;
+
+                    const { sink, conditions } = analysisInfo;
+                    const sinkCategory = sink?.category || 'generic';
+                    const sinkSeverity = sink?.severity || 'Low';
+                    const payloadList = sinkCategoryToPayloadMap[sinkCategory] || sinkCategoryToPayloadMap['default'];
+                    const limitedPayloads = shuffleArray(payloadList).slice(0, this.MAX_PAYLOADS_PER_SINK_PATH);
+                    let baseForPath; try { baseForPath = this._deepCopy(baseObject); if (conditions && conditions.length > 0) baseForPath = this._satisfyConditions(baseForPath, conditions); } catch (e) { continue; }
+
                     for (const payload of limitedPayloads) {
                         if (generatedPayloads.length >= this.MAX_PAYLOADS_TOTAL) break;
                         try {
-                            const finalMessage = this._deepCopy(baseForPath); const relativeTargetPath = sink?.sourcePath || targetPath; this.setNestedValue(finalMessage, relativeTargetPath, payload);
-                            const isCallback = allCallbackPayloads.includes(payload); const isEncoding = (window.FuzzingPayloads?.ENCODING || []).includes(payload); const payloadBaseType = sink ? 'smart-sink' : 'smart-flow'; let pType = customPayloadsActive ? `custom-${payloadBaseType}` : payloadBaseType; if (isCallback) pType += '-callback'; else if (isEncoding) pType += '-encoding'; else pType += '-xss';
+                            const finalMessage = this._deepCopy(baseForPath);
+                            const relativeTargetPath = sink?.sourcePath || targetPath;
+                            this.setNestedValue(finalMessage, relativeTargetPath, payload);
+                            const isCallback = allCallbackPayloads.includes(payload); const isEncoding = (window.FuzzingPayloads?.ENCODING || []).includes(payload); const payloadBaseType = 'smart-sink'; let pType = customPayloadsActive ? `custom-${payloadBaseType}` : payloadBaseType; if (isCallback) pType += '-callback'; else if (isEncoding) pType += '-encoding'; else pType += '-xss';
                             generatedPayloads.push({ type: pType, payload: finalMessage, targetPath: relativeTargetPath, sinkType: sink?.name || 'N/A (Flow Target)', sinkSeverity: sinkSeverity, description: `Targeted ${isCallback ? 'Callback' : (isEncoding ? 'Encoding/Bypass' : 'XSS')} for ${relativeTargetPath} -> ${sink?.name || 'Flow'}`, baseSource: baseStructInfo.source });
-                            payloadsGeneratedInThisBlock++;
+                            smartPayloadsGenerated++;
                         } catch (e) {}
-                    } handledSmartObjectPaths.add(handledKey);
-                } if (generatedPayloads.length >= this.MAX_PAYLOADS_TOTAL) break;
+                    }
+                    handledSmartObjectPaths.add(handledKey);
+                }
+                if (generatedPayloads.length >= this.MAX_PAYLOADS_TOTAL) break;
             }
-            if (payloadsGeneratedInThisBlock > 0) smartPayloadsGenerated = true;
-            log.debug(`[Payload Gen/Observed] Smart fuzzing on observed objects generated ${payloadsGeneratedInThisBlock} payloads.`);
         }
 
-        if (hasObservedStrings && sinkPathsToFuzz.length > 0) {
-            log.debug("[Payload Gen] Attempting Smart String fuzzing based on observed raw strings.");
-            let payloadsGeneratedInThisBlock = 0;
+        if (sinkPathsToFuzz.length > 0 && hasObservedStrings) {
             for (const baseStructInfo of rawStringStructures) {
                 if (generatedPayloads.length >= this.MAX_PAYLOADS_TOTAL) break;
-                const baseString = String(baseStructInfo.baseObject); const baseIdentifier = `${baseStructInfo.source}|${baseString.substring(0,50)}`; if(handledRawStringSmart.has(baseIdentifier)) continue;
+                const baseString = String(baseStructInfo.baseObject);
+                const baseIdentifier = `${baseStructInfo.source}|${baseString.substring(0,50)}`; if(handledRawStringSmart.has(baseIdentifier)) continue;
                 for (const targetPath of sinkPathsToFuzz) {
                     if (generatedPayloads.length >= this.MAX_PAYLOADS_TOTAL) break;
                     const analysisInfo = pathToAnalysisInfoMap.get(targetPath); if (!analysisInfo || !analysisInfo.sink) continue;
-                    const sourcePath = analysisInfo.sink.sourcePath || analysisInfo.sink.path; const isDirectDataSource = sourcePath === '(root_data)';
+                    const sourcePath = analysisInfo.sink.sourcePath || analysisInfo.sink.path;
+                    const isDirectDataSource = sourcePath === '(root_data)' || sourcePath === null || sourcePath === undefined;
                     if (isDirectDataSource) {
-                        const { sink, conditions } = analysisInfo; const sinkCategory = sink?.category || 'generic'; const sinkSeverity = sink?.severity || 'Low'; const payloadList = sinkCategoryToPayloadMap[sinkCategory] || sinkCategoryToPayloadMap['default']; const limitedPayloads = shuffleArray(payloadList).slice(0, this.MAX_PAYLOADS_PER_SINK_PATH);
+                        const { sink } = analysisInfo; const sinkCategory = sink?.category || 'generic'; const sinkSeverity = sink?.severity || 'Low'; const payloadList = sinkCategoryToPayloadMap[sinkCategory] || sinkCategoryToPayloadMap['default']; const limitedPayloads = shuffleArray(payloadList).slice(0, this.MAX_PAYLOADS_PER_SINK_PATH);
                         for (const payload of limitedPayloads) {
                             if (generatedPayloads.length >= this.MAX_PAYLOADS_TOTAL) break; if (typeof payload !== 'string') continue;
-                            try { const isCallback = allCallbackPayloads.includes(payload); const isEncoding = (window.FuzzingPayloads?.ENCODING || []).includes(payload); let pType = customPayloadsActive ? 'custom-smart-string' : 'smart-string'; if(isCallback) pType += '-callback'; else if(isEncoding) pType += '-encoding'; else pType += '-xss'; generatedPayloads.push({ type: pType, payload: payload, targetPath: 'raw', sinkType: sink.name, sinkSeverity: sinkSeverity, description: `Smart string replace for sink ${sink.name}`, baseSource: baseStructInfo.source, original: baseString }); payloadsGeneratedInThisBlock++; } catch (e) {}
-                        } handledRawStringSmart.add(baseIdentifier); break;
+                            try { const isCallback = allCallbackPayloads.includes(payload); const isEncoding = (window.FuzzingPayloads?.ENCODING || []).includes(payload); let pType = customPayloadsActive ? 'custom-smart-string' : 'smart-string'; if(isCallback) pType += '-callback'; else if(isEncoding) pType += '-encoding'; else pType += '-xss'; generatedPayloads.push({ type: pType, payload: payload, targetPath: 'raw', sinkType: sink.name, sinkSeverity: sinkSeverity, description: `Smart string replace for sink ${sink.name}`, baseSource: baseStructInfo.source, original: baseString }); smartPayloadsGenerated++; } catch (e) {}
+                        }
+                        handledRawStringSmart.add(baseIdentifier);
+                        break;
                     }
                 }
             }
-            if (payloadsGeneratedInThisBlock > 0) smartPayloadsGenerated = true;
-            log.debug(`[Payload Gen/Raw] Smart fuzzing on raw strings generated ${payloadsGeneratedInThisBlock} payloads.`);
         }
 
-        const runDumbBlock = !smartPayloadsGenerated || hasObservedObjects || hasObservedStrings;
 
-        if (runDumbBlock) {
-            log.debug(`[Payload Gen] Entering Dumb/Type/Guess fuzzing block (smartPayloadsGenerated=${smartPayloadsGenerated}, hasObservedObjects=${hasObservedObjects}, hasObservedStrings=${hasObservedStrings})`);
-            if (hasObservedObjects) {
-                log.debug("[Payload Gen] Attempting Dumb Object fuzzing on observed objects.");
-                let dumbFuzzedCount = 0; const potentialDumbPaths = new Set();
-                objectStructuresFromMessages.forEach(bs => { if (bs.paths) { const baseIdentifier = bs.source + '|' + bs.structure.keySignature; bs.paths.forEach(p => { const handledKey = p.path + '|' + baseIdentifier; const isPotentialTargetType = ['string', 'unknown', 'null', 'number', 'boolean'].includes(p.type); if (p.path && isPotentialTargetType && !handledSmartObjectPaths.has(handledKey)) { potentialDumbPaths.add(JSON.stringify({ path: p.path, baseIdentifier: baseIdentifier })); } }); } });
-                const dumbPathsToTarget = shuffleArray(Array.from(potentialDumbPaths).map(s => JSON.parse(s))).slice(0, this.MAX_DUMB_FIELDS_TO_TARGET); const dumbPayloadsPerField = isStateDependentHandler ? Math.min(this.MAX_PAYLOADS_PER_DUMB_FIELD + 5, 25) : this.MAX_PAYLOADS_PER_DUMB_FIELD;
-                if (dumbPathsToTarget.length > 0) {
-                    for (const baseStructInfo of objectStructuresFromMessages) {
-                        if (generatedPayloads.length >= this.MAX_PAYLOADS_TOTAL) break; const baseObject = baseStructInfo.baseObject; const baseIdentifier = baseStructInfo.source + '|' + baseStructInfo.structure.keySignature; const pathsForThisBase = dumbPathsToTarget.filter(p => p.baseIdentifier === baseIdentifier); if (pathsForThisBase.length === 0) continue;
-                        let baseCopy; try { baseCopy = this._deepCopy(baseObject); } catch(e) { continue; }
-                        for (const targetPathInfo of pathsForThisBase) {
-                            const targetPath = targetPathInfo.path; const handledKey = targetPath + '|' + baseIdentifier; if (handledDumbObjectPaths.has(handledKey) || handledSmartObjectPaths.has(handledKey)) continue; if (generatedPayloads.length >= this.MAX_PAYLOADS_TOTAL) break;
-                            const payloadList = sinkCategoryToPayloadMap['generic'] || sinkCategoryToPayloadMap['default']; const limitedPayloads = shuffleArray(payloadList).slice(0, dumbPayloadsPerField);
-                            for (const payload of limitedPayloads) {
-                                if (generatedPayloads.length >= this.MAX_PAYLOADS_TOTAL) break;
-                                try { const finalMessage = this._deepCopy(baseCopy); this.setNestedValue(finalMessage, targetPath, payload); const isCallback = allCallbackPayloads.includes(payload); const isEncoding = (window.FuzzingPayloads?.ENCODING || []).includes(payload); let pType = customPayloadsActive ? 'custom-dumb' : 'dumb'; if (isCallback) pType += '-callback'; else if(isEncoding) pType += '-encoding'; else pType += '-xss'; generatedPayloads.push({ type: pType, payload: finalMessage, targetPath: targetPath, sinkType: 'N/A (Dumb Fuzz)', sinkSeverity: 'Low', description: `Dumb ${isCallback ? 'Callback' : (isEncoding ? 'Encoding' : 'XSS')} for field ${targetPath}`, baseSource: baseStructInfo.source }); dumbFuzzedCount++; } catch (e) {}
-                            } handledDumbObjectPaths.add(handledKey);
-                        } if (generatedPayloads.length >= this.MAX_PAYLOADS_TOTAL) break;
+        const runFallbackBlock = smartPayloadsGenerated < 5 || baseStructureAvailable || hasObservedStrings;
+
+        if (runFallbackBlock) {
+            let dumbFuzzedCount = 0;
+            let typeFuzzedCount = 0;
+
+            const fallbackTargetPaths = new Set(prioritizedPaths);
+            const structuresForFallback = [];
+            if(hasSynthesized) structuresForFallback.push(synthesizedBase);
+            objectStructuresFromMessages.forEach(obs => {
+                structuresForFallback.push(obs);
+                if(obs.paths) obs.paths.forEach(p => fallbackTargetPaths.add(p.path));
+            });
+
+            const dumbPathsToTarget = shuffleArray(Array.from(fallbackTargetPaths)).slice(0, this.MAX_DUMB_FIELDS_TO_TARGET);
+            const typePathsToTarget = shuffleArray(Array.from(fallbackTargetPaths)).slice(0, this.MAX_TYPE_FIELDS_TO_TARGET);
+            const dumbPayloadsPerField = isStateDependentHandler ? Math.min(this.MAX_PAYLOADS_PER_DUMB_FIELD + 5, 25) : this.MAX_PAYLOADS_PER_DUMB_FIELD;
+
+            if (dumbPathsToTarget.length > 0 && structuresForFallback.length > 0) {
+                for (const baseStructInfo of structuresForFallback) {
+                    if (generatedPayloads.length >= this.MAX_PAYLOADS_TOTAL) break;
+                    const baseObject = baseStructInfo.baseObject;
+                    const baseIdentifier = baseStructInfo.source + '|' + (baseStructInfo.structure.keySignature || 'no-sig');
+                    let baseCopy; try { baseCopy = this._deepCopy(baseObject); } catch(e) { continue; }
+
+                    for (const targetPath of dumbPathsToTarget) {
+                        const handledKey = targetPath + '|' + baseIdentifier + '|dumb';
+                        if (handledDumbObjectPaths.has(handledKey) || handledSmartObjectPaths.has(targetPath + '|' + baseIdentifier)) continue;
+                        if (generatedPayloads.length >= this.MAX_PAYLOADS_TOTAL) break;
+
+                        const pathMightExist = baseStructInfo.paths.some(p => p.path === targetPath || targetPath.startsWith(p.path + '.') || targetPath.startsWith(p.path + '['));
+                        if (!pathMightExist && baseStructInfo.source !== 'static-analysis') continue;
+
+                        const payloadList = sinkCategoryToPayloadMap['generic'] || sinkCategoryToPayloadMap['default'];
+                        const limitedPayloads = shuffleArray(payloadList).slice(0, dumbPayloadsPerField);
+                        for (const payload of limitedPayloads) {
+                            if (generatedPayloads.length >= this.MAX_PAYLOADS_TOTAL) break;
+                            try {
+                                const finalMessage = this._deepCopy(baseCopy);
+                                this.setNestedValue(finalMessage, targetPath, payload);
+                                const isCallback = allCallbackPayloads.includes(payload); const isEncoding = (window.FuzzingPayloads?.ENCODING || []).includes(payload); let pType = customPayloadsActive ? 'custom-dumb' : 'dumb'; if (isCallback) pType += '-callback'; else if(isEncoding) pType += '-encoding'; else pType += '-xss';
+                                generatedPayloads.push({ type: pType, payload: finalMessage, targetPath: targetPath, sinkType: 'N/A (Dumb Fuzz)', sinkSeverity: 'Low', description: `Dumb ${isCallback ? 'Callback' : (isEncoding ? 'Encoding' : 'XSS')} for field ${targetPath}`, baseSource: baseStructInfo.source });
+                                dumbFuzzedCount++;
+                            } catch (e) {}
+                        }
+                        handledDumbObjectPaths.add(handledKey);
                     }
+                    if (generatedPayloads.length >= this.MAX_PAYLOADS_TOTAL) break;
                 }
-                log.debug(`[Payload Gen/Dumb Obj] Generated ${dumbFuzzedCount} dumb object payloads.`);
             }
 
-            const canRunStructureGuess = isStateDependentHandler && !hasObservedObjects && !smartPayloadsGenerated && hasSynthesized;
-            if (canRunStructureGuess) {
-                log.debug("[Payload Gen] Attempting Structure Guess fuzzing.");
+            if (typePathsToTarget.length > 0 && structuresForFallback.length > 0 && typeFuzzPayloads.length > 0) {
+                for (const baseStructInfo of structuresForFallback) {
+                    if (generatedPayloads.length >= this.MAX_PAYLOADS_TOTAL) break;
+                    const baseObject = baseStructInfo.baseObject;
+                    const baseIdentifier = baseStructInfo.source + '|' + (baseStructInfo.structure.keySignature || 'no-sig');
+                    let baseCopy; try { baseCopy = this._deepCopy(baseObject); } catch(e) { continue; }
+
+                    for (const targetPath of typePathsToTarget) {
+                        const handledKey = targetPath + '|' + baseIdentifier + '|type';
+                        if (handledTypePaths.has(handledKey) || handledSmartObjectPaths.has(targetPath + '|' + baseIdentifier)) continue;
+                        if (generatedPayloads.length >= this.MAX_PAYLOADS_TOTAL) break;
+
+                        const pathMightExist = baseStructInfo.paths.some(p => p.path === targetPath || targetPath.startsWith(p.path + '.') || targetPath.startsWith(p.path + '['));
+                        if (!pathMightExist && baseStructInfo.source !== 'static-analysis') continue;
+
+                        const limitedPayloads = typeFuzzPayloads.slice(0, this.MAX_PAYLOADS_PER_TYPE_FIELD);
+                        for (const payload of limitedPayloads) {
+                            if (generatedPayloads.length >= this.MAX_PAYLOADS_TOTAL) break;
+                            try {
+                                const finalMessage = this._deepCopy(baseCopy);
+                                this.setNestedValue(finalMessage, targetPath, payload);
+                                generatedPayloads.push({ type: 'type-fuzz', payload: finalMessage, targetPath: targetPath, sinkType: 'N/A (Type Fuzz)', sinkSeverity: 'Low', description: `Type fuzz (${typeof payload}) for field ${targetPath}`, baseSource: baseStructInfo.source });
+                                typeFuzzedCount++;
+                            } catch(e) {}
+                        }
+                        handledTypePaths.add(handledKey);
+                    }
+                    if (generatedPayloads.length >= this.MAX_PAYLOADS_TOTAL) break;
+                }
+            }
+
+            const runStructureGuess = isStateDependentHandler && !baseStructureAvailable;
+            if (runStructureGuess) {
                 let structureGuessCount = 0;
-                const guessedStructures = new Map(); externalStateAccesses.forEach(access => { if (access.base && access.property && access.property !== '[computed]') { if (!guessedStructures.has(access.base)) { guessedStructures.set(access.base, new Set()); } guessedStructures.get(access.base).add(access.property); } }); indirectCalls.forEach(call => { const parts = call.source?.split('.'); if (parts && parts.length === 2 && parts[0] && parts[1]) { const base = parts[0]; const prop = parts[1]; if (!guessedStructures.has(base)) guessedStructures.set(base, new Set()); guessedStructures.get(base).add(prop); } }); let dynamicState = null; if(dynamicAnalysisResults && !dynamicAnalysisResults.error && dynamicAnalysisResults.variableStates) { dynamicState = dynamicAnalysisResults.variableStates; }
+                const guessedStructures = new Map();
+                externalStateAccesses.forEach(access => { if (access.base && access.property && access.property !== '[computed]') { if (!guessedStructures.has(access.base)) { guessedStructures.set(access.base, new Set()); } guessedStructures.get(access.base).add(access.property); } });
+                indirectCalls.forEach(call => { const parts = call.source?.split('.'); if (parts && parts.length === 2 && parts[0] && parts[1]) { const base = parts[0]; const prop = parts[1]; if (!guessedStructures.has(base)) guessedStructures.set(base, new Set()); guessedStructures.get(base).add(prop); } });
+                let dynamicState = dynamicAnalysisResults?.variableStates || null;
+
                 if (guessedStructures.size > 0) {
-                    const guessPayloadList = [...new Set([...(sinkCategoryToPayloadMap['generic'] || []), ...typeFuzzPayloads])]; const jsPayloads = sinkCategoryToPayloadMap['eval'] || [];
+                    const guessPayloadList = [...new Set([...(sinkCategoryToPayloadMap['generic'] || []), ...typeFuzzPayloads])];
+                    const jsPayloads = sinkCategoryToPayloadMap['eval'] || [];
                     guessedStructures.forEach((propertiesSet, baseVar) => {
-                        if (generatedPayloads.length >= this.MAX_PAYLOADS_TOTAL) return; const properties = Array.from(propertiesSet); if (properties.length === 0) return; let template = {}; properties.forEach(prop => { template[prop] = 'PLACEHOLDER'; }); if(dynamicState && dynamicState[baseVar] && dynamicState[baseVar].preview) { try { const previewProps = dynamicState[baseVar].preview.properties; if(Array.isArray(previewProps)) { template = {}; previewProps.forEach(p => { template[p.name] = p.value || 'PLACEHOLDER'; }); properties.forEach(p => { if(!(p in template)) template[p] = 'PLACEHOLDER'; }); } } catch (e) {} }
+                        if (generatedPayloads.length >= this.MAX_PAYLOADS_TOTAL) return;
+                        const properties = Array.from(propertiesSet); if (properties.length === 0) return;
+                        let template = {}; properties.forEach(prop => { template[prop] = 'PLACEHOLDER'; });
+                        if(dynamicState && dynamicState[baseVar]?.preview?.properties) { try { const previewProps = dynamicState[baseVar].preview.properties; if(Array.isArray(previewProps)) { template = {}; previewProps.forEach(p => { template[p.name] = p.value || 'PLACEHOLDER'; }); properties.forEach(p => { if(!(p in template)) template[p] = 'PLACEHOLDER'; }); } } catch (e) {} }
+
                         properties.forEach(propToFuzz => {
-                            if (generatedPayloads.length >= this.MAX_PAYLOADS_TOTAL) return; const handledKey = `${baseVar}.${propToFuzz}|structure-guess`; if (handledStructureGuessPaths.has(handledKey)) return; let payloadsToUse = shuffleArray(guessPayloadList); if (indirectCalls.some(ic => ic.source === `${baseVar}.${propToFuzz}`)) { payloadsToUse = [...new Set([...payloadsToUse, ...jsPayloads])]; } payloadsToUse = payloadsToUse.slice(0, this.MAX_PAYLOADS_PER_DUMB_FIELD);
+                            if (generatedPayloads.length >= this.MAX_PAYLOADS_TOTAL) return;
+                            const handledKey = `${baseVar}.${propToFuzz}|structure-guess`; if (handledStructureGuessPaths.has(handledKey)) return;
+                            let payloadsToUse = shuffleArray(guessPayloadList); if (indirectCalls.some(ic => ic.source === `${baseVar}.${propToFuzz}`)) payloadsToUse = [...new Set([...payloadsToUse, ...jsPayloads])];
+                            payloadsToUse = payloadsToUse.slice(0, this.MAX_PAYLOADS_PER_DUMB_FIELD);
                             for (const payload of payloadsToUse) {
                                 if (generatedPayloads.length >= this.MAX_PAYLOADS_TOTAL) break;
-                                try { const guessedPayload = this._deepCopy(template); guessedPayload[propToFuzz] = payload; const isCallback = allCallbackPayloads.includes(payload); const isEncoding = (window.FuzzingPayloads?.ENCODING || []).includes(payload); const isType = typeFuzzPayloads.includes(payload); let pSubType = '-xss'; if(isCallback) pSubType = '-callback'; else if(isEncoding) pSubType = '-encoding'; else if(isType) pSubType = '-type'; else if(jsPayloads.includes(payload)) pSubType = '-js'; generatedPayloads.push({ type: `structure-guess${pSubType}`, payload: guessedPayload, targetPath: `${baseVar}.${propToFuzz}`, sinkType: 'N/A (Structure Guess)', sinkSeverity: 'Medium', description: `Structure guess fuzzing for ${baseVar}.${propToFuzz}`, baseSource: 'static-analysis-guess' }); structureGuessCount++; } catch (e) {}
-                            } handledStructureGuessPaths.add(handledKey);
+                                try { const guessedPayload = this._deepCopy(template); guessedPayload[propToFuzz] = payload; const isCallback = allCallbackPayloads.includes(payload); const isEncoding = (window.FuzzingPayloads?.ENCODING || []).includes(payload); const isType = typeFuzzPayloads.includes(payload); let pSubType = '-xss'; if(isCallback) pSubType = '-callback'; else if(isEncoding) pSubType = '-encoding'; else if(isType) pSubType = '-type'; else if(jsPayloads.includes(payload)) pSubType = '-js';
+                                    generatedPayloads.push({ type: `structure-guess${pSubType}`, payload: guessedPayload, targetPath: `${baseVar}.${propToFuzz}`, sinkType: 'N/A (Structure Guess)', sinkSeverity: 'Medium', description: `Structure guess fuzzing for ${baseVar}.${propToFuzz}`, baseSource: 'static-analysis-guess' }); structureGuessCount++; } catch (e) {}
+                            }
+                            handledStructureGuessPaths.add(handledKey);
                         });
                     });
-                    log.debug(`[Payload Gen/Guess] Generated ${structureGuessCount} structure guess payloads.`);
                 }
-            }
-
-            if (hasObservedObjects) {
-                log.debug("[Payload Gen] Attempting Type Fuzz Object on observed objects.");
-                let typeFuzzedCount = 0; const potentialTypePaths = new Set();
-                objectStructuresFromMessages.forEach(bs => { if (bs.paths) { const baseIdentifier = bs.source + '|' + bs.structure.keySignature; bs.paths.forEach(p => { const handledKey = p.path + '|' + baseIdentifier; if (p.path && !handledSmartObjectPaths.has(handledKey)) { potentialTypePaths.add(JSON.stringify({ path: p.path, baseIdentifier: baseIdentifier })); } }); } });
-                const typePathsToTarget = shuffleArray(Array.from(potentialTypePaths).map(s => JSON.parse(s))).slice(0, this.MAX_TYPE_FIELDS_TO_TARGET);
-                if (typePathsToTarget.length > 0 && typeFuzzPayloads.length > 0) {
-                    for (const baseStructInfo of objectStructuresFromMessages) {
-                        if (generatedPayloads.length >= this.MAX_PAYLOADS_TOTAL) break; const baseObject = baseStructInfo.baseObject; const baseIdentifier = baseStructInfo.source + '|' + baseStructInfo.structure.keySignature; const pathsForThisBase = typePathsToTarget.filter(p => p.baseIdentifier === baseIdentifier); if (pathsForThisBase.length === 0) continue;
-                        let baseCopy; try { baseCopy = this._deepCopy(baseObject); } catch(e) { continue; }
-                        for (const targetPathInfo of pathsForThisBase) {
-                            const targetPath = targetPathInfo.path; const handledKey = targetPath + '|' + baseIdentifier; if (handledTypePaths.has(handledKey) || handledSmartObjectPaths.has(handledKey)) continue; if (generatedPayloads.length >= this.MAX_PAYLOADS_TOTAL) break;
-                            const limitedPayloads = typeFuzzPayloads.slice(0, this.MAX_PAYLOADS_PER_TYPE_FIELD);
-                            for (const payload of limitedPayloads) {
-                                if (generatedPayloads.length >= this.MAX_PAYLOADS_TOTAL) break;
-                                try { const finalMessage = this._deepCopy(baseCopy); this.setNestedValue(finalMessage, targetPath, payload); generatedPayloads.push({ type: 'type-fuzz', payload: finalMessage, targetPath: targetPath, sinkType: 'N/A (Type Fuzz)', sinkSeverity: 'Low', description: `Type fuzz (${typeof payload}) for field ${targetPath}`, baseSource: baseStructInfo.source }); typeFuzzedCount++; } catch(e) {}
-                            } handledTypePaths.add(handledKey);
-                        } if (generatedPayloads.length >= this.MAX_PAYLOADS_TOTAL) break;
-                    }
-                }
-                log.debug(`[Payload Gen/Type Obj] Generated ${typeFuzzedCount} type fuzz object payloads.`);
             }
 
             if (hasObservedStrings) {
-                log.debug("[Payload Gen] Attempting Dumb Raw String fuzzing on observed strings.");
                 let rawFuzzedCount = 0;
-                const payloadList = [...new Set([...(sinkCategoryToPayloadMap['default'] || []), ...allCallbackPayloads, ...typeFuzzPayloads])]; const limitedPayloads = shuffleArray(payloadList).slice(0, this.MAX_PAYLOADS_PER_SINK_PATH);
+                const payloadList = [...new Set([...(sinkCategoryToPayloadMap['default'] || []), ...allCallbackPayloads, ...typeFuzzPayloads])];
+                const limitedPayloads = shuffleArray(payloadList).slice(0, this.MAX_PAYLOADS_PER_SINK_PATH);
                 for (const baseStructInfo of rawStringStructures) {
-                    if (generatedPayloads.length >= this.MAX_PAYLOADS_TOTAL) break; const originalString = String(baseStructInfo.baseObject); const baseIdentifier = `${baseStructInfo.source}|${originalString.substring(0,50)}`; if(handledRawStringSmart.has(baseIdentifier) || handledRawStringDumb.has(baseIdentifier)) continue;
+                    if (generatedPayloads.length >= this.MAX_PAYLOADS_TOTAL) break;
+                    const originalString = String(baseStructInfo.baseObject);
+                    const baseIdentifier = `${baseStructInfo.source}|${originalString.substring(0,50)}`;
+                    if(handledRawStringSmart.has(baseIdentifier) || handledRawStringDumb.has(baseIdentifier)) continue;
                     for (const payload of limitedPayloads) {
-                        if (generatedPayloads.length >= this.MAX_PAYLOADS_TOTAL) break; const isCallback = allCallbackPayloads.includes(payload); const isTypeFuzz = typeFuzzPayloads.includes(payload); const isEncoding = (window.FuzzingPayloads?.ENCODING || []).includes(payload); let pTypeBase = customPayloadsActive ? 'custom-raw' : 'raw'; if (isCallback) pTypeBase += '-callback'; else if (isTypeFuzz) pTypeBase += '-type'; else if (isEncoding) pTypeBase += '-encoding'; else pTypeBase += '-xss';
-                        generatedPayloads.push({ type: `${pTypeBase}-replace`, payload: payload, targetPath: 'raw', sinkType: 'unknown', description: `Dumb Raw Replace (${typeof payload})`, baseSource: 'raw-string', original: originalString }); rawFuzzedCount++; if (generatedPayloads.length >= this.MAX_PAYLOADS_TOTAL) break;
+                        if (generatedPayloads.length >= this.MAX_PAYLOADS_TOTAL) break;
+                        const isCallback = allCallbackPayloads.includes(payload); const isTypeFuzz = typeFuzzPayloads.includes(payload); const isEncoding = (window.FuzzingPayloads?.ENCODING || []).includes(payload); let pTypeBase = customPayloadsActive ? 'custom-raw' : 'raw'; if (isCallback) pTypeBase += '-callback'; else if (isTypeFuzz) pTypeBase += '-type'; else if (isEncoding) pTypeBase += '-encoding'; else pTypeBase += '-xss';
+                        generatedPayloads.push({ type: `${pTypeBase}-replace`, payload: payload, targetPath: 'raw', sinkType: 'unknown', description: `Dumb Raw Replace (${typeof payload})`, baseSource: 'raw-string', original: originalString }); rawFuzzedCount++;
+                        if (generatedPayloads.length >= this.MAX_PAYLOADS_TOTAL) break;
                         if(typeof payload === 'string') { generatedPayloads.push({ type: `${pTypeBase}-append`, payload: originalString + payload, targetPath: 'raw', sinkType: 'unknown', description: `Dumb Raw Append`, baseSource: 'raw-string', original: originalString }); rawFuzzedCount++; if (generatedPayloads.length >= this.MAX_PAYLOADS_TOTAL) break; generatedPayloads.push({ type: `${pTypeBase}-prepend`, payload: payload + originalString, targetPath: 'raw', sinkType: 'unknown', description: `Dumb Raw Prepend`, baseSource: 'raw-string', original: originalString }); rawFuzzedCount++; }
-                    } handledRawStringDumb.add(baseIdentifier);
+                    }
+                    handledRawStringDumb.add(baseIdentifier);
                 }
-                log.debug(`[Payload Gen/Dumb Raw] Generated ${rawFuzzedCount} dumb raw string payloads.`);
             }
-        }
+        } // End Fallback Block
 
         const uniquePayloads = []; const seenPayloads = new Set();
         for(const p of generatedPayloads) { let key; try { key = typeof p.payload === 'object' && p.payload !== null ? JSON.stringify(p.payload) : String(p.payload); } catch { key = String(p.payload); } if(!seenPayloads.has(key)){ uniquePayloads.push(p); seenPayloads.add(key); } }
-        log.info(`[Payload Gen] Final payload count: ${uniquePayloads.length}`);
         return uniquePayloads.slice(0, this.MAX_PAYLOADS_TOTAL);
     }
 }
@@ -496,27 +494,69 @@ async function handleTraceButton(endpoint, traceButton) {
     const originalFullEndpoint = endpoint;
     const endpointKey = window.getStorageKeyForUrl(originalFullEndpoint);
     log.debug(`[Trace Button START] Processing endpoint key: ${endpointKey}`);
-    window.updateTraceButton(traceButton, 'default');
-    traceButton.classList.remove('show-next-step-emoji'); traceButton.style.animation = '';
-    if (!endpointKey) { window.log.error("Trace: Cannot determine endpoint key", originalFullEndpoint); window.updateTraceButton(traceButton, 'error'); return; }
     const traceInProgressKey = `trace-in-progress-${endpointKey}`;
     if (sessionStorage.getItem(traceInProgressKey)) { log.debug(`[Trace Button] Trace already in progress for ${endpointKey}. Aborting.`); return; }
-    sessionStorage.setItem(traceInProgressKey, 'true'); window.log.scan(`Starting message trace for endpoint key: ${endpointKey}`); window.updateTraceButton(traceButton, 'checking');
-    const buttonContainer = traceButton.closest('.button-container'); const playButton = buttonContainer?.querySelector('.iframe-check-button'); const reportButton = buttonContainer?.querySelector('.iframe-report-button'); if (playButton) { playButton.classList.remove('show-next-step-emoji'); }
-    let progressContainer = document.querySelector('.trace-progress-container'); if (!progressContainer) { window.addProgressStyles(); progressContainer = document.createElement('div'); progressContainer.className = 'trace-progress-container'; document.body.appendChild(progressContainer); } progressContainer.innerHTML = `<h4>Trace Progress</h4><div class="phase-list"><div class="phase" data-phase="collection"><span class="emoji">📦</span><span class="label">Data</span></div><div class="phase" data-phase="analysis"><span class="emoji">🔬</span><span class="label">Analyze</span></div><div class="phase" data-phase="dynamic" style="display:none;"><span class="emoji">🩺</span><span class="label">Runtime</span></div><div class="phase" data-phase="structure"><span class="emoji">🧱</span><span class="label">Structure</span></div><div class="phase" data-phase="generation"><span class="emoji">⚙️</span><span class="label">Payloads</span></div><div class="phase" data-phase="saving"><span class="emoji">💾</span><span class="label">Saving</span></div><div class="phase" data-phase="finished" style="display: none;"><span class="emoji">✅</span><span class="label">Done</span></div><div class="phase" data-phase="error" style="display: none;"><span class="emoji">❌</span><span class="label">Error</span></div></div>`;
+    sessionStorage.setItem(traceInProgressKey, 'true');
+    window.log.scan(`Starting message trace for endpoint key: ${endpointKey}`);
+    window.updateTraceButton(traceButton, 'checking');
+    const buttonContainer = traceButton.closest('.button-container');
+    const playButton = buttonContainer?.querySelector('.iframe-check-button');
+    const reportButton = buttonContainer?.querySelector('.iframe-report-button');
+    if (playButton) playButton.classList.remove('show-next-step-emoji');
+    let progressContainer = document.querySelector('.trace-progress-container');
+    if (!progressContainer) { window.addProgressStyles(); progressContainer = document.createElement('div'); progressContainer.className = 'trace-progress-container'; document.body.appendChild(progressContainer); }
+    progressContainer.innerHTML = `<h4>Trace Progress</h4><div class="phase-list"><div class="phase" data-phase="collection"><span class="emoji">📦</span><span class="label">Data</span></div><div class="phase" data-phase="analysis"><span class="emoji">🔬</span><span class="label">Analyze</span></div><div class="phase" data-phase="dynamic" style="display:none;"><span class="emoji">🩺</span><span class="label">Runtime</span></div><div class="phase" data-phase="structure"><span class="emoji">🧱</span><span class="label">Structure</span></div><div class="phase" data-phase="generation"><span class="emoji">⚙️</span><span class="label">Payloads</span></div><div class="phase" data-phase="saving"><span class="emoji">💾</span><span class="label">Saving</span></div><div class="phase" data-phase="finished" style="display: none;"><span class="emoji">✅</span><span class="label">Done</span></div><div class="phase" data-phase="error" style="display: none;"><span class="emoji">❌</span><span class="label">Error</span></div></div>`;
     const updatePhase = (phase, status = 'active') => { const phaseElement = progressContainer?.querySelector(`.phase[data-phase="${phase}"]`); if (!phaseElement) return; progressContainer?.querySelectorAll('.phase').forEach(el => { el.classList.remove('active', 'completed', 'error'); if(el.dataset.phase === 'dynamic' && status !== 'active') el.style.display = 'none'; }); phaseElement.classList.add(status); if (phase === 'dynamic') phaseElement.style.display = 'flex'; if (status === 'error' || status === 'completed') { const finalPhase = status === 'error' ? 'error' : 'finished'; const finalElement = progressContainer?.querySelector(`.phase[data-phase="${finalPhase}"]`); if (finalElement) { finalElement.style.display = 'flex'; finalElement.classList.add(status); } } else { progressContainer?.querySelectorAll('.phase[data-phase="finished"], .phase[data-phase="error"]').forEach(el => el.style.display = 'none'); } };
-    let hasCriticalSinks = false; let endpointUrlUsedForAnalysis = originalFullEndpoint; let handlerCode = null; let bestHandler = null; let analysisStorageKey = endpointKey; let report = {}; let payloads = []; let vulnAnalysis = { sinks: [], securityIssues: [], dataFlows: [], originValidationChecks: [] }; let uniqueStructures = []; let staticAnalysisData = null; let staticAnalysisResult = null; let messagesAvailable = false; let dynamicAnalysisResults = null;
+
+    let handlerCode = null;
+    let bestHandler = null;
+    let analysisStorageKey = endpointKey;
+    let endpointUrlUsedForAnalysis = originalFullEndpoint;
+    let report = {};
+    let payloads = [];
+    let vulnAnalysis = { sinks: [], securityIssues: [], dataFlows: [], originValidationChecks: [] };
+    let uniqueStructures = [];
+    let staticAnalysisData = null;
+    let staticAnalysisResult = null;
+    let dynamicAnalysisResults = null;
+    let hasCriticalSinks = false;
+
     try {
         updatePhase('collection');
         if (!window.handlerTracer) { window.handlerTracer = new HandlerTracer(); }
-        const mappingKey = `analyzed-url-for-${endpointKey}`; const mappingResult = await new Promise(resolve => chrome.storage.local.get(mappingKey, resolve)); endpointUrlUsedForAnalysis = mappingResult[mappingKey] || originalFullEndpoint; analysisStorageKey = window.getStorageKeyForUrl(endpointUrlUsedForAnalysis); const bestHandlerStorageKey = `best-handler-${analysisStorageKey}`;
+
+        const mappingKey = `analyzed-url-for-${endpointKey}`;
+        const mappingResult = await new Promise(resolve => chrome.storage.local.get(mappingKey, resolve));
+        if (mappingResult && mappingResult[mappingKey]) {
+            analysisStorageKey = mappingResult[mappingKey];
+            log.debug(`[Trace Button] Found mapping. Using analysis key: ${analysisStorageKey}`);
+            const successfulUrlStorageKey = `successful-url-${analysisStorageKey}`;
+            const successfulUrlResult = await new Promise(resolve => chrome.storage.local.get(successfulUrlStorageKey, resolve));
+            endpointUrlUsedForAnalysis = successfulUrlResult[successfulUrlStorageKey] || analysisStorageKey;
+            log.debug(`[Trace Button] Associated analyzed URL: ${endpointUrlUsedForAnalysis}`);
+        } else {
+            log.debug(`[Trace Button] No mapping found. Using original key: ${analysisStorageKey}`);
+            endpointUrlUsedForAnalysis = originalFullEndpoint;
+        }
+
+        const bestHandlerStorageKey = `best-handler-${analysisStorageKey}`;
         log.debug(`[Trace Button] Attempting to retrieve handler from storage key: ${bestHandlerStorageKey}`);
-        const storedHandlerData = await new Promise(resolve => chrome.storage.local.get([bestHandlerStorageKey], resolve)); bestHandler = storedHandlerData[bestHandlerStorageKey]; handlerCode = bestHandler?.handler || bestHandler?.code;
+        const storedHandlerData = await new Promise(resolve => chrome.storage.local.get([bestHandlerStorageKey], resolve));
+        bestHandler = storedHandlerData[bestHandlerStorageKey];
+        handlerCode = bestHandler?.handler || bestHandler?.code;
         log.debug("[Trace Button] Retrieved Handler Code:", handlerCode ? handlerCode.substring(0, 300) + '...' : '[No Handler Code Found]');
-        if (!handlerCode) throw new Error(`No handler code found (Storage Key: ${bestHandlerStorageKey}). Run Play first.`);
-        const relevantMessages = await window.retrieveMessagesWithFallbacks(endpointKey); messagesAvailable = relevantMessages.length > 0;
-        log.debug(`[Trace Button] Retrieved ${relevantMessages.length} relevant messages. Message examples (max 2):`, relevantMessages.slice(0, 2));
-        updatePhase('analysis'); await new Promise(r => setTimeout(r, 50));
+
+        if (!handlerCode) {
+            throw new Error(`No handler code found (Storage Key: ${bestHandlerStorageKey}). Run Play first.`);
+        }
+
+        const relevantMessages = await window.retrieveMessagesWithFallbacks(analysisStorageKey, endpointKey);
+        const messagesAvailable = relevantMessages.length > 0;
+        log.debug(`[Trace Button] Retrieved ${relevantMessages.length} relevant messages for original key ${endpointKey} (using analysis key ${analysisStorageKey}).`);
+
+        updatePhase('analysis');
+        await new Promise(r => setTimeout(r, 50));
+
         staticAnalysisResult = { success: false, error: 'Static analyzer not available or prerequisites failed', analysis: null };
         if (window.analyzeHandlerStatically && handlerCode) {
             let isParsable = false; let preliminaryParseError = null;
@@ -524,18 +564,17 @@ async function handleTraceButton(endpoint, traceButton) {
                 try { const checkCode = 'const __dummyFunc = ' + handlerCode; window.acorn.parse(checkCode, { ecmaVersion: 'latest', allowReturnOutsideFunction: true }); isParsable = true; }
                 catch (parseError) { isParsable = false; preliminaryParseError = parseError; }
             } else { preliminaryParseError = new Error('Invalid or empty handler code provided'); isParsable = false; }
+
             if (isParsable) {
                 try {
-                    log.debug("[Trace Button] Calling analyzeHandlerStatically with handler code and sinks:", window.handlerTracer.domXssSinks);
-                    staticAnalysisResult = window.analyzeHandlerStatically( handlerCode, endpointKey, window.handlerTracer.domXssSinks, { eventParamName: bestHandler?.eventParamName });
-                    log.debug("[Trace Button] analyzeHandlerStatically Result Object:", staticAnalysisResult);
+                    staticAnalysisResult = window.analyzeHandlerStatically( handlerCode, analysisStorageKey, window.handlerTracer.domXssSinks, { eventParamName: bestHandler?.eventParamName });
                     if (staticAnalysisResult?.success && staticAnalysisResult?.analysis) {
                         staticAnalysisData = staticAnalysisResult.analysis;
-                        log.success("[Trace Button] Static analysis succeeded. Analysis data:", staticAnalysisData);
+                        log.success("[Trace Button] Static analysis succeeded.");
                     } else {
                         staticAnalysisData = null;
                         if (!staticAnalysisResult) staticAnalysisResult = { success: false, error: 'Analysis returned undefined/null result', analysis: null };
-                        log.warn(`[Trace Button] Static analysis failed or returned no success/analysis data: ${staticAnalysisResult?.error}. Proceeding without AST data.`);
+                        log.warn(`[Trace Button] Static analysis failed or returned no success/analysis data: ${staticAnalysisResult?.error}.`);
                     }
                 } catch (e) {
                     staticAnalysisData = null; staticAnalysisResult = { success: false, error: `Execution Error: ${e.message}`, analysis: null };
@@ -546,39 +585,102 @@ async function handleTraceButton(endpoint, traceButton) {
                 log.warn(`[Trace Button] ${staticAnalysisResult.error}`);
             }
         }
+
         vulnAnalysis = await window.handlerTracer.analyzeHandlerForVulnerabilities(handlerCode, staticAnalysisData);
-        log.debug("[Trace Button] Vulnerability analysis result:", vulnAnalysis);
         hasCriticalSinks = vulnAnalysis.sinks?.some(s => ['Critical', 'High'].includes(s.severity)) || false;
+
         const isStateDependent = staticAnalysisData?.externalStateAccesses?.length > 0 || staticAnalysisData?.indirectCalls?.length > 0;
-        if (isStateDependent && bestHandler?.tabId) {
-            updatePhase('dynamic');
-            log.info("[Trace] State dependent handler identified, attempting dynamic analysis...");
-            try {
-                const pointsOfInterest = [...new Set(staticAnalysisData.externalStateAccesses.map(a => a.base))];
-                dynamicAnalysisResults = await new Promise((resolve, reject) => {
-                    chrome.runtime.sendMessage({ type: "analyzeHandlerDynamically", payload: { targetTabId: bestHandler.tabId, targetFrameId: bestHandler.frameId || 0, handlerSnippet: handlerCode.substring(0, 200), pointsOfInterest: pointsOfInterest } }, response => { if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message)); else if (response?.success) resolve(response.results); else reject(new Error(response?.error || "Dynamic analysis failed in background")); });
-                    setTimeout(() => reject(new Error("Dynamic analysis timed out")), 20000);
-                });
-                log.success("[Trace] Dynamic analysis completed.", dynamicAnalysisResults);
-            } catch (dynError) { log.warn("[Trace] Dynamic analysis failed or timed out:", dynError.message); dynamicAnalysisResults = { error: dynError.message }; }
-        }
-        updatePhase('structure'); await new Promise(r => setTimeout(r, 50));
+
+        updatePhase('structure');
+        await new Promise(r => setTimeout(r, 50));
         if (messagesAvailable) { uniqueStructures = window.handlerTracer.analyzeJsonStructures(relevantMessages); }
         log.debug(`[Trace Button] Unique structures identified from messages: ${uniqueStructures.length}`);
-        updatePhase('generation'); await new Promise(r => setTimeout(r, 50));
+
+        updatePhase('generation');
+        await new Promise(r => setTimeout(r, 50));
         const isStaticAnalysisAvailable = !!(staticAnalysisResult?.success && staticAnalysisData);
-        const generationContext = { uniqueStructures, vulnerabilities: vulnAnalysis, staticAnalysisData: staticAnalysisData, originalMessages: relevantMessages, dynamicAnalysisResults: dynamicAnalysisResults };
-        log.debug("[Trace Button] Calling generateContextAwarePayloads with context:", { uniqueStructuresCount: uniqueStructures.length, vulnCount: vulnAnalysis.sinks?.length, issueCount: vulnAnalysis.securityIssues?.length, staticAnalysisSuccess: isStaticAnalysisAvailable, staticAnalysisKeys: staticAnalysisData ? Object.keys(staticAnalysisData) : 'N/A', originalMessageCount: relevantMessages.length, hasDynamicResults: !!dynamicAnalysisResults && !dynamicAnalysisResults.error });
+        const generationContext = { uniqueStructures, vulnerabilities: vulnAnalysis, staticAnalysisData: staticAnalysisData, originalMessages: relevantMessages, dynamicAnalysisResults: null };
         payloads = await window.handlerTracer.generateContextAwarePayloads(generationContext);
         log.info(`[Trace Button] Payload generation completed. Count: ${payloads.length}`);
-        updatePhase('saving'); const securityScore = window.handlerTracer.calculateRiskScore(vulnAnalysis);
-        report = { endpoint: endpointUrlUsedForAnalysis, originalEndpointKey: endpointKey, analysisStorageKey: analysisStorageKey, timestamp: new Date().toISOString(), analyzedHandler: bestHandler, vulnerabilities: vulnAnalysis.sinks || [], securityIssues: vulnAnalysis.securityIssues || [], securityScore: securityScore, details: { staticAnalysisRawOutput: staticAnalysisResult, accessedEventDataPaths: staticAnalysisData?.accessedEventDataPaths instanceof Set ? Array.from(staticAnalysisData.accessedEventDataPaths) : staticAnalysisData?.accessedEventDataPaths, requiredConditions: staticAnalysisData?.requiredConditions || {}, analyzedHandler: bestHandler, sinks: vulnAnalysis.sinks || [], securityIssues: vulnAnalysis.securityIssues || [], dataFlows: staticAnalysisData?.dataFlows || [], originValidationChecks: staticAnalysisData?.originChecks || [], externalStateAccesses: staticAnalysisData?.externalStateAccesses || [], indirectCalls: staticAnalysisData?.indirectCalls || [], dynamicAnalysisResults: dynamicAnalysisResults, payloadsGeneratedCount: payloads.length, uniqueStructures: uniqueStructures || [], staticAnalysisUsed: isStaticAnalysisAvailable, messagesAvailable: messagesAvailable, }, summary: { messagesAnalyzed: relevantMessages.length, patternsIdentified: uniqueStructures.length, sinksFound: vulnAnalysis.sinks?.length || 0, issuesFound: vulnAnalysis.securityIssues?.length || 0, payloadsGenerated: payloads.length, securityScore: securityScore, staticAnalysisUsed: isStaticAnalysisAvailable } };
-        const reportStorageKey = analysisStorageKey; const reportSaved = await window.traceReportStorage.saveTraceReport(reportStorageKey, report); const payloadsSaved = await window.traceReportStorage.saveReportPayloads(reportStorageKey, payloads); if (!reportSaved || !payloadsSaved) { throw new Error("Failed to save trace report or payloads."); } window.log.success(`Report & ${payloads.length} payloads saved for key: ${reportStorageKey}`); const traceInfoKey = `trace-info-${endpointKey}`; await chrome.storage.local.set({ [traceInfoKey]: { success: true, criticalSinks: hasCriticalSinks, analyzedUrl: endpointUrlUsedForAnalysis, analysisStorageKey: analysisStorageKey, timestamp: Date.now(), payloadCount: payloads.length, sinkCount: vulnAnalysis.sinks?.length || 0, usedStaticAnalysis: isStaticAnalysisAvailable } });
-        window.updateTraceButton(traceButton, 'success'); if (playButton) { window.updateButton(playButton, 'launch', { hasCriticalSinks: hasCriticalSinks, showEmoji: true }); } if (reportButton) { const reportState = hasCriticalSinks || (vulnAnalysis.securityIssues?.length || 0) > 0 ? 'green' : 'default'; window.updateReportButton(reportButton, reportState, originalFullEndpoint); } updatePhase('saving', 'completed');
+
+        updatePhase('saving');
+        const securityScore = window.handlerTracer.calculateRiskScore(vulnAnalysis);
+        report = {
+            endpoint: endpointUrlUsedForAnalysis, // The URL that was successfully analyzed
+            originalEndpointKey: endpointKey, // The key from the UI
+            analysisStorageKey: analysisStorageKey, // The key under which data is stored
+            timestamp: new Date().toISOString(),
+            analyzedHandler: bestHandler,
+            vulnerabilities: vulnAnalysis.sinks || [],
+            securityIssues: vulnAnalysis.securityIssues || [],
+            securityScore: securityScore,
+            details: {
+                staticAnalysisRawOutput: staticAnalysisResult,
+                accessedEventDataPaths: staticAnalysisData?.accessedEventDataPaths instanceof Set ? Array.from(staticAnalysisData.accessedEventDataPaths) : staticAnalysisData?.accessedEventDataPaths,
+                requiredConditions: staticAnalysisData?.requiredConditions || {},
+                analyzedHandler: bestHandler,
+                sinks: vulnAnalysis.sinks || [],
+                securityIssues: vulnAnalysis.securityIssues || [],
+                dataFlows: staticAnalysisData?.dataFlows || [],
+                originValidationChecks: staticAnalysisData?.originChecks || [],
+                externalStateAccesses: staticAnalysisData?.externalStateAccesses || [],
+                indirectCalls: staticAnalysisData?.indirectCalls || [],
+                dynamicAnalysisResults: dynamicAnalysisResults,
+                payloadsGeneratedCount: payloads.length,
+                uniqueStructures: uniqueStructures || [],
+                staticAnalysisUsed: isStaticAnalysisAvailable,
+                messagesAvailable: messagesAvailable,
+            },
+            summary: {
+                messagesAnalyzed: relevantMessages.length,
+                patternsIdentified: uniqueStructures.length,
+                sinksFound: vulnAnalysis.sinks?.length || 0,
+                issuesFound: vulnAnalysis.securityIssues?.length || 0,
+                payloadsGenerated: payloads.length,
+                securityScore: securityScore,
+                staticAnalysisUsed: isStaticAnalysisAvailable
+            }
+        };
+
+        const reportStorageKey = analysisStorageKey;
+        const reportSaved = await window.traceReportStorage.saveTraceReport(reportStorageKey, report);
+        const payloadsSaved = await window.traceReportStorage.saveReportPayloads(reportStorageKey, payloads);
+        if (!reportSaved || !payloadsSaved) { throw new Error("Failed to save trace report or payloads."); }
+        log.success(`Report & ${payloads.length} payloads saved for key: ${reportStorageKey}`);
+
+        const traceInfoKey = `trace-info-${endpointKey}`;
+        await chrome.storage.local.set({
+            [traceInfoKey]: {
+                success: true,
+                criticalSinks: hasCriticalSinks,
+                analyzedUrl: endpointUrlUsedForAnalysis,
+                analysisStorageKey: analysisStorageKey,
+                timestamp: Date.now(),
+                payloadCount: payloads.length,
+                sinkCount: vulnAnalysis.sinks?.length || 0,
+                usedStaticAnalysis: isStaticAnalysisAvailable
+            }
+        });
+
+        window.updateTraceButton(traceButton, 'success');
+        if (playButton) { window.updateButton(playButton, 'launch', { hasCriticalSinks: hasCriticalSinks, showEmoji: true }); }
+        if (reportButton) { const reportState = hasCriticalSinks || (vulnAnalysis.securityIssues?.length || 0) > 0 ? 'green' : 'default'; window.updateReportButton(reportButton, reportState, originalFullEndpoint); }
+        updatePhase('saving', 'completed');
+
     } catch (error) {
-        console.error(`[Trace Button ERROR] for ${originalFullEndpoint}:`, error); window.log.error(`[Trace Button ERROR] Error:`, error.message); window.updateTraceButton(traceButton, 'error'); const traceInfoKey = `trace-info-${endpointKey}`; try { await chrome.storage.local.set({ [traceInfoKey]: { success: false, criticalSinks: false, error: error.message, timestamp: Date.now() } }); } catch (e) {} if (reportButton) window.updateReportButton(reportButton, 'disabled', originalFullEndpoint); updatePhase('error', 'error'); const errorLabel = progressContainer?.querySelector('.phase[data-phase="error"] .label'); if(errorLabel) errorLabel.textContent = `Error: ${error.message.substring(0, 50)}...`;
+        console.error(`[Trace Button ERROR] for ${originalFullEndpoint}:`, error);
+        window.log.error(`[Trace Button ERROR] Error:`, error.message);
+        window.updateTraceButton(traceButton, 'error');
+        const traceInfoKey = `trace-info-${endpointKey}`;
+        try { await chrome.storage.local.set({ [traceInfoKey]: { success: false, criticalSinks: false, error: error.message, timestamp: Date.now() } }); } catch (e) {}
+        if (reportButton) window.updateReportButton(reportButton, 'disabled', originalFullEndpoint);
+        updatePhase('error', 'error');
+        const errorLabel = progressContainer?.querySelector('.phase[data-phase="error"] .label');
+        if(errorLabel) errorLabel.textContent = `Error: ${error.message.substring(0, 50)}...`;
     } finally {
-        setTimeout(() => { progressContainer?.remove(); }, 3000); sessionStorage.removeItem(traceInProgressKey); setTimeout(window.requestUiUpdate, 100);
+        setTimeout(() => { progressContainer?.remove(); }, 3000);
+        sessionStorage.removeItem(traceInProgressKey);
+        setTimeout(window.requestUiUpdate, 100);
     }
 }
 window.handleTraceButton = handleTraceButton;

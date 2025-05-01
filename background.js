@@ -1,3 +1,8 @@
+/**
+ * FrogPost Extension
+ * Originally Created by thisis0xczar/Lidor JFrog AppSec Team
+ * Refined on: 2025-05-01
+ */
 
 try {
     importScripts(
