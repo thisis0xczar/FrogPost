@@ -11,7 +11,6 @@
         return;
     }
 
-    let currentSourceMap = '';
     const STANDARD_EVENT_NAMES = /^(event|e|msg|message|evt|data|payload|p|d|m|evtData|msgData)$/; // Expanded common names
     const ORIGIN_PROP = 'origin';
     const DATA_PROP = 'data';

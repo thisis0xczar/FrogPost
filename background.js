@@ -150,13 +150,80 @@ async function handleWebPageLoadForDebug(tabId, targetUrl) {
     } finally { clearTimeout(analysisTimeout); try { chrome.debugger.onEvent.removeListener(onEvent); } catch(e) {} try { chrome.debugger.onDetach.removeListener(onDetach); } catch(e) {} if (attached) { try { await chrome.debugger.detach({ tabId: tabId }); log.debug(`[Debug Mode] Detached in finally block for tab ${tabId}`); } catch (e) { log.warn(`[Debug Mode] Error detaching in finally for tab ${tabId}: ${e.message}`) } } autoAttachInProgress.delete(tabId); }
 }
 
+async function fetchLatestReleaseInfo(repoOwner, repoName) {
+    const releasesUrl = `https://github.com/${repoOwner}/${repoName}/releases/`;
+    if(typeof log !== 'undefined') log.debug(`BG: Fetching releases page HTML from: ${releasesUrl}`);
+
+    try {
+        const response = await fetch(releasesUrl, {
+            method: 'GET',
+            cache: 'no-cache'
+        });
+
+        if (!response.ok) {
+            throw new Error(`GitHub releases page request failed: ${response.status} ${response.statusText}`);
+        }
+
+        const htmlText = await response.text();
+
+        const regex = /href=["']\/thisis0xczar\/FrogPost\/releases\/tag\/([^"']+)["']/i;
+        const match = htmlText.match(regex);
+
+        let tagNameFromHtml = null;
+        let releaseUrl = releasesUrl;
+
+        if (match && match[1]) {
+            tagNameFromHtml = match[1];
+            try {
+                releaseUrl = new URL(match[0].match(/href=["'](.*?)["']/i)[1], releasesUrl).href;
+            } catch {} // Ignore URL construction errors
+            if(typeof log !== 'undefined') log.debug(`BG: Latest release tag parsed from HTML via regex: ${tagNameFromHtml}`);
+        } else {
+            if(typeof log !== 'undefined') log.error("BG: Could not find the latest release tag link using regex on the releases page.");
+            throw new Error("Could not parse latest release tag from GitHub page HTML using regex.");
+        }
+
+        return {
+            success: true,
+            tagName: tagNameFromHtml,
+            url: releaseUrl
+        };
+
+    } catch (error) {
+        if(typeof log !== 'undefined') log.error("BG: Error fetching/parsing GitHub releases page:", error);
+        throw error;
+    }
+}
+
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (message.type === "checkVersion") { // Use a more specific message type
+        const repoOwner = "thisis0xczar";
+        const repoName = "FrogPost";
+        if(typeof log !== 'undefined') log.debug(`BG: Received version check request for ${repoOwner}/${repoName}`);
+
+        fetchLatestReleaseInfo(repoOwner, repoName)
+            .then(releaseInfo => {
+                if(typeof log !== 'undefined') log.debug("BG: Sending release info response:", releaseInfo);
+                sendResponse(releaseInfo);
+            })
+            .catch(error => {
+                if(typeof log !== 'undefined') log.error("BG: Version check failed in listener:", error);
+                sendResponse({ success: false, error: error.message || 'Unknown version check error' });
+            });
+        return true;
+
+    }
+});
+
 chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
     if (changeInfo.status === 'complete' && tab?.url) {
         try {
             const result = await chrome.storage.local.get([DEBUGGER_MODE_STORAGE_KEY]);
             const debuggerModeEnabled = result[DEBUGGER_MODE_STORAGE_KEY] || false;
             isDebuggerApiModeGloballyEnabled = debuggerModeEnabled;
-            if (!debuggerModeEnabled) { log.debug(`[onUpdated] Debugger mode is OFF (checked storage), skipping attachment for ${tab.url}`); return; }
+            if (!debuggerModeEnabled) {
+                return;
+            }
             if (tab.url.startsWith('chrome-extension://') && tab.url !== chrome.runtime.getURL("dashboard/dashboard.html")) { handleExtensionPageLoad(tabId, tab.url); }
             else if (tab.url.startsWith('http:') || tab.url.startsWith('https://')) { handleWebPageLoadForDebug(tabId, tab.url); }
         } catch (error) { log.error(`[onUpdated] Error checking debugger mode or processing tab ${tabId}:`, error); }
@@ -174,6 +241,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     let isAsync = false; let responseFunction = sendResponse;
     try {
         const messageType = message?.type; const payload = message?.payload; const detail = message?.detail; const payloadIndex = message?.payloadIndex; const senderTabId = sender?.tab?.id;
+        if (message.type === "performSearch" && message.query) {
+            console.log(`BG: Received search request for query: ${message.query}`);
+            performGoogleSearch(message.query) // Assume this function calls the Google Search tool
+                .then(results => {
+                    console.log("BG: Search successful, sending response.");
+                    sendResponse({ success: true, results: results });
+                })
+                .catch(error => {
+                    console.error("BG: Search failed:", error);
+                    sendResponse({ success: false, error: error.message || 'Unknown search error' });
+                });
+            return true;
+        }
         switch (messageType) {
             case "runtimeListenerCaptured": if (payload) { const { listenerCode, stackTrace, destinationUrl, context } = payload; const normalizedInfo = normalizeEndpointUrl(destinationUrl); const storageIdentifier = normalizedInfo?.normalized; if (listenerCode && storageIdentifier && typeof storageIdentifier === 'string') { const storageKey = `runtime-listeners-${storageIdentifier}`; const isValidListenerCode = code => code && typeof code === 'string' && !code.includes('[native code]') && code.length > 25; isAsync = true; (async () => { let responseSent = false; let response = { success: false, error: "Storage operation did not complete" }; try { const result = await chrome.storage.local.get([storageKey]); let listeners = result[storageKey] || []; const existingIndex = listeners.findIndex(l => l.code === listenerCode); const newListenerData = { code: listenerCode, stack: stackTrace, timestamp: Date.now(), context: context }; let needsEndpointNotification = false; let needsHandlerUpdateNotification = false; if (existingIndex === -1) { listeners.push(newListenerData); if (listeners.length > 30) listeners = listeners.slice(-30); await chrome.storage.local.set({ [storageKey]: listeners }); response = { success: true, action: "saved" }; if (isValidListenerCode(listenerCode)) { needsHandlerUpdateNotification = true; } } else { response = { success: true, action: "duplicate" }; if (isValidListenerCode(listenerCode)) { needsHandlerUpdateNotification = true; } } if (isValidListenerCode(listenerCode)) { if (!endpointsWithDetectedHandlers.has(storageIdentifier)) { endpointsWithDetectedHandlers.add(storageIdentifier); await saveHandlerEndpoints(); needsEndpointNotification = true; } } if (needsEndpointNotification) { notifyDashboard("handlerEndpointDetected", { endpointKey: storageIdentifier }); } if (needsHandlerUpdateNotification) { notifyDashboard("handlerCapturedForEndpoint", { endpointKey: storageIdentifier }); } } catch (error) { response = { success: false, error: error.message }; } finally { if (responseFunction && !responseSent) { try { responseFunction(response); responseSent = true; } catch (e) {} } } })(); return true; } else { if (responseFunction) responseFunction({ success: false, error: "Missing listenerCode or invalid destinationUrl" }); return false; } } break;
             case "postMessageCaptured": if (payload) { const {origin, destinationUrl, data, timestamp} = payload; let finalData = data; let calculatedMessageType = 'unknown'; if (finalData === undefined) calculatedMessageType = "undefined"; else if (finalData === null) calculatedMessageType = "null"; else if (Array.isArray(finalData)) calculatedMessageType = "array"; else if (typeof finalData === 'object') { calculatedMessageType = finalData.constructor === Object ? "object" : "special_object"; } else if (typeof finalData === 'string') { if ((finalData.startsWith('{') && finalData.endsWith('}')) || (finalData.startsWith('[') && finalData.endsWith(']'))) { try { const parsedData = JSON.parse(finalData); finalData = parsedData; if (Array.isArray(finalData)) calculatedMessageType = "array"; else if (typeof finalData === 'object' && finalData !== null && finalData.constructor === Object) calculatedMessageType = "object"; else calculatedMessageType = "string"; } catch (e) { calculatedMessageType = "string"; } } else { calculatedMessageType = "string"; } } else calculatedMessageType = typeof finalData; const destUrlStr = typeof destinationUrl === 'string' ? destinationUrl : 'unknown_frame_url'; const messageData = { origin: origin || sender.origin || sender.tab?.url || 'unknown', destinationUrl: destUrlStr, data: finalData, messageType: calculatedMessageType, timestamp: timestamp || new Date().toISOString(), messageId: `${timestamp || Date.now()}-${Math.random().toString(16).slice(2)}` }; messageBuffer.push(messageData); const newConnection = addFrameConnection(messageData.origin, messageData.destinationUrl); notifyDashboard('newPostMessage', messageData); if (newConnection) { const connectionsPayload = {}; frameConnections.forEach((v, k) => { connectionsPayload[k] = Array.from(v); }); notifyDashboard('newFrameConnection', connectionsPayload); } } if (responseFunction) responseFunction({success: true}); return false;
