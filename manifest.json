@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "FrogPost",
-  "version": "1.0",
+  "version": "1.2",
   "description": "FrogPost - One Stop Shop for postMessage communication and exploitation",
   "permissions": [
     "tabs",
