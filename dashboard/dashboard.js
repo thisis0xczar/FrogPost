@@ -498,6 +498,8 @@ function createMessageElement(msg) {
     return item;
 }
 
+
+
 function updateMessageListForUrl(url) {
     const messageList = document.getElementById('messagesList');
     if (!messageList) return;
@@ -515,24 +517,23 @@ function updateMessageListForUrl(url) {
         return;
     }
 
-    const normalizedUrlKey = getStorageKeyForUrl(url);
+    const selectedKey = getStorageKeyForUrl(url);
+
     const relatedMessages = window.frogPostState.messages.filter(msg => {
-        if (!msg) return false;
         const originKey = msg.origin ? getStorageKeyForUrl(msg.origin) : null;
         const destKey = msg.destinationUrl ? getStorageKeyForUrl(msg.destinationUrl) : null;
-        return originKey === normalizedUrlKey || destKey === normalizedUrlKey;
+        return originKey === selectedKey || destKey === selectedKey;
     });
 
     const filteredMessagesToDisplay = relatedMessages.filter(msg => {
         return !(typeof msg.data === 'object' && msg.data !== null && msg.data.hasOwnProperty(TEST_MESSAGE_KEY) && msg.data[TEST_MESSAGE_KEY] === TEST_MESSAGE_VALUE);
     });
 
-
     if (filteredMessagesToDisplay.length === 0) {
         if (noMessagesDiv) {
             noMessagesDiv.style.display = 'block';
             const totalRelatedCount = relatedMessages.length;
-            if (totalRelatedCount > 0) { // If the only message was the test message
+            if (totalRelatedCount > 0) {
                 noMessagesDiv.textContent = `No organic messages found involving endpoint: ${url} (Internal test messages hidden).`;
             } else {
                 noMessagesDiv.textContent = `No messages found involving endpoint: ${url}`;
@@ -603,58 +604,82 @@ function createActionButtonContainer(endpointKey) {
     return buttonContainer;
 }
 
-function createHostElement(hostOriginKey, iframeKeysSet) {
+function createEndpointGroupElement(parentKey, childKeysSet, filterText) {
     const hostElement = document.createElement("div");
     hostElement.className = "endpoint-host";
+
     const hostRow = document.createElement("div");
     hostRow.className = "host-row";
-    hostRow.dataset.url = hostOriginKey;
-    if (hostOriginKey === window.frogPostState.activeUrl) {
+    hostRow.dataset.url = parentKey;
+    if (parentKey === window.frogPostState.activeUrl) {
         hostRow.classList.add('active');
     }
+
     const hostName = document.createElement("span");
     hostName.className = "host-name";
-    hostName.textContent = hostOriginKey;
-    hostName.title = hostOriginKey;
+    hostName.textContent = parentKey;
+    hostName.title = parentKey;
+
     hostRow.addEventListener("click", (e) => {
         e.stopPropagation();
-        setActiveUrl(hostOriginKey);
+        setActiveUrl(parentKey);
     });
+
+    const parentButtonContainer = createActionButtonContainer(parentKey);
+
     hostRow.appendChild(hostName);
+    hostRow.appendChild(parentButtonContainer);
     hostElement.appendChild(hostRow);
 
     const iframeContainer = document.createElement("div");
     iframeContainer.className = "iframe-container";
-    const sortedIframeKeys = Array.from(iframeKeysSet).sort();
-    let iframeCount = 0;
-    sortedIframeKeys.forEach((iframeFullKey) => { // Declared here
-        if (iframeFullKey === hostOriginKey) return;
 
-        const iframeRow = document.createElement("div");
-        iframeRow.className = "iframe-row";
-        iframeRow.setAttribute("data-endpoint-key", iframeFullKey);
-        iframeRow.dataset.url = iframeFullKey;
-        if (iframeFullKey === window.frogPostState.activeUrl) { // Used here
-            iframeRow.classList.add('active');
+    const sortedChildKeys = Array.from(childKeysSet).sort();
+    let displayedChildrenCount = 0;
+
+    sortedChildKeys.forEach((childKey) => {
+        const childMatchesFilter = !filterText || childKey.toLowerCase().includes(filterText);
+        const isChildSilent = getMessageCount(childKey) === 0;
+
+        let showChild = false;
+        if (showOnlySilentIframes) {
+            showChild = isChildSilent && childMatchesFilter;
+        } else {
+            showChild = childMatchesFilter;
         }
-        const iframeName = document.createElement("span");
-        iframeName.className = "iframe-name";
-        iframeName.textContent = iframeFullKey;
-        iframeName.title = iframeFullKey;
-        iframeRow.addEventListener("click", (e) => {
-            e.stopPropagation();
-            setActiveUrl(iframeFullKey);
-        });
-        const iframeButtonContainer = createActionButtonContainer(iframeFullKey);
-        iframeRow.appendChild(iframeName);
-        iframeRow.appendChild(iframeButtonContainer);
-        iframeContainer.appendChild(iframeRow);
-        iframeCount++;
+
+        if (showChild) {
+            const iframeRow = document.createElement("div");
+            iframeRow.className = "iframe-row";
+            iframeRow.setAttribute("data-endpoint-key", childKey);
+            iframeRow.dataset.url = childKey;
+            if (childKey === window.frogPostState.activeUrl) {
+                iframeRow.classList.add('active');
+            }
+
+            const iframeName = document.createElement("span");
+            iframeName.className = "iframe-name";
+            iframeName.textContent = childKey;
+            iframeName.title = childKey;
+
+            iframeRow.addEventListener("click", (e) => {
+                e.stopPropagation();
+                setActiveUrl(childKey);
+            });
+
+            const childButtonContainer = createActionButtonContainer(childKey);
+
+            iframeRow.appendChild(iframeName);
+            iframeRow.appendChild(childButtonContainer);
+            iframeContainer.appendChild(iframeRow);
+            displayedChildrenCount++;
+        }
     });
 
-    if (iframeCount > 0) {
+    if (displayedChildrenCount > 0) {
         hostElement.appendChild(iframeContainer);
     }
+
     return hostElement;
 }
 
@@ -668,67 +693,119 @@ function updateDashboardUI() {
 
     endpointsList.querySelectorAll('.endpoint-host, .no-endpoints').forEach(el => el.remove());
 
-    const endpointHierarchy = new Map();
-    const allUrls = new Set();
-    window.frogPostState.messages.forEach(msg => { if (msg?.origin) allUrls.add(msg.origin); if (msg?.destinationUrl) allUrls.add(msg.destinationUrl); });
-    window.frogPostState.loadedData.urls.forEach(url => allUrls.add(url));
-    knownHandlerEndpoints.forEach(url => allUrls.add(url));
 
-    allUrls.forEach(url => {
-        const normResult = normalizeEndpointUrl(url);
-        const normKey = normResult?.key;
-        const hostOriginKey = normResult?.components?.origin;
-        if (!normKey || normKey === 'null' || !hostOriginKey) return;
-        if (!endpointHierarchy.has(hostOriginKey)) endpointHierarchy.set(hostOriginKey, new Set());
-        endpointHierarchy.get(hostOriginKey).add(normKey);
+    const groupsByTopLevel = new Map();
+    const allKnownKeys = new Set();
+
+    window.frogPostState.messages.forEach(msg => {
+        if (!msg.topLevelUrl) { // Can't group without top-level context
+            if(msg.origin) allKnownKeys.add(getStorageKeyForUrl(msg.origin));
+            if(msg.destinationUrl) allKnownKeys.add(getStorageKeyForUrl(msg.destinationUrl));
+            return;
+        }
+
+        const topLevelKey = getStorageKeyForUrl(msg.topLevelUrl);
+        if (!topLevelKey || topLevelKey === 'null') return;
+
+        allKnownKeys.add(topLevelKey);
+
+        if (!groupsByTopLevel.has(topLevelKey)) {
+            groupsByTopLevel.set(topLevelKey, new Set());
+        }
+        const relatedEndpoints = groupsByTopLevel.get(topLevelKey);
+
+        const sourceKey = msg.origin ? getStorageKeyForUrl(msg.origin) : null;
+        const destKey = msg.destinationUrl ? getStorageKeyForUrl(msg.destinationUrl) : null;
+
+        if (sourceKey && sourceKey !== topLevelKey && sourceKey !== 'null') {
+            relatedEndpoints.add(sourceKey);
+            allKnownKeys.add(sourceKey);
+        }
+        if (destKey && destKey !== topLevelKey && destKey !== 'null') {
+            relatedEndpoints.add(destKey);
+            allKnownKeys.add(destKey);
+        }
     });
 
+    knownHandlerEndpoints.forEach(key => allKnownKeys.add(key));
+    window.frogPostState.loadedData.urls.forEach(url => {
+        const key = getStorageKeyForUrl(url);
+        if(key && key !== 'null') allKnownKeys.add(key);
+    });
+
+
     const fragment = document.createDocumentFragment();
-    let hostCount = 0;
-    const sortedHostKeys = Array.from(endpointHierarchy.keys()).sort();
+    let displayedEndpointCount = 0;
+    const renderedKeys = new Set();
 
-    sortedHostKeys.forEach(hostOriginKey => {
-        const fullUrlKeysSet = endpointHierarchy.get(hostOriginKey) || new Set();
-        const hostMatchesTextFilter = !filterText || hostOriginKey.toLowerCase().includes(filterText);
+    const sortedTopLevelKeys = Array.from(groupsByTopLevel.keys()).sort();
 
-        let visibleIframesSet = new Set();
-        let hasAnyVisibleChildren = false;
+    sortedTopLevelKeys.forEach(topLevelKey => {
+        if (renderedKeys.has(topLevelKey)) return;
 
-        fullUrlKeysSet.forEach(iframeFullKey => {
-            if (iframeFullKey === hostOriginKey) return;
+        const childKeysSet = groupsByTopLevel.get(topLevelKey) || new Set();
 
-            const iframeMatchesTextFilter = !filterText || iframeFullKey.toLowerCase().includes(filterText);
-            const isIframeSilent = getMessageCount(iframeFullKey) === 0;
+        const topLevelMatchesFilter = !filterText || topLevelKey.toLowerCase().includes(filterText);
+        const childrenMatchFilter = !filterText || Array.from(childKeysSet).some(childKey => childKey.toLowerCase().includes(filterText));
 
-            const shouldShowThisIframe = iframeMatchesTextFilter && (!showOnlySilentIframes || isIframeSilent);
+        let showGroup = topLevelMatchesFilter || childrenMatchFilter;
 
-            if (shouldShowThisIframe) {
-                visibleIframesSet.add(iframeFullKey);
-                hasAnyVisibleChildren = true;
-            }
-        });
+        if (showOnlySilentIframes) {
+            const isTopLevelConsideredSilent = getMessageCount(topLevelKey) === 0;
+            const hasVisibleSilentChild = Array.from(childKeysSet).some(ck => getMessageCount(ck) === 0 && (!filterText || ck.toLowerCase().includes(filterText)));
+            showGroup = hasVisibleSilentChild;
+        }
 
-        const showHost = (!showOnlySilentIframes && hostMatchesTextFilter) || hasAnyVisibleChildren;
-
-        if (showHost) {
-            const hostElement = createHostElement(hostOriginKey, visibleIframesSet);
-            if (hostElement) {
-                fragment.appendChild(hostElement);
-                hostCount++;
+        if (showGroup) {
+            const endpointGroupElement = createEndpointGroupElement(topLevelKey, childKeysSet, filterText);
+            if (endpointGroupElement) {
+                fragment.appendChild(endpointGroupElement);
+                displayedEndpointCount++;
+                renderedKeys.add(topLevelKey);
+                childKeysSet.forEach(childKey => renderedKeys.add(childKey));
             }
         }
     });
 
-    let noEndpointsDiv = endpointsList.querySelector('.no-endpoints');
-    if (!noEndpointsDiv) { noEndpointsDiv = document.createElement('div'); noEndpointsDiv.className = 'no-endpoints'; if(filterContainer && filterContainer.nextSibling) endpointsList.insertBefore(noEndpointsDiv, filterContainer.nextSibling); else endpointsList.appendChild(noEndpointsDiv); }
+    allKnownKeys.forEach(key => {
+        if (!renderedKeys.has(key)) {
+            const matchesFilter = !filterText || key.toLowerCase().includes(filterText);
+            const isSilent = getMessageCount(key) === 0;
+            let showStandalone = matchesFilter && (!showOnlySilentIframes || isSilent);
 
-    if (hostCount > 0) { endpointsList.appendChild(fragment); noEndpointsDiv.style.display = 'none'; }
-    else { noEndpointsDiv.style.display = 'block'; const hasAnyEndpoints = sortedHostKeys.length > 0 || knownHandlerEndpoints.size > 0; if (filterText || showOnlySilentIframes) { noEndpointsDiv.textContent = `No endpoints match active filters.`; } else if (hasAnyEndpoints) { noEndpointsDiv.textContent = "No endpoints to display."; } else { noEndpointsDiv.textContent = "No endpoints captured or listeners found."; } }
+            if (showStandalone) {
+                const endpointGroupElement = createEndpointGroupElement(key, new Set(), filterText);
+                if (endpointGroupElement) {
+                    fragment.appendChild(endpointGroupElement);
+                    displayedEndpointCount++;
+                    renderedKeys.add(key);
+                }
+            }
+        }
+    });
+
+
+    let noEndpointsDiv = endpointsList.querySelector('.no-endpoints');
+    if (!noEndpointsDiv) { noEndpointsDiv = document.createElement('div'); noEndpointsDiv.className = 'no-endpoints'; /* ... append correctly ... */ if(filterContainer && filterContainer.nextSibling) endpointsList.insertBefore(noEndpointsDiv, filterContainer.nextSibling); else endpointsList.appendChild(noEndpointsDiv); }
+
+    if (displayedEndpointCount > 0) {
+        endpointsList.appendChild(fragment);
+        noEndpointsDiv.style.display = 'none';
+    } else {
+        noEndpointsDiv.style.display = 'block';
+        const hasAnyData = window.frogPostState.messages.length > 0 || knownHandlerEndpoints.size > 0 || window.frogPostState.loadedData.urls.size > 0;
+        if (filterText || showOnlySilentIframes) {
+            noEndpointsDiv.textContent = `No endpoints match active filters.`;
+        } else if (hasAnyData) {
+            noEndpointsDiv.textContent = "No endpoint groups to display based on captured messages.";
+        } else {
+            noEndpointsDiv.textContent = "No endpoints captured or listeners found.";
+        }
+    }
 
     updateMessageListForUrl(window.frogPostState.activeUrl);
     updateEndpointCounts();
 }
-window.updateDashboardUI = updateDashboardUI;
 
 function requestUiUpdate() {
     clearTimeout(uiUpdateTimer);
@@ -749,6 +826,7 @@ function updateEndpointCounts() {
     }
 }
 
+
 function initializeMessageHandling() {
     chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         if (!message?.type) return false;
@@ -764,7 +842,6 @@ function initializeMessageHandling() {
                         let isTestMessage = false;
                         if (typeof newMsg.data === 'object' && newMsg.data !== null && newMsg.data.hasOwnProperty(TEST_MESSAGE_KEY) && newMsg.data[TEST_MESSAGE_KEY] === TEST_MESSAGE_VALUE) {
                             isTestMessage = true;
-                            if(typeof log !== 'undefined') log.debug("[Message Listener] Ignoring internal breakpoint test message.");
                         }
 
                         if (!isTestMessage) {
@@ -782,7 +859,7 @@ function initializeMessageHandling() {
                     needsUiUpdate = true;
                     break;
                 case "updateMessages":
-                    if (message.messages) {
+                    if (Array.isArray(message.messages)) {
                         const filteredMessages = message.messages.filter(msg => !(typeof msg.data === 'object' && msg.data !== null && msg.data.hasOwnProperty(TEST_MESSAGE_KEY) && msg.data[TEST_MESSAGE_KEY] === TEST_MESSAGE_VALUE));
                         window.frogPostState.messages.length = 0;
                         window.frogPostState.messages.push(...filteredMessages);
@@ -812,18 +889,29 @@ function initializeMessageHandling() {
 
     window.traceReportStorage.listAllReports().then(() => {
         chrome.runtime.sendMessage({ type: "fetchInitialState" }, (response) => {
-            if (chrome.runtime.lastError) { log.error("[MsgListener] Error receiving fetchInitialState response:", chrome.runtime.lastError.message); requestUiUpdate(); return; }
+            if (chrome.runtime.lastError) {
+                log.error("[MsgListener] Error receiving fetchInitialState response:", chrome.runtime.lastError.message);
+                requestUiUpdate();
+                return;
+            }
             if (response?.success) {
                 const TEST_MESSAGE_KEY = "FrogPost";
                 const TEST_MESSAGE_VALUE = "BreakpointTest";
-                if (response.messages) {
+                if (response.messages && Array.isArray(response.messages)) {
                     const filteredMessages = response.messages.filter(msg => !(typeof msg.data === 'object' && msg.data !== null && msg.data.hasOwnProperty(TEST_MESSAGE_KEY) && msg.data[TEST_MESSAGE_KEY] === TEST_MESSAGE_VALUE));
                     window.frogPostState.messages.length = 0;
                     window.frogPostState.messages.push(...filteredMessages);
                 }
-                if (response.handlerEndpointKeys) { knownHandlerEndpoints.clear(); endpointsWithHandlers.clear(); response.handlerEndpointKeys.forEach(key => { knownHandlerEndpoints.add(key); endpointsWithHandlers.add(key); }); }
+                if (response.handlerEndpointKeys && Array.isArray(response.handlerEndpointKeys)) {
+                    knownHandlerEndpoints.clear();
+                    endpointsWithHandlers.clear();
+                    response.handlerEndpointKeys.forEach(key => { knownHandlerEndpoints.add(key); endpointsWithHandlers.add(key); });
+                }
                 requestUiUpdate();
-            } else { log.error("Failed to fetch initial state:", response?.error); requestUiUpdate(); }
+            } else {
+                log.error("Failed to fetch initial state:", response?.error);
+                requestUiUpdate();
+            }
         });
     });
 }
