@@ -256,7 +256,64 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         }
         switch (messageType) {
             case "runtimeListenerCaptured": if (payload) { const { listenerCode, stackTrace, destinationUrl, context } = payload; const normalizedInfo = normalizeEndpointUrl(destinationUrl); const storageIdentifier = normalizedInfo?.normalized; if (listenerCode && storageIdentifier && typeof storageIdentifier === 'string') { const storageKey = `runtime-listeners-${storageIdentifier}`; const isValidListenerCode = code => code && typeof code === 'string' && !code.includes('[native code]') && code.length > 25; isAsync = true; (async () => { let responseSent = false; let response = { success: false, error: "Storage operation did not complete" }; try { const result = await chrome.storage.local.get([storageKey]); let listeners = result[storageKey] || []; const existingIndex = listeners.findIndex(l => l.code === listenerCode); const newListenerData = { code: listenerCode, stack: stackTrace, timestamp: Date.now(), context: context }; let needsEndpointNotification = false; let needsHandlerUpdateNotification = false; if (existingIndex === -1) { listeners.push(newListenerData); if (listeners.length > 30) listeners = listeners.slice(-30); await chrome.storage.local.set({ [storageKey]: listeners }); response = { success: true, action: "saved" }; if (isValidListenerCode(listenerCode)) { needsHandlerUpdateNotification = true; } } else { response = { success: true, action: "duplicate" }; if (isValidListenerCode(listenerCode)) { needsHandlerUpdateNotification = true; } } if (isValidListenerCode(listenerCode)) { if (!endpointsWithDetectedHandlers.has(storageIdentifier)) { endpointsWithDetectedHandlers.add(storageIdentifier); await saveHandlerEndpoints(); needsEndpointNotification = true; } } if (needsEndpointNotification) { notifyDashboard("handlerEndpointDetected", { endpointKey: storageIdentifier }); } if (needsHandlerUpdateNotification) { notifyDashboard("handlerCapturedForEndpoint", { endpointKey: storageIdentifier }); } } catch (error) { response = { success: false, error: error.message }; } finally { if (responseFunction && !responseSent) { try { responseFunction(response); responseSent = true; } catch (e) {} } } })(); return true; } else { if (responseFunction) responseFunction({ success: false, error: "Missing listenerCode or invalid destinationUrl" }); return false; } } break;
-            case "postMessageCaptured": if (payload) { const {origin, destinationUrl, data, timestamp} = payload; let finalData = data; let calculatedMessageType = 'unknown'; if (finalData === undefined) calculatedMessageType = "undefined"; else if (finalData === null) calculatedMessageType = "null"; else if (Array.isArray(finalData)) calculatedMessageType = "array"; else if (typeof finalData === 'object') { calculatedMessageType = finalData.constructor === Object ? "object" : "special_object"; } else if (typeof finalData === 'string') { if ((finalData.startsWith('{') && finalData.endsWith('}')) || (finalData.startsWith('[') && finalData.endsWith(']'))) { try { const parsedData = JSON.parse(finalData); finalData = parsedData; if (Array.isArray(finalData)) calculatedMessageType = "array"; else if (typeof finalData === 'object' && finalData !== null && finalData.constructor === Object) calculatedMessageType = "object"; else calculatedMessageType = "string"; } catch (e) { calculatedMessageType = "string"; } } else { calculatedMessageType = "string"; } } else calculatedMessageType = typeof finalData; const destUrlStr = typeof destinationUrl === 'string' ? destinationUrl : 'unknown_frame_url'; const messageData = { origin: origin || sender.origin || sender.tab?.url || 'unknown', destinationUrl: destUrlStr, data: finalData, messageType: calculatedMessageType, timestamp: timestamp || new Date().toISOString(), messageId: `${timestamp || Date.now()}-${Math.random().toString(16).slice(2)}` }; messageBuffer.push(messageData); const newConnection = addFrameConnection(messageData.origin, messageData.destinationUrl); notifyDashboard('newPostMessage', messageData); if (newConnection) { const connectionsPayload = {}; frameConnections.forEach((v, k) => { connectionsPayload[k] = Array.from(v); }); notifyDashboard('newFrameConnection', connectionsPayload); } } if (responseFunction) responseFunction({success: true}); return false;
+            case "postMessageCaptured":
+                if (payload) {
+                    const { origin, destinationUrl, data, timestamp } = payload;
+                    let finalData = data;
+                    let processedData = data;
+                    let calculatedMessageType = 'unknown';
+
+                    if (processedData === undefined) {
+                        calculatedMessageType = "undefined";
+                    } else if (processedData === null) {
+                        calculatedMessageType = "null";
+                    } else if (Array.isArray(processedData)) {
+                        calculatedMessageType = "array";
+                    } else if (typeof processedData === 'object' && processedData !== null) {
+                        calculatedMessageType = processedData.constructor === Object ? "object" : "special_object";
+                    } else if (typeof processedData === 'string') {
+                        const trimmedData = processedData.trim();
+                        if ((trimmedData.startsWith('{') && trimmedData.endsWith('}')) || (trimmedData.startsWith('[') && trimmedData.endsWith(']'))) {
+                            try {
+                                const parsed = JSON.parse(trimmedData);
+                                processedData = parsed;
+                                calculatedMessageType = Array.isArray(parsed) ? "array" : "object";
+                            } catch (e) {
+                                calculatedMessageType = "string";
+                            }
+                        } else {
+                            calculatedMessageType = "string";
+                        }
+                    } else {
+                        calculatedMessageType = typeof processedData;
+                    }
+
+
+                    const destUrlStr = typeof destinationUrl === 'string' ? destinationUrl : 'unknown_frame_url';
+                    const topLevelUrlRaw = sender?.tab?.url || null;
+
+                    const messageData = {
+                        origin: origin || sender.origin || 'unknown',
+                        destinationUrl: destUrlStr,
+                        data: processedData, // Send the potentially parsed data
+                        messageType: calculatedMessageType, // Send the refined type
+                        timestamp: timestamp || new Date().toISOString(),
+                        messageId: `${timestamp || Date.now()}-${Math.random().toString(16).slice(2)}`,
+                        topLevelUrl: topLevelUrlRaw
+                    };
+
+                    messageBuffer.push(messageData);
+                    notifyDashboard('newPostMessage', messageData);
+
+                    const newConnection = addFrameConnection(messageData.origin, messageData.destinationUrl);
+                    if (newConnection) {
+                        const connectionsPayload = {};
+                        frameConnections.forEach((v, k) => { connectionsPayload[k] = Array.from(v); });
+                        notifyDashboard('newFrameConnection', connectionsPayload);
+                    }
+                }
+                if (responseFunction) responseFunction({ success: true });
+                return false;
             case "FROGPOST_MUTATION": notifyDashboard("domMutationDetected", { detail: detail, location: message.location, payloadIndex: payloadIndex }); return false;
             case "FROGPOST_CONSOLE_SUCCESS": if (payloadIndex !== undefined && payloadIndex !== -1) { if (!consoleSuccessIndices.includes(payloadIndex)) { consoleSuccessIndices.push(payloadIndex); } } notifyDashboard("consoleSuccessDetected", { detail: detail, location: message.location, payloadIndex: payloadIndex }); return false;
             case "getConsoleSuccessIndices": const indicesToSend = [...consoleSuccessIndices]; consoleSuccessIndices = []; responseFunction({ success: true, indices: indicesToSend }); return true;
