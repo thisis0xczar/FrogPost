@@ -1,7 +1,7 @@
 /**
  * FrogPost Extension
  * Originally Created by thisis0xczar/Lidor JFrog AppSec Team
- * Refined on: 2025-05-02
+ * Refined on: 2025-05-07
  */
 class TraceReportStorage {
     constructor() {
@@ -34,7 +34,6 @@ class TraceReportStorage {
     async saveTraceReport(endpoint, traceReport) {
         if (!this.db) await this.openDatabase();
 
-        const payloadsToSave = traceReport.details?.payloads || [];
         let mainReportData;
         try {
             mainReportData = structuredClone(traceReport);
@@ -42,25 +41,30 @@ class TraceReportStorage {
                 delete mainReportData.details.payloads;
             }
         } catch(e) {
-            console.warn("structuredClone failed during save, using JSON fallback.");
+            console.warn("structuredClone failed during save trace report metadata, using JSON fallback.", e);
             mainReportData = JSON.parse(JSON.stringify(traceReport));
             if (mainReportData.details) delete mainReportData.details.payloads;
         }
 
-        const reportSaved = await new Promise((resolve, reject) => {
+        return new Promise((resolve, reject) => {
             try {
                 const transaction = this.db.transaction(['reports'], 'readwrite');
                 const store = transaction.objectStore('reports');
                 const reportToStore = { endpoint: endpoint, timestamp: Date.now(), report: mainReportData };
                 const request = store.put(reportToStore);
-                request.onsuccess = () => resolve(true);
-                request.onerror = (event) => { console.error('Error saving main trace report:', event.target.error); reject(false); };
-            } catch (err) { console.error("Error creating save transaction for report:", err); reject(false); }
+                request.onsuccess = () => {
+                    log.debug(`Main trace report metadata saved for ${endpoint}`);
+                    resolve(true);
+                };
+                request.onerror = (event) => {
+                    console.error('Error saving main trace report metadata:', event.target.error);
+                    reject(false);
+                };
+            } catch (err) {
+                console.error("Error creating save transaction for report metadata:", err);
+                reject(false);
+            }
         });
-
-        const payloadsSaved = await this.saveReportPayloads(endpoint, payloadsToSave);
-        log.debug(`Trace report saved for ${endpoint}`);
-        return reportSaved && payloadsSaved;
     }
 
     async saveReportPayloads(endpoint, payloads) {
@@ -69,11 +73,20 @@ class TraceReportStorage {
             try {
                 const transaction = this.db.transaction(['payloads'], 'readwrite');
                 const store = transaction.objectStore('payloads');
-                const payloadData = { endpoint: endpoint, payloads: payloads };
+                const payloadData = { endpoint: endpoint, payloads: payloads || [] };
                 const request = store.put(payloadData);
-                request.onsuccess = () => resolve(true);
-                request.onerror = (event) => { console.error('Error saving payloads:', event.target.error); reject(false); };
-            } catch (err) { console.error("Error creating save transaction for payloads:", err); reject(false); }
+                request.onsuccess = () => {
+                    log.debug(`${payloads?.length || 0} payloads saved for ${endpoint}`);
+                    resolve(true);
+                };
+                request.onerror = (event) => {
+                    console.error('Error saving report payloads:', event.target.error);
+                    reject(false);
+                };
+            } catch (err) {
+                console.error("Error creating save transaction for payloads:", err);
+                reject(false);
+            }
         });
     }
 
@@ -115,6 +128,5 @@ class TraceReportStorage {
             } catch (err) { console.error("Error creating list transaction for reports:", err); reject([]); }
         });
     }
-
 }
 window.traceReportStorage = new TraceReportStorage();

@@ -1,7 +1,7 @@
 /**
  * FrogPost Extension
  * Originally Created by thisis0xczar/Lidor JFrog AppSec Team
- * Refined on: 2025-05-02
+ * Refined on: 2025-05-07
  */
 (function(global) {
     const JWT_REGEX = /eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g;
@@ -349,7 +349,7 @@
                     if (typeof window.sendToFrame === 'function') window.sendToFrame(processed);
                     else iframe.contentWindow.postMessage(processed, '*');
                 } catch (error) { console.error(`[Fuzzer] Error sending payload index ${msgIdx - 1}:`, error); }
-            }, 100);
+            }, 50);
         }
 
         replaceJwtTokens(payload) {

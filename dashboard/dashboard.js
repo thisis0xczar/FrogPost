@@ -1,7 +1,7 @@
 /**
  * FrogPost Extension
  * Originally Created by thisis0xczar/Lidor JFrog AppSec Team
- * Refined on: 2025-05-02
+ * Refined on: 2025-05-07
  */
 window.frogPostState = {
     frameConnections: new Map(),
@@ -1108,8 +1108,6 @@ async function showUrlModificationModal(originalUrl, failureReason) {
     return new Promise((resolve) => { const modalContainer = document.getElementById('urlModificationModalContainer'); if (!modalContainer) { resolve({ action: 'cancel', modifiedUrl: null }); return; } modalContainer.innerHTML = ''; const backdrop = document.createElement('div'); backdrop.className = 'modal-backdrop'; const modal = document.createElement('div'); modal.className = 'url-modification-modal'; let currentUrl = new URL(originalUrl); const params = new URLSearchParams(currentUrl.search); let paramInputs = {}; let paramsHTML = ''; if (Array.from(params.keys()).length > 0) { params.forEach((value, key) => { const inputId = `param-input-${key}`; paramsHTML += `<div class="url-param-row"><label for="${inputId}" class="url-param-label">${escapeHTML(key)}:</label><input type="text" id="${inputId}" class="url-param-input" value="${escapeHTML(value)}"></div>`; paramInputs[key] = inputId; }); } else paramsHTML = '<p class="url-modal-no-params">No query parameters found.</p>'; modal.innerHTML = `<div class="url-modal-header"><h4>Embedding Check Failed - Modify URL?</h4><button class="close-modal-btn">&times;</button></div><div class="url-modal-body"><p class="url-modal-reason"><strong>Reason:</strong> ${escapeHTML(failureReason)}</p><p class="url-modal-original"><strong>Original URL:</strong> <span class="url-display">${escapeHTML(originalUrl)}</span></p><hr><h5 class="url-modal-params-title">Edit Query Parameters:</h5><div class="url-params-editor">${paramsHTML}</div></div><div class="url-modal-footer"><button id="urlCancelBtn" class="control-button secondary-button">Cancel Analysis</button><button id="urlContinueBtn" class="control-button secondary-button orange-button">Analyze Original Anyway</button><button id="urlRetryBtn" class="control-button primary-button">Modify & Retry Analysis</button></div>`; modalContainer.appendChild(backdrop); modalContainer.appendChild(modal); const closeModal = (result) => { modalContainer.innerHTML = ''; resolve(result); }; modal.querySelector('.close-modal-btn').addEventListener('click', () => closeModal({ action: 'cancel', modifiedUrl: null })); backdrop.addEventListener('click', () => closeModal({ action: 'cancel', modifiedUrl: null })); modal.querySelector('#urlCancelBtn').addEventListener('click', () => closeModal({ action: 'cancel', modifiedUrl: null })); modal.querySelector('#urlContinueBtn').addEventListener('click', () => closeModal({ action: 'continue', modifiedUrl: originalUrl })); modal.querySelector('#urlRetryBtn').addEventListener('click', () => { const newParams = new URLSearchParams(); let changed = false; params.forEach((originalValue, key) => { const inputElement = document.getElementById(paramInputs[key]); const newValue = inputElement ? inputElement.value : originalValue; newParams.set(key, newValue); if (newValue !== originalValue) changed = true; }); if (!changed) { showToastNotification("No parameters were changed.", "info", 3000); return; } currentUrl.search = newParams.toString(); const modifiedUrlString = currentUrl.toString(); if (!isValidUrl(modifiedUrlString)) { showToastNotification("Modified URL is invalid.", "error", 4000); return; } closeModal({ action: 'retry', modifiedUrl: modifiedUrlString }); }); });
 }
 
-// In dashboard.js
-
 async function handlePlayButton(endpoint, button, skipCheck = false) {
     const originalFullEndpoint = endpoint;
     const endpointKey = button.getAttribute('data-endpoint');
@@ -1132,6 +1130,7 @@ async function handlePlayButton(endpoint, button, skipCheck = false) {
             let successfulUrlResult = await new Promise(resolve => chrome.storage.local.get(successfulUrlStorageKey, resolve));
             let successfulUrl = successfulUrlResult[successfulUrlStorageKey];
             let analysisKeyToUse = successfulUrl ? getStorageKeyForUrl(successfulUrl) : null;
+
             if (!analysisKeyToUse) {
                 const mappingKey = `analyzed-url-for-${endpointKey}`;
                 const mappingResult = await new Promise(resolve => chrome.storage.local.get(mappingKey, resolve));
@@ -1140,22 +1139,47 @@ async function handlePlayButton(endpoint, button, skipCheck = false) {
                     const mappedSuccessfulUrlKey = `successful-url-${analysisKeyToUse}`;
                     successfulUrlResult = await new Promise(resolve => chrome.storage.local.get(mappedSuccessfulUrlKey, resolve));
                     successfulUrl = successfulUrlResult[mappedSuccessfulUrlKey] || analysisKeyToUse;
-                } else { analysisKeyToUse = endpointKey; successfulUrl = originalFullEndpoint; }
+                } else {
+                    analysisKeyToUse = endpointKey;
+                    successfulUrl = originalFullEndpoint;
+                }
             }
-            const [traceReport, storedPayloads, storedMessages] = await Promise.all([ window.traceReportStorage.getTraceReport(analysisKeyToUse), window.traceReportStorage.getReportPayloads(analysisKeyToUse), retrieveMessagesWithFallbacks(analysisKeyToUse, endpointKey) ]);
+            if (!successfulUrl) successfulUrl = analysisKeyToUse;
+
+            const [traceReport, storedPayloads, storedMessages] = await Promise.all([
+                window.traceReportStorage.getTraceReport(analysisKeyToUse),
+                window.traceReportStorage.getReportPayloads(analysisKeyToUse),
+                retrieveMessagesWithFallbacks(analysisKeyToUse, endpointKey)
+            ]);
+
             if (!traceReport) throw new Error(`No trace report found for analysis key ${analysisKeyToUse}. Run Play & Trace again.`);
             const handlerCode = traceReport?.analyzedHandler?.handler || traceReport?.analyzedHandler?.code;
             if (!handlerCode) throw new Error('Handler code missing in trace report.');
-            const payloads = storedPayloads || traceReport?.details?.payloads || traceReport?.payloads || [];
-            let messagesForFuzzer = Array.isArray(storedMessages) && storedMessages.length > 0 ? storedMessages : (traceReport?.details?.uniqueStructures ? traceReport.details.uniqueStructures.flatMap(s => s.examples || []) : []);
+
+            const payloads = storedPayloads || [];
+            if (!payloads || payloads.length === 0) {
+                log.warn(`[Launch] No payloads found for analysis key ${analysisKeyToUse} after attempting to load from storage. Fuzzing might be ineffective or disabled.`);
+            }
+
+            let messagesForFuzzer = Array.isArray(storedMessages) && storedMessages.length > 0 ?
+                storedMessages :
+                (traceReport?.details?.uniqueStructures ? traceReport.details.uniqueStructures.flatMap(s => s.examples || []) : []);
+
             const callbackStorageData = await new Promise(resolve => chrome.storage.session.get([CALLBACK_URL_STORAGE_KEY], resolve));
             const currentCallbackUrl = callbackStorageData[CALLBACK_URL_STORAGE_KEY] || null;
             const customPayloadsResult = await new Promise(resolve => chrome.storage.session.get('customXssPayloads', result => resolve(result.customXssPayloads)));
             const useCustomPayloads = customPayloadsResult && customPayloadsResult.length > 0;
-            const fuzzerOptions = { autoStart: false, useCustomPayloads: useCustomPayloads, enableCallbackFuzzing: !!currentCallbackUrl, callbackUrl: currentCallbackUrl };
+            const fuzzerOptions = {
+                autoStart: false,
+                useCustomPayloads: useCustomPayloads,
+                enableCallbackFuzzing: !!currentCallbackUrl,
+                callbackUrl: currentCallbackUrl
+            };
             launchSuccess = await launchFuzzerEnvironment(successfulUrl, handlerCode, messagesForFuzzer, payloads, traceReport, fuzzerOptions, analysisKeyToUse);
         } catch (error) {
-            log.error(`[Launch Error for ${originalFullEndpoint}]:`, error?.message); alert(`Fuzzer launch failed: ${error.message}`); launchSuccess = false;
+            log.error(`[Launch Error for ${originalFullEndpoint}]:`, error?.message);
+            alert(`Fuzzer launch failed: ${error.message}`);
+            launchSuccess = false;
             try { await chrome.runtime.sendMessage({ type: "stopServer" }); } catch {}
         } finally {
             updateButton(button, launchSuccess ? 'launch' : 'error', { ...currentStateInfo?.options, errorMessage: launchSuccess ? undefined : 'Fuzzer launch failed' });
@@ -1193,7 +1217,7 @@ async function handlePlayButton(endpoint, button, skipCheck = false) {
                 cspResult = await performEmbeddingCheck(endpointUrlForAnalysis);
                 if (String(cspResult?.status || '').includes('404')) {
                     is404 = true;
-                    try { originToCheck = new URL(endpointUrlForAnalysis).origin; } catch { /* ignore */ }
+                    try { originToCheck = new URL(endpointUrlForAnalysis).origin; } catch {  }
                 }
             } catch (headError) {
                 log.warn(`[Play] Initial HEAD request failed: ${headError.message}.`);
@@ -1201,7 +1225,7 @@ async function handlePlayButton(endpoint, button, skipCheck = false) {
                 headErrorOccurred = true;
                 if (headError.message.includes('404') || String(cspResult.status).includes('404')) {
                     is404 = true;
-                    try { originToCheck = new URL(endpointUrlForAnalysis).origin; } catch { /* ignore */ }
+                    try { originToCheck = new URL(endpointUrlForAnalysis).origin; } catch {  }
                 }
             }
 
@@ -1231,10 +1255,11 @@ async function handlePlayButton(endpoint, button, skipCheck = false) {
                     log.warn(`[Play] HEAD request for origin ${originToCheck} also failed: ${originErr.message}. Proceeding cautiously.`);
                     proceedSilentlyOnError = true;
                 }
-                if (proceedSilentlyOnError && !button.classList.contains('warning')) {
-                    updateButton(button, 'warning', { errorMessage: `Proceeding despite 404/origin check issues` });
+                if(proceedSilentlyOnError && !button.classList.contains('warning')){
+                    updateButton(button, 'warning', {errorMessage: `Proceeding despite 404/origin check issues`});
                 }
             }
+
 
             if (!cspResult.embeddable && !proceedSilentlyOnError) {
                 log.warn(`[Play] Embedding check failed for ${endpointUrlForAnalysis}: ${cspResult.status}`);
@@ -1244,7 +1269,7 @@ async function handlePlayButton(endpoint, button, skipCheck = false) {
                 if (isFramingRestriction) {
                     log.error(`[Play] Embedding explicitly blocked by header: ${cspResult.status}.`);
                     showToastNotification(`Embedding blocked by header: ${cspResult.status}`, 'error');
-                    if (!statusString.includes('deny') && !statusString.includes("'none'")) {
+                    if(!statusString.includes('deny') && !statusString.includes("'none'")) {
                         const modalResult = await showUrlModificationModal(endpointUrlForAnalysis, cspResult.status);
                         if (modalResult.action === 'retry' && modalResult.modifiedUrl) {
                             log.info("[Play] User modified URL after header block. Retrying check...");
@@ -1253,15 +1278,16 @@ async function handlePlayButton(endpoint, button, skipCheck = false) {
                             launchInProgressEndpoints.delete(endpointKey);
                             await handlePlayButton(endpointUrlForAnalysis, button, false);
                             return;
-                        } else if (modalResult.action === 'continue'){
+                        } else if(modalResult.action === 'continue'){
                             log.warn(`[Play] User chose to continue analysis despite known header restriction: ${cspResult.status}`);
                             proceedSilentlyOnError = true;
-                            updateButton(button, 'warning', { errorMessage: `Proceeding despite block: ${cspResult.status}` });
+                            updateButton(button, 'warning', {errorMessage: `Proceeding despite block: ${cspResult.status}`});
                         } else {
-                            updateButton(button, 'start'); throw new Error("Analysis stopped due to embedding restriction.");
+                            updateButton(button, 'start');
+                            throw new Error("Analysis stopped due to embedding restriction.");
                         }
                     } else {
-                        updateButton(button, 'error', { errorMessage: `Embedding blocked: ${cspResult.status}` });
+                        updateButton(button, 'error', {errorMessage: `Embedding blocked: ${cspResult.status}`});
                         throw new Error(`Embedding blocked by policy: ${cspResult.status}`);
                     }
                 } else {
@@ -1275,7 +1301,7 @@ async function handlePlayButton(endpoint, button, skipCheck = false) {
             if (cspResult.embeddable || proceedSilentlyOnError) {
                 successfullyAnalyzedUrl = endpointUrlForAnalysis;
                 analysisStorageKey = getStorageKeyForUrl(successfullyAnalyzedUrl);
-                if(cspResult.embeddable) {
+                if(cspResult.embeddable){
                     log.success(`[Play] Initial embedding check passed for ${successfullyAnalyzedUrl}`);
                 } else {
                     log.warn(`[Play] Proceeding with analysis for ${successfullyAnalyzedUrl} despite earlier check failures/uncertainty.`);
@@ -1294,7 +1320,8 @@ async function handlePlayButton(endpoint, button, skipCheck = false) {
         }
         analysisStorageKey = getStorageKeyForUrl(successfullyAnalyzedUrl);
 
-        if (!button.classList.contains('warning')) {
+
+        if(!button.classList.contains('warning')){
             updateButton(button, 'analyze');
         }
 
@@ -1306,8 +1333,8 @@ async function handlePlayButton(endpoint, button, skipCheck = false) {
 
         log.debug(`[Play] Attempting handler discovery for ${successfullyAnalyzedUrl}`);
         foundHandlerObject = null;
-        potentialHandlers = []; // Ensure initialized
-        analysisErrorMsg = ''; // Reset error message
+        potentialHandlers = [];
+        analysisErrorMsg = '';
 
         if (isExtensionUrl){
             log.info("[Play] Skipping dynamic handler discovery for extension URL.");
@@ -1318,20 +1345,20 @@ async function handlePlayButton(endpoint, button, skipCheck = false) {
                 else log.info(`[Play] Dynamic discovery found ${potentialHandlers.length} potential handlers.`);
             } catch (discoveryError) {
                 log.error(`[Play] Handler discovery failed:`, discoveryError);
-                analysisErrorMsg = discoveryError.message; // Assign error to analysisErrorMsg
+                analysisErrorMsg = discoveryError.message;
                 potentialHandlers = [];
             }
 
             if (potentialHandlers && potentialHandlers.length > 0) {
                 log.info(`[Play] Attempting breakpoint execution confirmation for ${potentialHandlers.length} candidates...`);
-                if (!button.classList.contains('warning')) showToastNotification(`Confirming handler via breakpoints...`, 'info', 10000);
+                if(!button.classList.contains('warning')) showToastNotification(`Confirming handler via breakpoints...`, 'info', 10000);
                 try {
-                    potentialHandlers.forEach(h => { if (!h.handler && h.fullScriptContent && h.handlerNode) { try { h.handler = h.fullScriptContent.substring(h.handlerNode.start, h.handlerNode.end); } catch {} } });
+                    potentialHandlers.forEach(h => { if(!h.handler && h.fullScriptContent && h.handlerNode) { try { h.handler = h.fullScriptContent.substring(h.handlerNode.start, h.handlerNode.end); } catch {}} });
                     const validCandidates = potentialHandlers.filter(h => h.handler);
                     if (validCandidates.length === 0) throw new Error("No valid handler candidates with code found for breakpoint setting.");
                     foundHandlerObject = await extractor.confirmHandlerViaBreakpointExecution(successfullyAnalyzedUrl, validCandidates, testMessage);
                     if (foundHandlerObject) { log.success(`[Play] Handler confirmed via breakpoint execution.`); }
-                    else { log.warn(`[Play] Breakpoint confirmation did not identify a single handler. Falling back to scoring.`); analysisErrorMsg += (analysisErrorMsg ? ' ' : '') + 'Breakpoint confirmation failed.'; foundHandlerObject = extractor.getBestHandler(potentialHandlers); if(foundHandlerObject) log.info(`[Play] Selected best handler via scoring fallback.`); else log.warn(`[Play] Scoring fallback also failed to select a handler.`); }
+                    else { log.warn(`[Play] Breakpoint confirmation did not identify a single handler. Falling back to scoring.`); analysisErrorMsg += (analysisErrorMsg ? ' ' : '') + 'Breakpoint confirmation failed.'; foundHandlerObject = extractor.getBestHandler(potentialHandlers); if(foundHandlerObject) log.info(`[Play] Selected best handler via scoring fallback.`); else log.warn(`[Play] Scoring fallback also failed to select a handler.`);}
                 } catch (breakpointError) {
                     log.error(`[Play] Breakpoint confirmation failed:`, breakpointError); analysisErrorMsg = (analysisErrorMsg ? analysisErrorMsg + ' ' : '') + breakpointError.message; log.info(`[Play] Falling back to scoring potential handlers due to breakpoint error.`); foundHandlerObject = extractor.getBestHandler(potentialHandlers); if(!foundHandlerObject) log.warn(`[Play] Scoring fallback also failed to select a handler after breakpoint error.`);
                 }
@@ -1345,8 +1372,13 @@ async function handlePlayButton(endpoint, button, skipCheck = false) {
             const finalBestHandlerKey = `best-handler-${analysisStorageKey}`;
             try {
                 if (typeof window.analyzeHandlerStatically === 'function' && foundHandlerObject.handler) {
-                    try { const quickAnalysis = window.analyzeHandlerStatically(foundHandlerObject.handler); if (quickAnalysis?.analysis?.identifiedEventParam) foundHandlerObject.eventParamName = quickAnalysis.analysis.identifiedEventParam; }
-                    catch (quickAnalysisError) { log.warn("Quick analysis for event param failed", quickAnalysisError); }
+                    try {
+                        const quickAnalysis = window.analyzeHandlerStatically(foundHandlerObject.handler);
+                        if (quickAnalysis?.analysis?.identifiedEventParam) foundHandlerObject.eventParamName = quickAnalysis.analysis.identifiedEventParam;
+                    }
+                    catch (quickAnalysisError) {
+                        log.warn("Quick analysis for event param failed", quickAnalysisError);
+                    }
                 }
                 if (analysisStorageKey !== endpointKey) {
                     const mappingKey = `analyzed-url-for-${endpointKey}`;
@@ -1361,11 +1393,11 @@ async function handlePlayButton(endpoint, button, skipCheck = false) {
                 log.success(`[Play] Successfully identified and saved handler for ${analysisStorageKey}. Category: ${foundHandlerObject.category}, Score: ${foundHandlerObject.score ?? 'N/A'}`);
                 updateButton(button, 'success');
                 const traceButton = button.closest('.button-container')?.querySelector('.iframe-trace-button');
-                if (traceButton) updateTraceButton(traceButton, 'default', { showEmoji: true });
+                if (traceButton) updateTraceButton(traceButton, 'default', {showEmoji: true});
                 if (reportButton) updateReportButton(reportButton, 'disabled', originalFullEndpoint);
             } catch (storageError) {
                 log.error(`Failed to save handler (${finalBestHandlerKey}):`, storageError);
-                updateButton(button, 'error', { errorMessage: 'Failed to save handler' });
+                updateButton(button, 'error', {errorMessage: 'Failed to save handler'});
                 const traceButton = button.closest('.button-container')?.querySelector('.iframe-trace-button');
                 if (traceButton) updateTraceButton(traceButton, 'disabled');
                 if (reportButton) updateReportButton(reportButton, 'disabled', originalFullEndpoint);
@@ -1374,8 +1406,8 @@ async function handlePlayButton(endpoint, button, skipCheck = false) {
             log.warn(`[Play] Final failure check: No usable handler object available.`);
             const failureMessage = `No usable handler confirmed for ${endpointUrlForAnalysis}. ${analysisErrorMsg || 'Reason unknown.'}`;
             log.warn(`[Play] ${failureMessage}`);
-            if (!button.classList.contains('warning')) {
-                updateButton(button, 'warning', { errorMessage: `No handler confirmed. ${analysisErrorMsg || ''}`.trim() });
+            if(!button.classList.contains('warning')) {
+                updateButton(button, 'warning', {errorMessage: `No handler confirmed. ${analysisErrorMsg || ''}`.trim()});
             } else {
                 button.title = `No handler confirmed. ${analysisErrorMsg || ''}`.trim();
             }
@@ -1389,10 +1421,12 @@ async function handlePlayButton(endpoint, button, skipCheck = false) {
         log.error(`[Play Button Error Handler] Error for ${originalFullEndpoint}: ${error.message}`, error);
         if (!button.classList.contains('error') && !button.classList.contains('warning') && !button.classList.contains('success') && !button.classList.contains('launch')) {
             updateButton(button, 'start');
-        } else if (error.message.startsWith("Analysis stopped") || error.message.startsWith("Analysis cancelled")) {
-            // State handled earlier
-        } else if (!button.classList.contains('error') && !button.classList.contains('warning')) {
-            updateButton(button, 'error', { errorMessage: error.message || 'Analysis error occurred' });
+        } else if(error.message.startsWith("Analysis stopped") || error.message.startsWith("Analysis cancelled")) {
+            if (!button.classList.contains('start')) {
+                updateButton(button, 'start');
+            }
+        } else if (!button.classList.contains('error') && !button.classList.contains('warning')){
+            updateButton(button, 'error', {errorMessage: error.message || 'Analysis error occurred'});
         }
         const traceButton = button.closest('.button-container')?.querySelector('.iframe-trace-button');
         if (traceButton) updateTraceButton(traceButton, 'disabled');
@@ -1400,68 +1434,56 @@ async function handlePlayButton(endpoint, button, skipCheck = false) {
 
     } finally {
         launchInProgressEndpoints.delete(endpointKey);
-        if (endpointUrlForAnalysis !== originalFullEndpoint && analysisStorageKey) {
+        if (endpointUrlForAnalysis !== originalFullEndpoint && analysisStorageKey){
             launchInProgressEndpoints.delete(analysisStorageKey);
         }
         setTimeout(requestUiUpdate, 150);
     }
 }
 
-async function checkEmbeddingWithSandboxedIframe(url) {
-    return new Promise((resolve) => {
-        log.debug(`[Iframe Check] Attempting sandboxed iframe load for ${url}`);
-        let iframe = document.createElement('iframe');
-        iframe.sandbox = 'allow-scripts allow-same-origin allow-popups allow-forms';
-        iframe.style.display = 'none';
-        let timeoutId = null;
-        let resolved = false;
-
-        const cleanup = () => {
-            if (resolved) return;
-            resolved = true;
-            clearTimeout(timeoutId);
-            iframe.onload = null;
-            iframe.onerror = null;
-            if (iframe.parentNode) {
-                iframe.parentNode.removeChild(iframe);
-            }
-            log.debug(`[Iframe Check] Check completed for ${url}. Result interpretation happens in caller.`);
-            resolve(true); // Resolve true simply means the check attempt finished.
-        };
-
-        iframe.onload = () => {
-            log.debug(`[Iframe Check] onload triggered for ${url}.`);
-            cleanup();
-        };
-
-        iframe.onerror = () => {
-            log.warn(`[Iframe Check] onerror triggered for ${url}.`);
-            cleanup();
-        };
-
-        timeoutId = setTimeout(() => {
-            log.warn(`[Iframe Check] Timeout waiting for iframe load/error for ${url}`);
-            cleanup();
-        }, 5000); // Timeout after 5 seconds
-
-        try {
-            iframe.src = url;
-            document.body.appendChild(iframe);
-        } catch (appendError) {
-            log.error(`[Iframe Check] Error appending iframe for ${url}:`, appendError);
-            cleanup();
-        }
-    });
-}
 function getRiskLevelAndColor(score) { if (score <= 20) return { riskLevel: 'Critical', riskColor: 'critical' }; if (score <= 40) return { riskLevel: 'High', riskColor: 'high' }; if (score <= 60) return { riskLevel: 'Medium', riskColor: 'medium' }; if (score <= 80) return { riskLevel: 'Low', riskColor: 'low' }; return { riskLevel: 'Good', riskColor: 'negligible' }; }
 
 function getRecommendationText(score, reportData) { const hasCriticalSink = reportData?.details?.sinks?.some(s => s.severity?.toLowerCase() === 'critical') || false; const hasHighSink = reportData?.details?.sinks?.some(s => s.severity?.toLowerCase() === 'high') || false; const hasHighIssue = reportData?.details?.securityIssues?.some(s => s.severity?.toLowerCase() === 'high') || false; const mediumIssueCount = reportData?.details?.securityIssues?.filter(s => s.severity?.toLowerCase() === 'medium')?.length || 0; if (hasCriticalSink) return 'Immediate attention required. Critical vulnerabilities present. Fix critical sinks (eval, innerHTML, etc.) and implement strict origin/data validation.'; if (score <= 20) return 'Immediate attention required. Security posture is critically weak. Focus on fixing high-risk issues and implementing strict origin/data validation.'; if (hasHighSink || hasHighIssue || score <= 40) return 'Significant risks identified. Implement strict origin checks and sanitize all inputs used in sinks. Consider a Content Security Policy (CSP).'; if (mediumIssueCount >= 3 || score <= 60) return 'Potential vulnerabilities detected. Review security issues (e.g., origin checks, data validation) and ensure data flowing to sinks is safe.'; if (score <= 80) return 'Low risk detected, but review identified issues and follow security best practices (origin/data validation).'; const hasFindings = (reportData?.details?.sinks?.length > 0) || (reportData?.details?.securityIssues?.length > 0); if (hasFindings) return 'Good score, but minor issues or informational findings detected. Review details and ensure best practices are followed.'; return 'Excellent score. Analysis found no major vulnerabilities. Continue to follow security best practices for postMessage handling.'; }
 
 function renderStructureItem(structureData, index) { const exampleData = structureData.examples?.[0]?.data || structureData.examples?.[0] || {}; let formattedExample = ''; try { formattedExample = typeof exampleData === 'string' ? exampleData : JSON.stringify(exampleData, null, 2); } catch (e) { formattedExample = String(exampleData); } return `<details class="report-details structure-item" data-structure-index="${index}"><summary class="report-summary-toggle">Structure ${index + 1} <span class="toggle-icon">▶</span></summary><div class="structure-content"><p><strong>Example Message:</strong></p><div class="report-code-block"><pre><code>${escapeHTML(formattedExample)}</code></pre></div></div></details>`; }
 
-function renderPayloadItem(payloadItem, index) { let displayString = '(Error displaying payload)'; const maxDisplayLength = 150; const safeEscapeHTML = (str) => { try { return escapeHTML(str); } catch{ return '[Error]'; }}; try { const actualPayloadData = (payloadItem && payloadItem.payload !== undefined) ? payloadItem.payload : payloadItem; if (typeof actualPayloadData === 'object' && actualPayloadData !== null) { const payloadJson = JSON.stringify(actualPayloadData, null, 2); displayString = payloadJson.substring(0, maxDisplayLength) + (payloadJson.length > maxDisplayLength ? '...' : ''); } else { const payloadAsString = String(actualPayloadData); displayString = payloadAsString.substring(0, maxDisplayLength) + (payloadAsString.length > maxDisplayLength ? '...' : ''); } } catch (e) { return `<div class="payload-item error">Error rendering payload ${index + 1}.</div>`; } return `<div class="payload-item" data-payload-index="${index}"><pre><code>${safeEscapeHTML(displayString)}</code></pre></div>`; }
-
 function attachReportEventListeners(panel, reportData) { panel.querySelectorAll('details.report-details').forEach(detailsElement => { const iconElement = detailsElement.querySelector('.toggle-icon'); if (detailsElement && iconElement) { detailsElement.addEventListener('toggle', () => { iconElement.textContent = detailsElement.open ? '▼' : '▶'; }); } }); panel.querySelectorAll('.view-full-payload-btn').forEach(btn => { btn.addEventListener('click', (e) => { const item = e.target.closest('.payload-item'); const index = parseInt(item?.getAttribute('data-payload-index')); const payloads = reportData?.details?.payloads || []; if (payloads[index] !== undefined) showFullPayloadModal(payloads[index]); }); }); const showAllPayloadsBtn = panel.querySelector('#showAllPayloadsBtn'); if (showAllPayloadsBtn) { showAllPayloadsBtn.addEventListener('click', () => { const list = panel.querySelector('#payloads-list'); const payloads = reportData?.details?.payloads || []; if (list && payloads.length > 0) { list.innerHTML = payloads.map((p, index) => renderPayloadItem(p, index)).join(''); attachReportEventListeners(panel, reportData); } showAllPayloadsBtn.remove(); }, { once: true }); } const showAllStructuresBtn = panel.querySelector('#showAllStructuresBtn'); if (showAllStructuresBtn) { showAllStructuresBtn.addEventListener('click', () => { const list = panel.querySelector('.structures-list'); const structures = reportData?.details?.uniqueStructures || []; if (list && structures.length > 0) { list.innerHTML = structures.map((s, index) => renderStructureItem(s, index)).join(''); attachReportEventListeners(panel, reportData); } showAllStructuresBtn.remove(); }, { once: true }); } }
+
+function renderPayloadItem(payloadItem, index) {
+    let displayString = '(Error displaying payload)';
+    const maxDisplayLength = 500;
+    const escapeHTML = window.escapeHTML || function(str) {
+        return String(str ?? '').replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
+    };
+    try {
+        const actualPayloadData = (payloadItem && payloadItem.payload !== undefined) ? payloadItem.payload : payloadItem;
+        if (typeof actualPayloadData === 'object' && actualPayloadData !== null) {
+            const payloadJson = JSON.stringify(actualPayloadData, null, 2);
+            displayString = payloadJson.substring(0, maxDisplayLength) + (payloadJson.length > maxDisplayLength ? '...' : '');
+        } else {
+            const payloadAsString = String(actualPayloadData ?? '');
+            displayString = payloadAsString.substring(0, maxDisplayLength) + (payloadAsString.length > maxDisplayLength ? '...' : '');
+        }
+    } catch (e) {
+        return `<div class="payload-item error" style="padding:10px; border:1px solid var(--accent-secondary); background:rgba(240,113,120,0.1);">Error rendering payload ${index + 1}.</div>`;
+    }
+    const payloadType = payloadItem?.type || 'unknown';
+    const payloadSource = payloadItem?.baseSource || 'unknown';
+    const payloadDesc = payloadItem?.description || 'N/A';
+    const typeClass = `payload-type-${escapeHTML(payloadType).split('-')[0]}`;
+
+    return `
+        <div class="payload-item" data-payload-index="${index}" style="background: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: 4px; margin-bottom: 10px; padding: 10px 12px; font-size: 13px;">
+            <div class="payload-meta-info ${typeClass}" style="font-size: 11px; color: var(--text-secondary); margin-bottom: 8px; padding-bottom: 5px; border-bottom: 1px dashed var(--border-color); text-transform: capitalize;">
+                Type: ${escapeHTML(payloadType)} | Source: ${escapeHTML(payloadSource)}
+            </div>
+            <pre class="report-code-block" style="margin: 8px 0; padding: 10px; background: var(--code-bg); border: 1px solid var(--border-color); border-radius: 3px; max-height: 150px; overflow: auto;"><code>${escapeHTML(displayString)}</code></pre>
+            <div class="payload-description" style="font-size: 11px; color: var(--text-muted); margin-top: 8px; font-style: italic;">
+                Desc: ${escapeHTML(payloadDesc)}
+            </div>
+        </div>`;
+}
+
 
 function displayReport(reportData, panel) {
     try {
@@ -1479,55 +1501,67 @@ function displayReport(reportData, panel) {
         panel.innerHTML = '<p class="error-message">Internal error creating report content area.</p>';
         return;
     }
+
     if (!reportData || typeof reportData !== 'object') {
         content.innerHTML = '<p class="error-message">Error: Invalid or missing report data.</p>';
         return;
     }
+
     try {
         const details = reportData.details || {};
         const summary = reportData.summary || {};
         const bestHandler = details.bestHandler || reportData.bestHandler || reportData.analyzedHandler;
-        const vulnerabilities = [...(details.sinks || []), ...(reportData.vulnerabilities || [])];
-        const securityIssues = [...(details.securityIssues || []), ...(reportData.securityIssues || [])];
+        const sinks = details.sinks || [];
+        const securityIssues = details.securityIssues || [];
         const dataFlows = details.dataFlows || [];
-        const payloads = details.payloads || [];
         const structures = details.uniqueStructures || [];
         const endpointDisplay = reportData.endpoint || reportData.originalEndpointKey || 'Unknown';
-        const analysisStorageKey = reportData.analysisStorageKey || 'report';
+        const analysisStorageKey = reportData.analysisStorageKey || getStorageKeyForUrl(reportData.endpoint || reportData.originalEndpointKey || '');
+        const originalEndpointKey = reportData.originalEndpointKey || analysisStorageKey;
         const originChecks = details.originValidationChecks || [];
-        const safeEscape = (str) => { try { return window.escapeHTML(String(str ?? '')); } catch(e){ return '[Error]'; }};
+
+        const currentPayloadCount = details.payloadsGeneratedCount ?? 0;
+        const currentPayloadMode = details.payloadMode || 'default';
+        const staticAnalysisUsed = details.staticAnalysisUsed || false;
+
+        const escapeHTML = window.escapeHTML || function(str) { return String(str ?? '').replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;"); };
         const safeGetRisk = (score) => { try { return getRiskLevelAndColor(score); } catch(e){ return { riskLevel: 'Error', riskColor: 'critical' }; }};
         const safeGetRec = (score, data) => { try { return getRecommendationText(score, data); } catch(e){ return 'Error generating recommendation.'; }};
         const safeRenderPayload = (p, i) => { try { return renderPayloadItem(p, i); } catch(e){ return '<p class="error-message">Error rendering payload item.</p>'; }};
         const safeRenderStructure = (s, i) => { try { return renderStructureItem(s, i); } catch(e){ return '<p class="error-message">Error rendering structure item.</p>'; }};
-        const uniqueVulns = vulnerabilities.filter((v, i, a) => a.findIndex(t => t?.type === v?.type && t?.context === v?.context) === i);
+
+        const uniqueVulns = sinks.filter((v, i, a) => a.findIndex(t => t?.type === v?.type && t?.context === v?.context) === i);
         const uniqueIssues = securityIssues.filter((v, i, a) => a.findIndex(t => t?.type === v?.type && t?.context === v?.context) === i);
         const score = reportData.securityScore ?? summary.securityScore ?? 100;
         const { riskLevel, riskColor } = safeGetRisk(score);
+        const safeKeyIdPart = analysisStorageKey.replace(/[^a-zA-Z0-9_-]/g, '_');
 
         const summarySection = document.createElement('div');
         summarySection.className = 'report-section report-summary';
         summarySection.innerHTML = `
-            <h4 class="report-section-title">Analysis Summary - <span class="report-endpoint-title">${safeEscape(endpointDisplay)}</span></h4>
+            <h4 class="report-section-title">Analysis Summary - <span class="report-endpoint-title">${escapeHTML(endpointDisplay)}</span></h4>
             <div class="summary-grid">
                 <div class="security-score-container">
-                    <h5 class="risk-score-title">Risk Score:</h5>
-                    <div class="security-score ${riskColor}" title="Score: ${score} (${riskLevel})">
-                        <div class="security-score-value">${score}</div>
-                        <div class="security-score-label">${riskLevel}</div>
-                    </div>
-                </div>
-                <div class="summary-metrics">
-                    <div class="metric"><span class="metric-label">Msgs</span><span class="metric-value">${summary.messagesAnalyzed ?? 'N/A'}</span></div>
-                    <div class="metric"><span class="metric-label">Structs</span><span class="metric-value">${structures?.length ?? 0}</span></div>
-                    <div class="metric"><span class="metric-label">Sinks</span><span class="metric-value">${uniqueVulns?.length ?? 0}</span></div>
-                    <div class="metric"><span class="metric-label">Issues</span><span class="metric-value">${uniqueIssues?.length ?? 0}</span></div>
-                    <div class="metric"><span class="metric-label">Payloads</span><span class="metric-value">${payloads?.length ?? 0}</span></div>
-                </div>
+                     <h5 class="risk-score-title">Risk Score:</h5>
+                     <div class="security-score ${riskColor}" title="Score: ${score} (${riskLevel})">
+                         <div class="security-score-value">${score}</div>
+                         <div class="security-score-label">${riskLevel}</div>
+                     </div>
+                 </div>
+                 <div class="summary-metrics">
+                     <div class="metric"><span class="metric-label">Msgs</span><span class="metric-value">${summary.messagesAnalyzed ?? 'N/A'}</span></div>
+                     <div class="metric"><span class="metric-label">Structs</span><span class="metric-value">${structures?.length ?? 0}</span></div>
+                     <div class="metric"><span class="metric-label">Sinks</span><span class="metric-value">${uniqueVulns?.length ?? 0}</span></div>
+                     <div class="metric"><span class="metric-label">Issues</span><span class="metric-value">${uniqueIssues?.length ?? 0}</span></div>
+                     <div class="metric" id="report-payload-count-metric-${safeKeyIdPart}">
+                         <span class="metric-label">Payloads (<span id="payload-mode-display-${safeKeyIdPart}">${currentPayloadMode.replace(/_/g, ' ')}</span>)</span>
+                         <span class="metric-value" id="payload-count-display-${safeKeyIdPart}">${currentPayloadCount}</span>
+                     </div>
+                 </div>
             </div>
             <div class="recommendations">
                 <h5 class="report-subsection-title">Recommendation</h5>
-                <p class="recommendation-text">${safeEscape(safeGetRec(score, reportData))}</p>
+                <p class="recommendation-text">${escapeHTML(safeGetRec(score, reportData))}</p>
             </div>`;
         content.appendChild(summarySection);
 
@@ -1535,50 +1569,65 @@ function displayReport(reportData, panel) {
             const handlerSection = document.createElement('div');
             handlerSection.className = 'report-section report-handler';
             handlerSection.innerHTML = `
-                <details class="report-details">
-                    <summary class="report-summary-toggle"><strong>Analyzed Handler</strong><span class="handler-meta">(Cat: ${safeEscape(bestHandler.category || 'N/A')} | Score: ${bestHandler.score?.toFixed(1) || 'N/A'})</span><span class="toggle-icon">▶</span></summary>
-                    <div class="report-code-block handler-code"><pre><code>${safeEscape(bestHandler.handler)}</code></pre></div>
-                </details>`;
+                 <details class="report-details">
+                     <summary class="report-summary-toggle"><strong>Analyzed Handler</strong><span class="handler-meta">(Cat: ${escapeHTML(bestHandler.category || 'N/A')} | Score: ${bestHandler.score?.toFixed(1) || 'N/A'})</span><span class="toggle-icon">▶</span></summary>
+                     <div class="report-code-block handler-code"><pre><code>${escapeHTML(bestHandler.handler)}</code></pre></div>
+                 </details>`;
             content.appendChild(handlerSection);
         }
 
         const findingsSection = document.createElement('div');
         findingsSection.className = 'report-section report-findings';
         let findingsHTML = '<h4 class="report-section-title">Findings</h4>';
+        let findingsExist = false;
 
         if (originChecks.length > 0) {
+            findingsExist = true;
             findingsHTML += `<div class="subsection"><h5 class="report-subsection-title">Origin Validation (${originChecks.length})</h5><table class="report-table"><thead><tr><th>Check Type</th><th>Strength</th><th>Compared Value</th><th>Snippet</th></tr></thead><tbody>`;
             originChecks.forEach(check => {
-                const type = check?.type || '?';
-                const strength = check?.strength || 'N/A';
-                const value = check?.comparedValue !== null && check?.comparedValue !== undefined ? String(check.comparedValue).substring(0, 100) : 'N/A';
-                const snippetHTML = check?.rawSnippet ? `<code class="context-snippet">${safeEscape(check.rawSnippet)}</code>` : 'N/A';
-                let strengthClass = strength.toLowerCase();
-                if(strength === 'Missing') strengthClass = 'critical'; else if(strength === 'Weak') strengthClass = 'high'; else if(strength === 'Medium') strengthClass = 'medium'; else if(strength === 'Strong') strengthClass = 'negligible'; else strengthClass='low';
-                findingsHTML += `<tr class="severity-row-${strengthClass}"><td>${safeEscape(type)}</td><td><span class="severity-badge severity-${strengthClass}">${safeEscape(strength)}</span></td><td><code>${safeEscape(value)}</code></td><td>${snippetHTML}</td></tr>`;
+                const type = check?.type || '?'; const strength = check?.strength || 'N/A'; const value = check?.comparedValue !== null && check?.comparedValue !== undefined ? String(check.comparedValue).substring(0, 100) : 'N/A'; const snippetHTML = check?.rawSnippet ? `<code class="context-snippet">${escapeHTML(check.rawSnippet)}</code>` : 'N/A';
+                let strengthClass = strength.toLowerCase(); if(strength === 'Missing') strengthClass = 'critical'; else if(strength === 'Weak') strengthClass = 'high'; else if(strength === 'Medium') strengthClass = 'medium'; else if(strength === 'Strong') strengthClass = 'negligible'; else strengthClass='low';
+                findingsHTML += `<tr class="severity-row-${strengthClass}"><td>${escapeHTML(type)}</td><td><span class="severity-badge severity-${strengthClass}">${escapeHTML(strength)}</span></td><td><code>${escapeHTML(value)}</code></td><td>${snippetHTML}</td></tr>`;
             });
             findingsHTML += `</tbody></table></div>`;
         }
 
         if (uniqueVulns.length > 0) {
-            findingsHTML += `<div class="subsection"><h5 class="report-subsection-title">DOM XSS Sinks Detected (${uniqueVulns.length})</h5><table class="report-table"><thead><tr><th>Sink</th><th>Severity</th><th>Context Snippet</th></tr></thead><tbody>`;
+            findingsExist = true;
+            findingsHTML += `<div class="subsection"><h5 class="report-subsection-title">Potential Sinks Reached (${uniqueVulns.length})</h5><table class="report-table"><thead><tr><th>Sink</th><th>Severity</th><th>Data Path</th><th>Conditions</th><th>Context Snippet</th></tr></thead><tbody>`;
             uniqueVulns.forEach(vuln => {
-                const type = vuln?.type || '?'; const severity = vuln?.severity || 'N/A'; const contextHTML = vuln?.context || '';
-                findingsHTML += `<tr class="severity-row-${severity.toLowerCase()}"><td>${safeEscape(type)}</td><td><span class="severity-badge severity-${severity.toLowerCase()}">${safeEscape(severity)}</span></td><td class="context-snippet-cell">${contextHTML}</td></tr>`;
+                const type = vuln?.name || vuln?.type || '?'; const severity = vuln?.severity || 'N/A'; const contextHTML = vuln?.context || ''; const sourcePath = vuln?.sourcePath || '(unknown)'; const conditions = vuln?.conditions || [];
+                let conditionsHtml = 'None'; if (conditions.length > 0) { conditionsHtml = conditions.map(c => { let valStr = escapeHTML(String(c.value)); if (typeof c.value === 'string') valStr = `'${valStr}'`; return `<code>${escapeHTML(c.path)} ${escapeHTML(c.op)} ${valStr}</code>`; }).join('<br>'); }
+                findingsHTML += `<tr class="severity-row-${severity.toLowerCase()}"><td>${escapeHTML(type)}</td><td><span class="severity-badge severity-${severity.toLowerCase()}">${escapeHTML(severity)}</span></td><td><code>${escapeHTML(sourcePath)}</code></td><td>${conditionsHtml}</td><td class="context-snippet-cell">${contextHTML}</td></tr>`;
             });
             findingsHTML += `</tbody></table></div>`;
+
+            if (staticAnalysisUsed) {
+                findingsHTML += `
+                     <div class="subsection smart-payload-section">
+                         <h5 class="report-subsection-title">Smart Payload Generation</h5>
+                         <div id="smart-payload-controls-${safeKeyIdPart}" class="smart-payload-controls" data-analysis-key="${escapeHTML(analysisStorageKey)}" data-endpoint-key="${escapeHTML(originalEndpointKey)}">
+                             <p>Generate targeted payloads based on identified sinks and data flows. This will merge with any existing default payloads.</p>
+                             <button class="control-button primary-button generate-smart-payloads-btn">
+                                 Generate & Merge Smart Payloads
+                             </button>
+                             <span class="smart-payload-status" style="margin-left: 10px; font-style: italic; color: var(--text-secondary);"></span>
+                         </div>
+                     </div>`;
+            }
         }
 
         if (uniqueIssues.length > 0) {
+            findingsExist = true;
             findingsHTML += `<div class="subsection"><h5 class="report-subsection-title">Other Security Issues (${uniqueIssues.length})</h5><table class="report-table"><thead><tr><th>Issue</th><th>Severity</th><th>Context Snippet</th></tr></thead><tbody>`;
             uniqueIssues.forEach(issue => {
                 const type = issue?.type || '?'; const severity = issue?.severity || 'N/A'; const contextHTML = issue?.context || '';
-                findingsHTML += `<tr class="severity-row-${severity.toLowerCase()}"><td>${safeEscape(type)}</td><td><span class="severity-badge severity-${severity.toLowerCase()}">${safeEscape(severity)}</span></td><td class="context-snippet-cell">${contextHTML}</td></tr>`;
+                findingsHTML += `<tr class="severity-row-${severity.toLowerCase()}"><td>${escapeHTML(type)}</td><td><span class="severity-badge severity-${severity.toLowerCase()}">${escapeHTML(severity)}</span></td><td class="context-snippet-cell">${contextHTML}</td></tr>`;
             });
             findingsHTML += `</tbody></table></div>`;
         }
 
-        if (!originChecks.length && !uniqueVulns.length && !uniqueIssues.length) { findingsHTML += '<p class="no-findings-text">No significant findings detected.</p>'; }
+        if (!findingsExist) { findingsHTML += '<p class="no-findings-text">No significant findings detected.</p>'; }
         findingsSection.innerHTML = findingsHTML;
         content.appendChild(findingsSection);
 
@@ -1587,22 +1636,43 @@ function displayReport(reportData, panel) {
             flowSection.className = 'report-section report-dataflow';
             flowSection.innerHTML = ` <h4 class="report-section-title">Data Flow</h4> <table class="report-table dataflow-table"> <thead> <tr> <th>Source Property</th> <th>Sink / Target</th> <th>Conditions</th> <th>Code Snippet</th> </tr> </thead> <tbody> </tbody> </table>`;
             const tbody = flowSection.querySelector('tbody');
-            if (tbody) {
-                dataFlows.forEach(flow => {
-                    const prop = flow?.sourcePath || '?'; const sink = flow?.destinationContext || '?'; const context = flow?.fullCodeSnippet || flow?.taintedNodeSnippet || ''; const displayProp = prop === '(root)' ? '(root data)' : `event.data.${safeEscape(prop)}`; const conditions = flow?.requiredConditionsForFlow || [];
-                    let conditionsHtml = 'None'; if (conditions.length > 0) { conditionsHtml = conditions.map(c => { let valStr = safeEscape(String(c.value)); if (typeof c.value === 'string') valStr = `'${valStr}'`; return `<code>${safeEscape(c.path)} ${safeEscape(c.op)} ${valStr}</code>`; }).join('<br>'); }
-                    const rowHtml = ` <tr> <td><code>${displayProp}</code></td> <td>${safeEscape(sink)}</td> <td>${conditionsHtml}</td> <td><code class="context-snippet">${safeEscape(context)}</code></td> </tr>`; tbody.insertAdjacentHTML('beforeend', rowHtml);
-                });
-            } else { flowSection.innerHTML += '<p class="error-message">Error rendering data flow table body.</p>'; }
+            if (tbody) { dataFlows.forEach(flow => { const prop = flow?.sourcePath || '?'; const sink = flow?.destinationContext || '?'; const context = flow?.fullCodeSnippet || flow?.taintedNodeSnippet || ''; const displayProp = prop === '(root)' ? '(root data)' : `event.data.${escapeHTML(prop)}`; const conditions = flow?.requiredConditionsForFlow || flow?.conditions || []; let conditionsHtml = 'None'; if (conditions.length > 0) { conditionsHtml = conditions.map(c => { let valStr = escapeHTML(String(c.value)); if (typeof c.value === 'string') valStr = `'${valStr}'`; return `<code>${escapeHTML(c.path)} ${escapeHTML(c.op)} ${valStr}</code>`; }).join('<br>'); } const rowHtml = ` <tr> <td><code>${displayProp}</code></td> <td>${escapeHTML(sink)}</td> <td>${conditionsHtml}</td> <td><code class="context-snippet">${escapeHTML(context)}</code></td> </tr>`; tbody.insertAdjacentHTML('beforeend', rowHtml); }); }
+            else { flowSection.innerHTML += '<p class="error-message">Error rendering data flow table body.</p>'; }
             content.appendChild(flowSection);
         }
 
-        if (payloads?.length > 0) {
-            const payloadSection = document.createElement('div');
-            payloadSection.className = 'report-section report-payloads';
-            payloadSection.innerHTML = `<h4 class="report-section-title">Generated Payloads (${payloads.length})</h4><div id="payloads-list" class="payloads-list report-list">${payloads.slice(0, 10).map((p, i) => safeRenderPayload(p, i)).join('')}</div>${payloads.length > 10 ? `<button id="showAllPayloadsBtn" class="control-button secondary-button show-more-btn">Show All ${payloads.length}</button>` : ''}`;
-            content.appendChild(payloadSection);
+        const payloadSection = document.createElement('div');
+        payloadSection.className = 'report-section report-payloads';
+        payloadSection.id = 'report-payload-section-' + safeKeyIdPart;
+
+        let payloadsHTML = `<h4 class="report-section-title">Generated Payloads (<span id="payload-count-display-${safeKeyIdPart}">${currentPayloadCount}</span> - <span id="payload-mode-display-${safeKeyIdPart}">${currentPayloadMode.replace(/_/g, ' ')}</span>)</h4>`;
+        payloadsHTML += `<div id="payloads-list-${safeKeyIdPart}" class="payloads-list report-list">`;
+
+        const initiallyLoadedPayloads = details.payloads || [];
+        if (currentPayloadCount > 0 && initiallyLoadedPayloads.length > 0) {
+            payloadsHTML += initiallyLoadedPayloads.slice(0, 10).map((p, i) => safeRenderPayload(p, i)).join('');
+        } else if (currentPayloadCount > 0) {
+            payloadsHTML += `<p>Click button below to load payloads.</p>`;
+        } else {
+            payloadsHTML += `<p>No payloads generated yet for mode: ${currentPayloadMode.replace(/_/g, ' ')}.</p>`;
         }
+        payloadsHTML += `</div>`;
+
+        if (currentPayloadCount > 0) {
+            let buttonText = `Load All ${currentPayloadCount} Payloads`;
+            if (initiallyLoadedPayloads.length > 0 && initiallyLoadedPayloads.length < currentPayloadCount && initiallyLoadedPayloads.length >=10) {
+                buttonText = `Load All ${currentPayloadCount} Payloads`;
+            } else if (initiallyLoadedPayloads.length === currentPayloadCount && currentPayloadCount <= 10) {
+                buttonText = '';
+            }
+
+            if (buttonText) {
+                payloadsHTML += `<button class="control-button secondary-button show-more-btn load-payloads-btn" data-analysis-key="${escapeHTML(analysisStorageKey)}">${buttonText}</button>`;
+            }
+        }
+
+        payloadSection.innerHTML = payloadsHTML;
+        content.appendChild(payloadSection);
 
         if (structures?.length > 0) {
             const structureSection = document.createElement('div');
@@ -1614,12 +1684,194 @@ function displayReport(reportData, panel) {
             content.appendChild(structureSection);
         }
 
-        const buttonContainer = document.createElement('div'); buttonContainer.style.cssText = 'margin-top:20px; display: flex; justify-content: center; gap: 15px;'; const exportJsonBtn = document.createElement('button'); exportJsonBtn.textContent = 'Export JSON'; exportJsonBtn.className = 'control-button secondary-button'; exportJsonBtn.addEventListener('click', (e) => { e.stopPropagation(); try { const jsonData = JSON.stringify(reportData, null, 2); const blob = new Blob([jsonData], { type: 'application/json' }); const url = URL.createObjectURL(blob); const a = document.createElement('a'); const safeFilename = (analysisStorageKey || 'frogpost_report').replace(/[^a-z0-9_\-.]/gi, '_'); a.href = url; a.download = `${safeFilename}.json`; document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url); } catch (exportError) { alert("Failed to export report as JSON."); } }); const closeBtnInside = document.createElement('button'); closeBtnInside.textContent = 'Close Report'; closeBtnInside.className = 'control-button secondary-button'; closeBtnInside.onclick = () => { document.querySelector('.trace-panel-backdrop')?.remove(); panel.remove(); }; buttonContainer.appendChild(exportJsonBtn); buttonContainer.appendChild(closeBtnInside); content.appendChild(buttonContainer);
+        const bottomButtonContainer = document.createElement('div'); bottomButtonContainer.style.cssText = 'margin-top:20px; display: flex; justify-content: center; gap: 15px;'; const exportJsonBtn = document.createElement('button'); exportJsonBtn.textContent = 'Export JSON'; exportJsonBtn.className = 'control-button secondary-button'; exportJsonBtn.addEventListener('click', (e) => { e.stopPropagation(); try { const jsonData = JSON.stringify(reportData, null, 2); const blob = new Blob([jsonData], { type: 'application/json' }); const url = URL.createObjectURL(blob); const a = document.createElement('a'); const safeFilename = (analysisStorageKey || 'frogpost_report').replace(/[^a-z0-9_\-.]/gi, '_'); a.href = url; a.download = `${safeFilename}.json`; document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url); } catch (exportError) { alert("Failed to export report as JSON."); } }); const closeBtnInside = document.createElement('button'); closeBtnInside.textContent = 'Close Report'; closeBtnInside.className = 'control-button secondary-button'; closeBtnInside.onclick = () => { document.querySelector('.trace-panel-backdrop')?.remove(); panel.remove(); }; bottomButtonContainer.appendChild(exportJsonBtn); bottomButtonContainer.appendChild(closeBtnInside); content.appendChild(bottomButtonContainer);
         attachReportEventListeners(panel, reportData);
 
     } catch (renderError) {
         content.innerHTML = `<p class="error-message">Error rendering report details: ${renderError.message}</p>`;
         console.error("Error rendering report:", renderError);
+    }
+}
+
+async function handleLoadPayloadsClick(event) {
+    const button = event.target;
+    const analysisKey = button.dataset.analysisKey;
+    const reportPanel = button.closest('.trace-results-panel');
+    const safeKeyIdPart = analysisKey?.replace(/[^a-zA-Z0-9_-]/g, '_');
+    const payloadListElement = reportPanel?.querySelector(`#payloads-list-${safeKeyIdPart}`);
+
+    if (!analysisKey || !payloadListElement) {
+        log.error("Cannot load payloads: missing analysis key or list element.", { key: analysisKey, listFound: !!payloadListElement });
+        showToastNotification("Error: Could not find elements to load payloads.", "error");
+        button.textContent = `Load Payloads`;
+        button.disabled = false;
+        return;
+    }
+
+    button.textContent = 'Loading...';
+    button.disabled = true;
+
+    try {
+        const payloads = await window.traceReportStorage.getReportPayloads(analysisKey);
+        if (payloads && payloads.length > 0) {
+            payloadListElement.innerHTML = payloads.map((p, i) => renderPayloadItem(p, i)).join('');
+            const countDisplay = reportPanel.querySelector(`#payload-count-display-${safeKeyIdPart}`);
+            if(countDisplay) countDisplay.textContent = payloads.length;
+
+        } else {
+            payloadListElement.innerHTML = `<p>No payloads found in storage for this report.</p>`;
+        }
+        button.remove();
+    } catch (error) {
+        log.error(`Error loading payloads:`, error);
+        payloadListElement.innerHTML = `<p class="error-message">Error loading payloads.</p>`;
+        button.textContent = `Retry Load Payloads`;
+        button.disabled = false;
+    }
+}
+
+async function handleGenerateSmartPayloadsClick(event) {
+    const button = event.target;
+    const controlsDiv = button.closest('.smart-payload-controls');
+    if (!controlsDiv) {
+        log.error("Cannot find smart payload controls container.");
+        return;
+    }
+
+    const statusSpan = controlsDiv.querySelector('.smart-payload-status');
+    const analysisKey = controlsDiv.dataset.analysisKey;
+    const originalEndpointKey = controlsDiv.dataset.endpointKey;
+    const reportPanel = button.closest('.trace-results-panel');
+    const safeKeyIdPart = analysisKey?.replace(/[^a-zA-Z0-9_-]/g, '_');
+
+    if (!analysisKey || !originalEndpointKey || !reportPanel) {
+        log.error("Missing analysis key, original endpoint key, or report panel for generating smart payloads.");
+        if (statusSpan) statusSpan.textContent = 'Error: Missing data context.';
+        return;
+    }
+
+    button.disabled = true;
+    button.textContent = 'Generating...';
+    if (statusSpan) statusSpan.textContent = 'Fetching data...';
+
+    try {
+        if (!window.handlerTracer) { window.handlerTracer = new HandlerTracer(); }
+
+        const reportData = await window.traceReportStorage.getTraceReport(analysisKey);
+        const existingPayloads = await window.traceReportStorage.getReportPayloads(analysisKey) || [];
+
+        const relevantMessages = await window.retrieveMessagesWithFallbacks(analysisKey, originalEndpointKey);
+
+        if (!reportData) throw new Error("Could not retrieve saved report data to generate smart payloads.");
+
+        const handlerCode = reportData.analyzedHandler?.handler || reportData.analyzedHandler?.code;
+        if (!handlerCode) throw new Error("Handler code missing from report.");
+
+        const staticAnalysisData = reportData.details?.staticAnalysisRawOutput?.analysis;
+        if (!staticAnalysisData || !reportData.details?.staticAnalysisRawOutput?.success) {
+            log.warn("Static analysis data missing or indicates failure. Smart generation might be less effective or not possible.");
+            if (statusSpan) statusSpan.textContent = 'Static analysis data issue.';
+            button.disabled = false;
+            button.textContent = 'Generate Smart Payloads';
+            return;
+        }
+
+        const uniqueStructures = reportData.details?.uniqueStructures || window.handlerTracer.analyzeJsonStructures(relevantMessages);
+        const vulnerabilities = { sinks: reportData.details?.sinks || [], securityIssues: reportData.details?.securityIssues || [] };
+
+        if (statusSpan) statusSpan.textContent = 'Generating smart payloads...';
+        const generationContext = { uniqueStructures, vulnerabilities, staticAnalysisData, originalMessages: relevantMessages, dynamicAnalysisResults: null };
+
+        const smartPayloads = await window.handlerTracer.generateSmartPayloads(generationContext);
+        log.info(`[Smart Payload Gen] Generated ${smartPayloads.length} smart payloads for ${analysisKey}`);
+
+        if (statusSpan) statusSpan.textContent = 'Merging and saving payloads...';
+
+        let combinedPayloads = [...existingPayloads, ...smartPayloads];
+        const uniquePayloadsMap = new Map();
+        combinedPayloads.forEach(p => {
+            const payloadDataStr = (typeof p.payload === 'object' && p.payload !== null) ? JSON.stringify(p.payload) : String(p.payload);
+            const key = `${p.type}|${p.targetPath}|${payloadDataStr}|${p.baseSource}`;
+            if (!uniquePayloadsMap.has(key)) {
+                uniquePayloadsMap.set(key, p);
+            }
+        });
+        combinedPayloads = Array.from(uniquePayloadsMap.values());
+        if (combinedPayloads.length > window.handlerTracer.MAX_PAYLOADS_TOTAL) {
+            combinedPayloads = combinedPayloads.slice(0, window.handlerTracer.MAX_PAYLOADS_TOTAL);
+        }
+        log.info(`[Smart Payload Gen] Combined and deduplicated. Total payloads: ${combinedPayloads.length}`);
+
+        const payloadsSaved = await window.traceReportStorage.saveReportPayloads(analysisKey, combinedPayloads);
+        if (!payloadsSaved) throw new Error("Failed to save combined payloads.");
+
+        const newPayloadMode = (existingPayloads.length > 0 && smartPayloads.length > 0) ?
+            'smart_and_default' :
+            (smartPayloads.length > 0 ? 'smart' :
+                (existingPayloads.length > 0 ? 'default' : 'none'));
+
+        reportData.details.payloadMode = newPayloadMode;
+        reportData.details.payloadsGeneratedCount = combinedPayloads.length;
+        if(reportData.summary) reportData.summary.payloadsGenerated = combinedPayloads.length;
+
+        const reportMetadataSaved = await window.traceReportStorage.saveTraceReport(analysisKey, reportData);
+        if (!reportMetadataSaved) throw new Error("Failed to save updated report metadata.");
+
+        const traceInfoKey = `trace-info-${originalEndpointKey}`;
+        const traceInfoResult = await new Promise(resolve => chrome.storage.local.get(traceInfoKey, resolve));
+        const existingTraceInfo = traceInfoResult[traceInfoKey] || {};
+        await chrome.storage.local.set({
+            [traceInfoKey]: {
+                ...existingTraceInfo,
+                payloadMode: newPayloadMode,
+                payloadCount: combinedPayloads.length,
+                timestamp: Date.now()
+            }
+        });
+
+        if (statusSpan) statusSpan.textContent = 'Done!';
+        button.textContent = 'Smart Payloads Generated & Merged';
+        button.disabled = true;
+
+        const countDisplayId = `payload-count-display-${safeKeyIdPart}`;
+        const modeDisplayId = `payload-mode-display-${safeKeyIdPart}`;
+        const payloadListId = `payloads-list-${safeKeyIdPart}`;
+        const payloadSectionId = `report-payload-section-${safeKeyIdPart}`;
+
+        const countDisplay = reportPanel.querySelector(`#${countDisplayId}`);
+        const modeDisplay = reportPanel.querySelector(`#${modeDisplayId}`);
+        const payloadListElement = reportPanel.querySelector(`#${payloadListId}`);
+        const payloadSection = reportPanel.querySelector(`#${payloadSectionId}`);
+
+
+        if (countDisplay) countDisplay.textContent = combinedPayloads.length;
+        if (modeDisplay) modeDisplay.textContent = newPayloadMode.replace(/_/g, ' ');
+
+        reportPanel.querySelectorAll(`#${payloadSectionId} .load-payloads-btn`).forEach(btn => btn.remove());
+
+        if(payloadListElement) {
+            if(combinedPayloads.length > 0) {
+                payloadListElement.innerHTML = combinedPayloads.slice(0, 10).map((p, i) => renderPayloadItem(p, i)).join('');
+                if (combinedPayloads.length > 10 || (combinedPayloads.length > 0 && !payloadListElement.querySelector('.payload-item')) ) {
+                    const loadAllBtn = document.createElement('button');
+                    loadAllBtn.className = 'control-button secondary-button show-more-btn load-payloads-btn';
+                    loadAllBtn.dataset.analysisKey = analysisKey;
+                    loadAllBtn.textContent = `Load All ${combinedPayloads.length} Payloads`;
+                    if (payloadSection) payloadSection.appendChild(loadAllBtn);
+                }
+            } else {
+                payloadListElement.innerHTML = '<p>No payloads generated or available after merge.</p>';
+            }
+        }
+
+        showToastNotification('Smart payloads generated and merged successfully!', 'success');
+
+    } catch (error) {
+        log.error('Error generating/saving smart payloads:', error);
+        if (statusSpan) statusSpan.textContent = `Error: ${error.message.substring(0, 100)}`;
+        showToastNotification(`Smart payload generation failed: ${error.message}`, 'error');
+        button.disabled = false;
+        button.textContent = 'Generate Smart Payloads';
     }
 }
 
@@ -1633,7 +1885,13 @@ async function handleReportButton(endpoint) {
     catch (error) { log.error('Error handling report button:', error); alert(`Failed to display report: ${error?.message}`); }
 }
 
-async function checkAllEndpoints() { const endpointButtons = document.querySelectorAll('.iframe-row .iframe-check-button'); for (const button of endpointButtons) { const endpointKey = button.getAttribute('data-endpoint'); if (endpointKey && !button.classList.contains('green') && !button.classList.contains('success')) { try { await handlePlayButton(endpointKey, button); await new Promise(resolve => setTimeout(resolve, 500)); } catch {} } } }
+async function checkAllEndpoints() {
+    const endpointButtons = document.querySelectorAll('.iframe-row .iframe-check-button');
+    for (const button of endpointButtons) {
+        const endpointKey = button.getAttribute('data-endpoint');
+        if (endpointKey && !button.classList.contains('green') && !button.classList.contains('success')) {
+            try { await handlePlayButton(endpointKey, button);
+                await new Promise(resolve => setTimeout(resolve, 500)); } catch {} } } }
 
 async function populateInitialHandlerStates() {
     log.debug("Populating initial handler states...");
@@ -1682,7 +1940,6 @@ window.addEventListener('DOMContentLoaded', async () => {
     displayCurrentVersion();
     document.getElementById('check-version-button')?.addEventListener('click', checkLatestVersion);
 
-
     const sidebarToggle = document.getElementById('sidebarToggle');
     const controlSidebar = document.getElementById('controlSidebar');
     if (sidebarToggle && controlSidebar) {
@@ -1723,6 +1980,19 @@ window.addEventListener('DOMContentLoaded', async () => {
     try {
         chrome.storage.session.get('customXssPayloads', (result) => { if (chrome.runtime.lastError) { log.warn("Error getting custom payloads status:", chrome.runtime.lastError.message); return; } const storedPayloads = result.customXssPayloads; const active = storedPayloads && storedPayloads.length > 0; updatePayloadStatus(active, active ? storedPayloads.length : 0); if (active && window.FuzzingPayloads) { if (!window.FuzzingPayloads._originalXSS) window.FuzzingPayloads._originalXSS = [...window.FuzzingPayloads.XSS]; window.FuzzingPayloads.XSS = [...storedPayloads]; } });
     } catch (e) { log.error("Error checking custom payload status:", e); }
+
+    if (!document.body.hasAttribute('data-dashboard-listeners-attached')) {
+        document.body.setAttribute('data-dashboard-listeners-attached', 'true');
+        document.body.addEventListener('click', (event) => {
+            if (event.target) {
+                if (event.target.matches('.generate-smart-payloads-btn')) {
+                    handleGenerateSmartPayloadsClick(event);
+                } else if (event.target.matches('.load-payloads-btn')) {
+                    handleLoadPayloadsClick(event);
+                }
+            }
+        });
+    }
 
     requestUiUpdate();
 });
