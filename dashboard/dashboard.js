@@ -1146,20 +1146,19 @@ async function handlePlayButton(endpoint, button, skipCheck = false) {
             }
             if (!successfulUrl) successfulUrl = analysisKeyToUse;
 
+
             const [traceReport, storedPayloads, storedMessages] = await Promise.all([
                 window.traceReportStorage.getTraceReport(analysisKeyToUse),
                 window.traceReportStorage.getReportPayloads(analysisKeyToUse),
                 retrieveMessagesWithFallbacks(analysisKeyToUse, endpointKey)
             ]);
 
+
             if (!traceReport) throw new Error(`No trace report found for analysis key ${analysisKeyToUse}. Run Play & Trace again.`);
             const handlerCode = traceReport?.analyzedHandler?.handler || traceReport?.analyzedHandler?.code;
             if (!handlerCode) throw new Error('Handler code missing in trace report.');
 
             const payloads = storedPayloads || [];
-            if (!payloads || payloads.length === 0) {
-                log.warn(`[Launch] No payloads found for analysis key ${analysisKeyToUse} after attempting to load from storage. Fuzzing might be ineffective or disabled.`);
-            }
 
             let messagesForFuzzer = Array.isArray(storedMessages) && storedMessages.length > 0 ?
                 storedMessages :
@@ -1206,7 +1205,23 @@ async function handlePlayButton(endpoint, button, skipCheck = false) {
         const originalMessages = await retrieveMessagesWithFallbacks(analysisStorageKey, endpointKey);
         const testMessage = originalMessages.length > 0 ? originalMessages[0].data : {"FrogPost": "BreakpointTest"};
 
-        if (!skipCheck && !isExtensionUrl) {
+        if (isExtensionUrl) {
+            log.info("[Play] Processing extension URL. Attempting to use pre-detected handler.");
+            successfullyAnalyzedUrl = endpointUrlForAnalysis;
+            analysisStorageKey = getStorageKeyForUrl(successfullyAnalyzedUrl);
+
+            const previouslyFoundHandlerData = await chrome.storage.local.get(`best-handler-${analysisStorageKey}`);
+            if (previouslyFoundHandlerData && previouslyFoundHandlerData[`best-handler-${analysisStorageKey}`]) {
+                foundHandlerObject = previouslyFoundHandlerData[`best-handler-${analysisStorageKey}`];
+                log.success(`[Play] Successfully loaded pre-detected handler for extension URL ${analysisStorageKey} from local storage.`);
+                if (!endpointsWithDetectedHandlers.has(analysisStorageKey)) {
+                    endpointsWithDetectedHandlers.add(analysisStorageKey);
+                    handlerStateUpdated = true;
+                }
+            } else {
+                log.warn(`[Play] No pre-detected handler found in local storage for extension URL ${analysisStorageKey}. The 'Play' action for extensions currently relies on prior auto-detection.`);
+            }
+        } else if (!skipCheck) {
             updateButton(button, 'csp');
             let cspResult;
             let headErrorOccurred = false;
@@ -1315,15 +1330,18 @@ async function handlePlayButton(endpoint, button, skipCheck = false) {
             analysisStorageKey = getStorageKeyForUrl(successfullyAnalyzedUrl);
         }
 
-        if (!successfullyAnalyzedUrl) {
+
+        if (!successfullyAnalyzedUrl && !isExtensionUrl) {
             throw new Error("Analysis cannot proceed: No valid or confirmed URL.");
         }
-        analysisStorageKey = getStorageKeyForUrl(successfullyAnalyzedUrl);
 
 
-        if(!button.classList.contains('warning')){
+        if(!button.classList.contains('warning') && !isExtensionUrl){
+            updateButton(button, 'analyze');
+        } else if (isExtensionUrl && !foundHandlerObject && !button.classList.contains('warning')) {
             updateButton(button, 'analyze');
         }
+
 
         await saveRandomPostMessages(analysisStorageKey, originalMessages);
         const successfulUrlStorageKey = `successful-url-${analysisStorageKey}`;
@@ -1331,13 +1349,14 @@ async function handlePlayButton(endpoint, button, skipCheck = false) {
 
         const extractor = new HandlerExtractor().initialize(successfullyAnalyzedUrl, originalMessages);
 
-        log.debug(`[Play] Attempting handler discovery for ${successfullyAnalyzedUrl}`);
-        foundHandlerObject = null;
-        potentialHandlers = [];
         analysisErrorMsg = '';
 
         if (isExtensionUrl){
-            log.info("[Play] Skipping dynamic handler discovery for extension URL.");
+            // For extension URLs, foundHandlerObject is already populated (or not) from storage.
+            // No new dynamic discovery here.
+            if (!foundHandlerObject) {
+                log.info("[Play] Extension URL: No pre-existing handler in storage, and no new dynamic discovery performed by Play button.");
+            }
         } else {
             try {
                 potentialHandlers = await extractor.extractDynamicallyViaDebugger(successfullyAnalyzedUrl);
@@ -1368,6 +1387,7 @@ async function handlePlayButton(endpoint, button, skipCheck = false) {
             }
         }
 
+
         if (foundHandlerObject?.handler) {
             const finalBestHandlerKey = `best-handler-${analysisStorageKey}`;
             try {
@@ -1385,16 +1405,26 @@ async function handlePlayButton(endpoint, button, skipCheck = false) {
                     await chrome.storage.local.set({ [mappingKey]: analysisStorageKey });
                     log.debug(`[Play] Stored mapping: ${mappingKey} -> ${analysisStorageKey}`);
                 } else { const mappingKey = `analyzed-url-for-${endpointKey}`; await chrome.storage.local.remove(mappingKey); }
+
                 await chrome.storage.local.set({ [finalBestHandlerKey]: foundHandlerObject });
                 if (!endpointsWithDetectedHandlers.has(analysisStorageKey)) {
                     endpointsWithDetectedHandlers.add(analysisStorageKey);
                     handlerStateUpdated = true;
                 }
                 log.success(`[Play] Successfully identified and saved handler for ${analysisStorageKey}. Category: ${foundHandlerObject.category}, Score: ${foundHandlerObject.score ?? 'N/A'}`);
-                updateButton(button, 'success');
-                const traceButton = button.closest('.button-container')?.querySelector('.iframe-trace-button');
-                if (traceButton) updateTraceButton(traceButton, 'default', {showEmoji: true});
-                if (reportButton) updateReportButton(reportButton, 'disabled', originalFullEndpoint);
+
+                if (isExtensionUrl) {
+                    updateButton(button, 'success');
+                    const traceButtonExt = button.closest('.button-container')?.querySelector('.iframe-trace-button');
+                    if (traceButtonExt) updateTraceButton(traceButtonExt, 'default', {showEmoji: true});
+                    if (reportButton) updateReportButton(reportButton, 'disabled', originalFullEndpoint);
+                } else {
+                    updateButton(button, 'success');
+                    const traceButtonWeb = button.closest('.button-container')?.querySelector('.iframe-trace-button');
+                    if (traceButtonWeb) updateTraceButton(traceButtonWeb, 'default', {showEmoji: true});
+                    if (reportButton) updateReportButton(reportButton, 'disabled', originalFullEndpoint);
+                }
+
             } catch (storageError) {
                 log.error(`Failed to save handler (${finalBestHandlerKey}):`, storageError);
                 updateButton(button, 'error', {errorMessage: 'Failed to save handler'});
@@ -1404,12 +1434,17 @@ async function handlePlayButton(endpoint, button, skipCheck = false) {
             }
         } else {
             log.warn(`[Play] Final failure check: No usable handler object available.`);
-            const failureMessage = `No usable handler confirmed for ${endpointUrlForAnalysis}. ${analysisErrorMsg || 'Reason unknown.'}`;
-            log.warn(`[Play] ${failureMessage}`);
-            if(!button.classList.contains('warning')) {
-                updateButton(button, 'warning', {errorMessage: `No handler confirmed. ${analysisErrorMsg || ''}`.trim()});
+            if (isExtensionUrl) {
+                log.warn(`[Play] No handler confirmed for extension URL ${analysisStorageKey} even after checking storage.`);
+                updateButton(button, 'warning', {errorMessage: `No handler found by this action. Auto-attach should find it.`});
             } else {
-                button.title = `No handler confirmed. ${analysisErrorMsg || ''}`.trim();
+                const failureMessage = `No usable handler confirmed for ${endpointUrlForAnalysis}. ${analysisErrorMsg || 'Reason unknown.'}`;
+                log.warn(`[Play] ${failureMessage}`);
+                if(!button.classList.contains('warning')) {
+                    updateButton(button, 'warning', {errorMessage: `No handler confirmed. ${analysisErrorMsg || ''}`.trim()});
+                } else {
+                    button.title = `No handler confirmed. ${analysisErrorMsg || ''}`.trim();
+                }
             }
             const traceButton = button.closest('.button-container')?.querySelector('.iframe-trace-button');
             if (traceButton) updateTraceButton(traceButton, 'disabled');
