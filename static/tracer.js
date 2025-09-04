@@ -1,7 +1,7 @@
 /**
  * FrogPost Extension
- * Originally Created by thisis0xczar/Lidor JFrog AppSec Team
- * Refined on: 2025-05-07
+ * Originally Created by thisis0xczar/Lidor 
+ * Refined on: 2025-09-04
  */
 const DATA_PROP = 'data';
 
@@ -9,6 +9,13 @@ if (typeof window.analyzeHandlerStatically === 'undefined') {
     console.error("Static Handler Analyzer not loaded. Payload generation will be limited.");
     window.analyzeHandlerStatically = () => ({ success: false, error: 'Analyzer not loaded.', analysis: null });
 }
+
+const sanitizeJwts = (typeof window !== 'undefined' && window.sanitizeJwts) 
+    ? window.sanitizeJwts 
+    : (data) => {
+        console.warn('[JWT Sanitization] Fuzzer JWT sanitization not loaded, skipping sanitization');
+        return data;
+    };
 
 class HandlerTracer {
     constructor() {
@@ -442,8 +449,13 @@ class HandlerTracer {
         }
 
         log.info(`[Payload Gen - Default] Starting. Object Structures: ${objectStructures.length}, Raw Strings: ${rawStringStructures.length}`);
+        
+        const shouldGenerateObjects = objectStructures.length > 0;
+        const shouldGenerateStrings = rawStringStructures.length > 0;
+        
+        log.info(`[Payload Gen - Default] Will generate: Objects=${shouldGenerateObjects}, Strings=${shouldGenerateStrings}`);
 
-        if (objectStructures.length > 0) {
+        if (shouldGenerateObjects) {
             const limitedDefaultPayloads = shuffleArray(defaultPayloadList).slice(0, this.MAX_PAYLOADS_PER_DUMB_FIELD);
 
             for (const baseStructInfo of objectStructures) {
@@ -507,7 +519,7 @@ class HandlerTracer {
             }
         }
 
-        if (rawStringStructures.length > 0) {
+        if (shouldGenerateStrings) {
             log.info(`[Payload Gen - Default] Processing ${rawStringStructures.length} raw string messages.`);
             const limitedPayloads = shuffleArray(defaultPayloadList).slice(0, this.MAX_PAYLOADS_PER_DUMB_FIELD * 2);
 
@@ -546,20 +558,31 @@ class HandlerTracer {
         if (generatedPayloads.length === 0 && defaultPayloadList.length > 0) {
             log.warn("[Payload Gen - Default] No payloads generated from structures. Adding basic raw fallback.");
             const limitedFallbackPayloads = shuffleArray(defaultPayloadList).slice(0, 15);
-            limitedFallbackPayloads.forEach(p => {
-                if (generatedPayloads.length < this.MAX_PAYLOADS_TOTAL) {
-                    const isCallback = allCallbackPayloads.includes(p); const isTypeFuzz = typeFuzzPayloads.includes(p); const isEncoding = (window.FuzzingPayloads?.ENCODING || []).includes(p);
-                    let pTypeBase = customPayloadsActive ? 'custom-raw-fallback' : 'raw-fallback';
-                    if (isCallback) pTypeBase += '-callback'; else if (isTypeFuzz) pTypeBase += '-type'; else if (isEncoding) pTypeBase += '-encoding'; else pTypeBase += '-xss';
-                    const fallbackPayload = { type: pTypeBase, payload: p, targetPath: 'raw', sinkType: 'unknown', description: `Raw Fallback Payload (${typeof p})`, baseSource: 'fallback' };
-                    let fbKey; try { fbKey = JSON.stringify(fallbackPayload.payload); } catch { fbKey = String(fallbackPayload.payload); }
-                    if (!handledPathValuePairs.has(fbKey + '-fallback')) { generatedPayloads.push(fallbackPayload); handledPathValuePairs.add(fbKey + '-fallback');}
-                }
-            });
+            if (!shouldGenerateStrings || rawStringStructures.length === 0) {
+                limitedFallbackPayloads.forEach(p => {
+                    if (generatedPayloads.length < this.MAX_PAYLOADS_TOTAL) {
+                        const isCallback = allCallbackPayloads.includes(p); const isTypeFuzz = typeFuzzPayloads.includes(p); const isEncoding = (window.FuzzingPayloads?.ENCODING || []).includes(p);
+                        let pTypeBase = customPayloadsActive ? 'custom-raw-fallback' : 'raw-fallback';
+                        if (isCallback) pTypeBase += '-callback'; else if (isTypeFuzz) pTypeBase += '-type'; else if (isEncoding) pTypeBase += '-encoding'; else pTypeBase += '-xss';
+                        const fallbackPayload = { type: pTypeBase, payload: p, targetPath: 'raw', sinkType: 'unknown', description: `Raw Fallback Payload (${typeof p})`, baseSource: 'fallback' };
+                        let fbKey; try { fbKey = JSON.stringify(fallbackPayload.payload); } catch { fbKey = String(fallbackPayload.payload); }
+                        if (!handledPathValuePairs.has(fbKey + '-fallback')) { generatedPayloads.push(fallbackPayload); handledPathValuePairs.add(fbKey + '-fallback');}
+                    }
+                });
+            }
         }
 
         log.info(`[Payload Gen - Default] Final default payload count: ${generatedPayloads.length}`);
-        return generatedPayloads.slice(0, this.MAX_PAYLOADS_TOTAL);
+        
+        const sanitizedPayloads = generatedPayloads.map(p => {
+            if (p && p.payload) {
+                return { ...p, payload: sanitizeJwts(p.payload) };
+            }
+            return p;
+        });
+        console.log(`🔐 [JWT Sanitization] Sanitized ${sanitizedPayloads.length} default payloads`);
+        
+        return sanitizedPayloads.slice(0, this.MAX_PAYLOADS_TOTAL);
     }
 
     async generateSmartPayloads(context) {
@@ -723,7 +746,8 @@ class HandlerTracer {
         }
 
         const rootSinks = potentialSinks.filter(sink => sink.sourcePath && (sink.sourcePath === '(root)' || sink.sourcePath === '(root_data)' || sink.sourcePath === '(parsed_root)'));
-        if (rootSinks.length > 0 && rawStringExamples.length > 0) {
+        const endpointExpectsObjectSmart = (uniqueStructures || []).some(s => s.structure?.type === 'object');
+        if (!endpointExpectsObjectSmart && rootSinks.length > 0 && rawStringExamples.length > 0) {
             log.info(`[Payload Gen - Smart] Processing ${rootSinks.length} root sinks for ${rawStringExamples.length} raw string examples.`);
             for (const rawExample of rawStringExamples) {
                 if (generatedPayloads.length >= this.MAX_PAYLOADS_TOTAL) break;
@@ -778,7 +802,16 @@ class HandlerTracer {
             }
         }
         log.info(`[Payload Gen - Smart] Final unique payload count: ${uniquePayloads.length} (Total generated before dedupe: ${generatedPayloads.length})`);
-        return uniquePayloads.slice(0, this.MAX_PAYLOADS_TOTAL);
+        
+        const sanitizedPayloads = uniquePayloads.map(p => {
+            if (p && p.payload) {
+                return { ...p, payload: sanitizeJwts(p.payload) };
+            }
+            return p;
+        });
+        console.log(`🔐 [JWT Sanitization] Sanitized ${sanitizedPayloads.length} smart payloads`);
+        
+        return sanitizedPayloads.slice(0, this.MAX_PAYLOADS_TOTAL);
     }
 
 }
@@ -837,6 +870,15 @@ async function handleTraceButton(endpoint, traceButton) {
         const storedHandlerData = await new Promise(resolve => chrome.storage.local.get([bestHandlerStorageKey], resolve));
         bestHandler = storedHandlerData[bestHandlerStorageKey];
         handlerCode = bestHandler?.handler || bestHandler?.code;
+        if (!handlerCode) {
+            // try fallback: last confirmed handler key (if any)
+            const lastKey = `last-confirmed-handler-${analysisStorageKey}`;
+            try {
+                const lastStore = await new Promise(resolve => chrome.storage.local.get([lastKey], resolve));
+                const last = lastStore[lastKey];
+                if (last?.handler || last?.code) { bestHandler = last; handlerCode = last.handler || last.code; }
+            } catch {}
+        }
         log.debug("[Trace Button] Retrieved Handler Code:", handlerCode ? handlerCode.substring(0, 300) + '...' : '[No Handler Code Found]');
 
         if (!handlerCode) {
@@ -909,20 +951,26 @@ async function handleTraceButton(endpoint, traceButton) {
 
         updatePhase('saving');
         const securityScore = window.handlerTracer.calculateRiskScore(vulnAnalysis);
+        // Ensure bestHandler carries code; if missing, try to retrieve from storage
+        try {
+            if (!bestHandler?.handler && !bestHandler?.code) {
+                const k = `best-handler-${analysisStorageKey}`;
+                const stored = await new Promise(resolve => chrome.storage.local.get([k], resolve));
+                const bh = stored[k];
+                if (bh?.handler || bh?.code) bestHandler = bh;
+            }
+        } catch {}
+
         report = {
             endpoint: endpointUrlUsedForAnalysis,
-            originalEndpointKey: endpointKey,
-            analysisStorageKey: analysisStorageKey,
-            timestamp: new Date().toISOString(),
-            analyzedHandler: bestHandler,
-            vulnerabilities: vulnAnalysis.sinks || [],
-            securityIssues: vulnAnalysis.securityIssues || [],
+            originalEndpointKey: originalFullEndpoint,
+            analyzedEndpointKey: analysisStorageKey,
             securityScore: securityScore,
             details: {
                 staticAnalysisRawOutput: staticAnalysisResult,
                 accessedEventDataPaths: staticAnalysisData?.accessedEventDataPaths instanceof Set ? Array.from(staticAnalysisData.accessedEventDataPaths) : staticAnalysisData?.accessedEventDataPaths,
                 requiredConditions: staticAnalysisData?.requiredConditions || {},
-                analyzedHandler: bestHandler,
+                analyzedHandler: { ...(bestHandler || {}), handler: (bestHandler?.handler || bestHandler?.code || handlerCode || '') },
                 sinks: vulnAnalysis.sinks || [],
                 securityIssues: vulnAnalysis.securityIssues || [],
                 dataFlows: staticAnalysisData?.dataFlows || [],
@@ -937,7 +985,21 @@ async function handleTraceButton(endpoint, traceButton) {
                 payloadMode: payloadMode
             },
             summary: {
-                messagesAnalyzed: relevantMessages.length,
+                messagesAnalyzed: (() => {
+                    try {
+                        const TEST_MESSAGE_KEY = 'FrogPost';
+                        const TEST_MESSAGE_VALUE = 'BreakpointTest';
+                        const panelKey = window.getStorageKeyForUrl(endpointUrlUsedForAnalysis);
+                        const filtered = (relevantMessages || []).filter(m => {
+                            const originKey = m.origin ? window.getStorageKeyForUrl(m.origin) : null;
+                            const destKey = m.destinationUrl ? window.getStorageKeyForUrl(m.destinationUrl) : null;
+                            const isForEndpoint = originKey === panelKey || destKey === panelKey;
+                            const isInternal = typeof m.data === 'object' && m.data !== null && Object.prototype.hasOwnProperty.call(m.data, TEST_MESSAGE_KEY) && m.data[TEST_MESSAGE_KEY] === TEST_MESSAGE_VALUE;
+                            return isForEndpoint && !isInternal;
+                        });
+                        return filtered.length;
+                    } catch { return relevantMessages.length; }
+                })(),
                 patternsIdentified: uniqueStructures.length,
                 sinksFound: vulnAnalysis.sinks?.length || 0,
                 issuesFound: vulnAnalysis.securityIssues?.length || 0,

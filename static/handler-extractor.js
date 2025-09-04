@@ -1,7 +1,7 @@
 /**
  * FrogPost Extension
- * Originally Created by thisis0xczar/Lidor JFrog AppSec Team
- * Refined on: 2025-05-07
+ * Originally Created by thisis0xczar/Lidor 
+ * Refined on: 2025-09-04
  */
 
 class HandlerExtractor {
@@ -11,6 +11,52 @@ class HandlerExtractor {
         this.messageKeys = new Set();
         this.messageTypes = new Set();
         this.functionDefinitions = new Map();
+    }
+
+    _is(n, t) { return !!n && n.type === t; }
+    _prop(o, k) { return (o && Object.prototype.hasOwnProperty.call(o, k)) ? o[k] : undefined; }
+    _safeLog(...args) { try { console.debug(...args); } catch {} }
+
+    _resolveStringLiteral(node) {
+        if (!node) return null;
+        const lit = (n) => (n && n.type === 'Literal' && typeof n.value === 'string') ? n.value : null;
+        const tmpl = (n) => {
+            if (!n || n.type !== 'TemplateLiteral' || (n.expressions && n.expressions.length)) return null;
+            return n.quasis.map(q => (q.value.cooked ?? q.value.raw ?? '')).join('');
+        };
+        const bin = (n) => {
+            if (!n || n.type !== 'BinaryExpression' || n.operator !== '+') return null;
+            const l = this._resolveStringLiteral(n.left);
+            const r = this._resolveStringLiteral(n.right);
+            return (typeof l === 'string' && typeof r === 'string') ? (l + r) : null;
+        };
+        const id = (n) => {
+            if (!n || n.type !== 'Identifier' || !this._constStringEnv) return null;
+            return this._constStringEnv.get(n.name) || null;
+        };
+        return lit(node) ?? tmpl(node) ?? bin(node) ?? id(node) ?? null;
+    }
+
+    _seedConstStringEnv(ast) {
+        this._constStringEnv = new Map();
+        acorn.walk.simple(ast, {
+            VariableDeclarator: (n) => {
+                try {
+                    if (n?.id?.name && n.init) {
+                        const v = this._resolveStringLiteral(n.init);
+                        if (typeof v === 'string') this._constStringEnv.set(n.id.name, v);
+                    }
+                } catch (e) { this._safeLog('[ConstSeed] var error:', e?.message); }
+            },
+            AssignmentExpression: (n) => {
+                try {
+                    if (n?.operator === '=' && n.left?.type === 'Identifier') {
+                        const v = this._resolveStringLiteral(n.right);
+                        if (typeof v === 'string') this._constStringEnv.set(n.left.name, v);
+                    }
+                } catch (e) { this._safeLog('[ConstSeed] assign error:', e?.message); }
+            }
+        });
     }
 
     initialize(endpoint, messages = []) {
@@ -85,6 +131,7 @@ class HandlerExtractor {
         }
 
         if (ast) {
+            this._seedConstStringEnv(ast);
             try {
                 this._mapFunctionDeclarations(ast);
                 this._mapPrototypeMethods(ast);
@@ -154,114 +201,161 @@ class HandlerExtractor {
 
 
             try {
+                if (!node || !node.body) {
+                    return flags;
+                }
                 acorn.walk.simple(node.body, {
                     CallExpression: (callNode) => {
-                        let calleeName = null;
-                        let resolvedCalleeDef = null;
-                        let isPassedEventArg = callNode.arguments.some(arg => arg.type === 'Identifier' && arg.name === eventParamName);
+                        try {
+                            if (!callNode) return;
+                            let calleeName = null;
+                            let resolvedCalleeDef = null;
+                            const args = this._prop(callNode, 'arguments') || [];
+                            const callee = this._prop(callNode, 'callee');
+                            
+                            let isPassedEventArg = Array.isArray(args) && args.some(arg => arg?.type === 'Identifier' && arg?.name === eventParamName);
 
-                        if (callNode.callee.type === 'Identifier') {
-                            calleeName = callNode.callee.name;
-                            resolvedCalleeDef = this.functionDefinitions.get(calleeName);
-                            if(typeof log !== 'undefined' && resolvedCalleeDef) log.debug(`[quickScanRec] Depth ${currentDepth}: Found direct call to '${calleeName}', Definition found: ${!!resolvedCalleeDef.node}`);
-                        } else if (callNode.callee.type === 'MemberExpression') {
-                            if (callNode.callee.property.type === 'Identifier') {
-                                calleeName = callNode.callee.property.name;
-                                const objExpr = callNode.callee.object;
-                                let objName = null;
-                                let lookupKey = null;
+                            if (callee?.type === 'Identifier') {
+                                calleeName = this._prop(callee, 'name');
+                                if (calleeName) {
+                                    resolvedCalleeDef = this.functionDefinitions.get(calleeName);
+                                    if(typeof log !== 'undefined' && resolvedCalleeDef) log.debug(`[quickScanRec] Depth ${currentDepth}: Found direct call to '${calleeName}', Definition found: ${!!resolvedCalleeDef.node}`);
+                                }
+                            } else if (callee?.type === 'MemberExpression') {
+                                const calleeProp = this._prop(callee, 'property');
+                                if (calleeProp?.type === 'Identifier') {
+                                    calleeName = this._prop(calleeProp, 'name');
+                                    const objExpr = this._prop(callee, 'object');
+                                    let objName = null;
+                                    let lookupKey = null;
 
-                                if(objExpr.type === 'ThisExpression') objName = 'this';
-                                else if (objExpr.type === 'Identifier') objName = objExpr.name;
+                                    if(objExpr?.type === 'ThisExpression') objName = 'this';
+                                    else if (objExpr?.type === 'Identifier') objName = this._prop(objExpr, 'name');
 
-                                if (objName) {
-                                    lookupKey = `${objName}.${calleeName}`;
-                                    resolvedCalleeDef = this.functionDefinitions.get(lookupKey);
-                                    if(typeof log !== 'undefined') log.debug(`[quickScanRec] Depth ${currentDepth}: Found method call '${lookupKey}', Definition found: ${!!resolvedCalleeDef?.node}`);
+                                    if (objName && calleeName) {
+                                        lookupKey = `${objName}.${calleeName}`;
+                                        resolvedCalleeDef = this.functionDefinitions.get(lookupKey);
+                                        if(typeof log !== 'undefined') log.debug(`[quickScanRec] Depth ${currentDepth}: Found method call '${lookupKey}', Definition found: ${!!resolvedCalleeDef?.node}`);
 
-                                    if (!resolvedCalleeDef) {
-                                        const protoKey = Array.from(this.functionDefinitions.keys()).find(key => key.endsWith(`.${calleeName}`) && this.functionDefinitions.get(key)?.type === 'prototype');
-                                        if(protoKey) {
-                                            resolvedCalleeDef = this.functionDefinitions.get(protoKey);
-                                            if(typeof log !== 'undefined') log.debug(`[quickScanRec] Depth ${currentDepth}: Found potential prototype method '${calleeName}' via key '${protoKey}', Definition found: ${!!resolvedCalleeDef?.node}`);
+                                        if (!resolvedCalleeDef) {
+                                            const protoKey = Array.from(this.functionDefinitions.keys()).find(key => key.endsWith(`.${calleeName}`) && this.functionDefinitions.get(key)?.type === 'prototype');
+                                            if(protoKey) {
+                                                resolvedCalleeDef = this.functionDefinitions.get(protoKey);
+                                                if(typeof log !== 'undefined') log.debug(`[quickScanRec] Depth ${currentDepth}: Found potential prototype method '${calleeName}' via key '${protoKey}', Definition found: ${!!resolvedCalleeDef?.node}`);
+                                            }
                                         }
+                                    } else {
+                                        if(typeof log !== 'undefined') log.debug(`[quickScanRec] Depth ${currentDepth}: Method call '${calleeName || 'unknown'}' on complex object type '${objExpr?.type || 'unknown'}', skipping lookup.`);
                                     }
-                                } else {
-                                    if(typeof log !== 'undefined') log.debug(`[quickScanRec] Depth ${currentDepth}: Method call '${calleeName}' on complex object type '${objExpr.type}', skipping lookup.`);
                                 }
                             }
-                        }
 
-                        if (calleeName) {
-                            if (VERIFIER_KEYWORDS.test(calleeName)) flags.callsVerifier = true;
-                            if (SCHEDULER_KEYWORDS.includes(calleeName)) flags.looksLikeScheduler = true;
-                            if (calleeName === 'postMessage' && callNode.arguments.length > 0 && callNode.arguments[0].type === 'Literal' && callNode.arguments[0].value === null) flags.mentionsPostMessageNull = true;
-                        }
-
-                        if (resolvedCalleeDef?.node && isPassedEventArg) {
-                            if(typeof log !== 'undefined') log.debug(`[quickScanRec] Depth ${currentDepth}: Recursing into '${calleeName || 'callee'}' because event param '${eventParamName}' was passed.`);
-                            const nestedFlags = quickScanForPatternsRecursive(resolvedCalleeDef.node, eventParamName, currentDepth + 1, new Set(visitedNodes));
-                            if(typeof log !== 'undefined') log.debug(`[quickScanRec] Depth ${currentDepth}: Flags from recursive call to '${calleeName || 'callee'}':`, nestedFlags);
-                            for(const key in nestedFlags) {
-                                if (typeof flags[key] === 'boolean') flags[key] = flags[key] || nestedFlags[key];
-                                else if (typeof flags[key] === 'number') flags[key] += nestedFlags[key];
+                            if (calleeName) {
+                                if (VERIFIER_KEYWORDS.test(calleeName)) flags.callsVerifier = true;
+                                if (SCHEDULER_KEYWORDS.includes(calleeName)) flags.looksLikeScheduler = true;
+                                if (calleeName === 'postMessage' && args.length > 0 && args[0]?.type === 'Literal' && args[0]?.value === null) flags.mentionsPostMessageNull = true;
                             }
-                        } else if (resolvedCalleeDef?.node && !isPassedEventArg) {
-                            if(typeof log !== 'undefined') log.debug(`[quickScanRec] Depth ${currentDepth}: Found call to '${calleeName || 'callee'}' but event param '${eventParamName}' not passed, not recursing.`);
+
+                            if (resolvedCalleeDef?.node && isPassedEventArg) {
+                                if(typeof log !== 'undefined') log.debug(`[quickScanRec] Depth ${currentDepth}: Recursing into '${calleeName || 'callee'}' because event param '${eventParamName}' was passed.`);
+                                const nestedFlags = quickScanForPatternsRecursive(resolvedCalleeDef.node, eventParamName, currentDepth + 1, new Set(visitedNodes));
+                                if(typeof log !== 'undefined') log.debug(`[quickScanRec] Depth ${currentDepth}: Flags from recursive call to '${calleeName || 'callee'}':`, nestedFlags);
+                                for(const key in nestedFlags) {
+                                    if (typeof flags[key] === 'boolean') flags[key] = flags[key] || nestedFlags[key];
+                                    else if (typeof flags[key] === 'number') flags[key] += nestedFlags[key];
+                                }
+                            } else if (resolvedCalleeDef?.node && !isPassedEventArg) {
+                                if(typeof log !== 'undefined') log.debug(`[quickScanRec] Depth ${currentDepth}: Found call to '${calleeName || 'callee'}' but event param '${eventParamName}' not passed, not recursing.`);
+                            }
+                        } catch (e) {
+                            this._safeLog('[quickScanRec] CallExpression error:', e?.message);
                         }
                     },
                     MemberExpression: (memNode) => {
-                        let baseObjectIsEvent = memNode.object?.type === 'Identifier' && memNode.object.name === eventParamName;
-                        let baseObjectIsDeeperEventData = memNode.object?.type === 'MemberExpression' && memNode.object.object?.type === 'Identifier' && memNode.object.object.name === eventParamName && memNode.object.property?.name === 'data';
+                        try {
+                            if (!memNode) return;
+                            const obj = this._prop(memNode, 'object');
+                            const prop = this._prop(memNode, 'property');
+                            
+                            let baseObjectIsEvent = obj?.type === 'Identifier' && obj?.name === eventParamName;
+                            let baseObjectIsDeeperEventData = obj?.type === 'MemberExpression' && 
+                                this._prop(obj, 'object')?.type === 'Identifier' && 
+                                this._prop(obj, 'object')?.name === eventParamName && 
+                                this._prop(obj, 'property')?.name === 'data';
 
-                        if (memNode.object.type === 'ThisExpression' || memNode.object.type === 'Identifier') {
-                            if (memNode.property.type === 'Identifier' && CALLBACK_MAP_KEYWORDS.test(memNode.property.name)) {
-                                let parentCall = memNode.parent.type === 'CallExpression' ? memNode.parent : null;
-                                let grandParentMember = parentCall?.parent.type === 'MemberExpression' ? parentCall.parent : null;
-                                if (parentCall && parentCall.callee === memNode && grandParentMember && grandParentMember.property.name === 'find') flags.usesCallbackMap = true;
-                                else if (memNode.parent.type === 'MemberExpression' && memNode.parent.object === memNode && memNode.parent.property.type !== 'Identifier') flags.usesCallbackMap = true;
+                            if (obj?.type === 'ThisExpression' || obj?.type === 'Identifier') {
+                                if (prop?.type === 'Identifier' && CALLBACK_MAP_KEYWORDS.test(prop?.name || '')) {
+                                    const parent = this._prop(memNode, 'parent');
+                                    let parentCall = parent?.type === 'CallExpression' ? parent : null;
+                                    let grandParentMember = parentCall && this._prop(parentCall, 'parent')?.type === 'MemberExpression' ? this._prop(parentCall, 'parent') : null;
+                                    if (parentCall && parentCall.callee === memNode && grandParentMember && this._prop(grandParentMember, 'property')?.name === 'find') flags.usesCallbackMap = true;
+                                    else if (parent?.type === 'MemberExpression' && parent.object === memNode && this._prop(parent, 'property')?.type !== 'Identifier') flags.usesCallbackMap = true;
+                                }
                             }
-                        }
 
-                        if (baseObjectIsEvent && memNode.property?.name === 'origin') {
-                            flags.accessesOriginField = true;
-                            let current = memNode.parent; let depth = 0;
-                            while (current && depth < 5) {
-                                if (current.type === 'IfStatement' || current.type === 'BinaryExpression' || current.type === 'ConditionalExpression' || current.type === 'LogicalExpression') { flags.accessesEventOriginConditionally = true; break; }
-                                if (current.type === 'FunctionExpression' || current.type === 'FunctionDeclaration' || current.type === 'ArrowFunctionExpression') break;
-                                current = current.parent; depth++;
+                            if (baseObjectIsEvent && prop?.name === 'origin') {
+                                flags.accessesOriginField = true;
+                                let current = this._prop(memNode, 'parent'); let depth = 0;
+                                while (current && depth < 5) {
+                                    const currentType = current?.type;
+                                    if (currentType === 'IfStatement' || currentType === 'BinaryExpression' || currentType === 'ConditionalExpression' || currentType === 'LogicalExpression') { 
+                                        flags.accessesEventOriginConditionally = true; break; 
+                                    }
+                                    if (currentType === 'FunctionExpression' || currentType === 'FunctionDeclaration' || currentType === 'ArrowFunctionExpression') break;
+                                    current = this._prop(current, 'parent'); depth++;
+                                }
                             }
-                        }
 
-                        if (baseObjectIsDeeperEventData && memNode.property?.type === 'Identifier') {
-                            flags.accessesAnyDataField = true;
-                            if(COMMON_DATA_FIELDS.has(memNode.property.name)) flags.accessesCommonDataFields++;
-                            let current = memNode.parent; let depth = 0;
-                            while(current && depth < 5) {
-                                if(current.type === 'IfStatement' || current.type === 'SwitchCase' || current.type === 'ConditionalExpression' || current.type === 'LogicalExpression' || current.type === 'BinaryExpression') { flags.accessesEventDataConditionally = true; break; }
-                                if(current.type === 'FunctionExpression' || current.type === 'FunctionDeclaration' || current.type === 'ArrowFunctionExpression') break;
-                                current = current.parent; depth++;
+                            if (baseObjectIsDeeperEventData && prop?.type === 'Identifier') {
+                                flags.accessesAnyDataField = true;
+                                if(COMMON_DATA_FIELDS.has(prop?.name || '')) flags.accessesCommonDataFields++;
+                                let current = this._prop(memNode, 'parent'); let depth = 0;
+                                while(current && depth < 5) {
+                                    const currentType = current?.type;
+                                    if(currentType === 'IfStatement' || currentType === 'SwitchCase' || currentType === 'ConditionalExpression' || currentType === 'LogicalExpression' || currentType === 'BinaryExpression') { 
+                                        flags.accessesEventDataConditionally = true; break; 
+                                    }
+                                    if(currentType === 'FunctionExpression' || currentType === 'FunctionDeclaration' || currentType === 'ArrowFunctionExpression') break;
+                                    current = this._prop(current, 'parent'); depth++;
+                                }
                             }
+                        } catch (e) {
+                            this._safeLog('[quickScanRec] MemberExpression error:', e?.message);
                         }
                     },
                     SwitchStatement: (switchNode) => {
-                        let discriminantChecksEventData = false;
-                        if (switchNode.discriminant?.type === 'MemberExpression') {
-                            const disc = switchNode.discriminant;
-                            if (disc.object?.type === 'MemberExpression' && disc.object.object?.name === eventParamName && disc.object.property?.name === 'data') {
-                                discriminantChecksEventData = true;
-                            } else if (disc.object?.type === 'Identifier') {
-                                if (COMMON_DATA_FIELDS.has(disc.property?.name)) discriminantChecksEventData = true;
+                        try {
+                            if (!switchNode) return;
+                            let discriminantChecksEventData = false;
+                            const discriminant = this._prop(switchNode, 'discriminant');
+                            if (discriminant?.type === 'MemberExpression') {
+                                const discObj = this._prop(discriminant, 'object');
+                                const discProp = this._prop(discriminant, 'property');
+                                if (discObj?.type === 'MemberExpression' && 
+                                    this._prop(discObj, 'object')?.name === eventParamName && 
+                                    this._prop(discObj, 'property')?.name === 'data') {
+                                    discriminantChecksEventData = true;
+                                } else if (discObj?.type === 'Identifier') {
+                                    if (COMMON_DATA_FIELDS.has(discProp?.name || '')) discriminantChecksEventData = true;
+                                }
                             }
+                            if (discriminantChecksEventData) flags.usesSwitchOnEventData = true;
+                        } catch (e) {
+                            this._safeLog('[quickScanRec] SwitchStatement error:', e?.message);
                         }
-                        if (discriminantChecksEventData) flags.usesSwitchOnEventData = true;
                     },
                     Identifier: (idNode) => {
-                        if (SCHEDULER_KEYWORDS.includes(idNode.name)) flags.looksLikeScheduler = true;
+                        try {
+                            if (!idNode) return;
+                            const nodeName = this._prop(idNode, 'name');
+                            if (nodeName && SCHEDULER_KEYWORDS.includes(nodeName)) flags.looksLikeScheduler = true;
+                        } catch (e) {
+                            this._safeLog('[quickScanRec] Identifier error:', e?.message);
+                        }
                     }
                 });
             } catch (e) {
-                if(typeof log !== 'undefined') log.warn(`[Extractor AST Pattern Scan] Error during scan depth ${currentDepth}: ${e.message}`);
+                if(typeof log !== 'undefined') log.warn(`[Extractor AST Pattern Scan] Error during scan depth ${currentDepth}: ${e?.message || String(e)}`);
             }
 
             flags.hasStrongSignal = flags.callsVerifier || flags.usesCallbackMap || flags.accessesEventOriginConditionally || flags.usesSwitchOnEventData || flags.accessesEventDataConditionally;
@@ -272,7 +366,12 @@ class HandlerExtractor {
         try {
             acorn.walk.simple(ast, {
                 AssignmentExpression: (node) => {
-                    if (node.operator === '=' && node.left.type === 'MemberExpression' && node.left.property.name === 'onmessage') {
+                    try {
+                        if (!this._is(node, 'AssignmentExpression')) return;
+                        const left = this._prop(node, 'left');
+                        if (!this._is(left, 'MemberExpression')) return;
+                        const prop = this._prop(left, 'property');
+                        if (prop?.name !== 'onmessage') return;
                         let funcNode = null; let category = 'ast-onmessage-assignment'; let functionName = null;
                         let handlerFlags = {}; let eventParamName = 'event';
 
@@ -293,11 +392,22 @@ class HandlerExtractor {
                             }
                         }
                         if (funcNode) foundHandlers.push({ category, source: sourceUrl, functionName, handlerNode: funcNode, fullScriptContent: scriptContent, handlerFlags, eventParamName });
+                    } catch (e) {
+                        this._safeLog('[Extractor AST Pattern Scan] swallowed assign error:', e?.message);
                     }
                 },
                 CallExpression: (node) => {
-                    if (node.callee.type === 'MemberExpression' && node.callee.property.name === 'addEventListener' && node.arguments.length >= 2 && node.arguments[0].type === 'Literal' && node.arguments[0].value === 'message') {
-                        const handlerArg = node.arguments[1];
+                    try {
+                        if (!this._is(node, 'CallExpression')) return;
+                        const callee = this._prop(node, 'callee');
+                        if (!this._is(callee, 'MemberExpression')) return;
+                        const prop = this._prop(callee, 'property');
+                        if (prop?.name !== 'addEventListener') return;
+                        const args = Array.isArray(node.arguments) ? node.arguments : [];
+                        const evtArg = args[0];
+                        const evtName = this._resolveStringLiteral(evtArg);
+                        if (evtName !== 'message') return;
+                        const handlerArg = args[1];
                         let funcDef = null; let category = 'ast-event-listener'; let functionName = null;
                         let handlerFlags = {}; let eventParamName = 'event';
 
@@ -357,6 +467,8 @@ class HandlerExtractor {
                         if (funcDef && funcDef.node) {
                             foundHandlers.push({ category, source: sourceUrl, functionName: functionName || funcDef.methodName, handlerNode: funcDef.node, fullScriptContent: scriptContent, handlerFlags, eventParamName });
                         }
+                    } catch (e) {
+                        this._safeLog('[Extractor AST Pattern Scan] swallowed node error:', e?.message);
                     }
                 }
             });
@@ -503,7 +615,11 @@ class HandlerExtractor {
                     boost = 50;
                     reason = "App-like name";
                 } else if (filename.match(/^(npm|vendor|chunk|bundle|poly|webpack)/i) || filename.match(/^\d+\.js$/)) {
-                    boost = -25;
+                    // Penalize only if there are other non-chunk candidates
+                    boost = (handlersInfo.some(h => {
+                        const f = (h.source||'').split('/').pop()||'';
+                        return !/^(npm|vendor|chunk|bundle|poly|webpack)/i.test(f) && !/^\d+\.js$/.test(f);
+                    })) ? -15 : 0;
                     reason = "Lib/Chunk-like name";
                 } else if (filename.length > 20 && filename.endsWith('.js')) { // Boost longer JS names slightly more
                     boost = 15;
@@ -856,7 +972,12 @@ class HandlerExtractor {
                             }
                             return result;
                         }).catch(err => {
-                            if(typeof log !== 'undefined') log.warn(`[Breakpoint Exec] Error setting breakpoint for handler at ${handlerInfo.source}:${location.lineNumber}: ${err.message}`);
+                            // Handle "already exists" errors gracefully 
+                            if (err && (err.code === -32000 || /already exists/i.test(err.message||''))) {
+                                if(typeof log !== 'undefined') log.info(`[Breakpoint Exec] Breakpoint already exists at ${handlerInfo.source}:${location.lineNumber} - continuing.`);
+                            } else {
+                                if(typeof log !== 'undefined') log.warn(`[Breakpoint Exec] Error setting breakpoint for handler at ${handlerInfo.source}:${location.lineNumber}: ${err.message}`);
+                            }
                             return null;
                         });
                         breakpointPromises.push(bpPromise);

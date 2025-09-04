@@ -89,6 +89,27 @@
   </table>
 </section>
 
+<hr>
+
+<section>
+  <h2>LLM Analysis (Optional)</h2>
+  <div class="form-grid">
+    <label for="llmProvider">Provider:</label>
+    <select id="llmProvider">
+      <option value="none">None</option>
+      <option value="openai">OpenAI</option>
+      <option value="anthropic">Anthropic</option>
+      <option value="groq">Groq</option>
+      <option value="mistral">Mistral</option>
+    </select>
+    <label for="llmModel">Model:</label>
+    <select id="llmModel"></select>
+    <label for="llmKey">API Key:</label>
+    <input type="password" id="llmKey" placeholder="sk-..." />
+  </div>
+  <button id="saveLLM">Save LLM Settings</button>
+</section>
+
 <script src="options.js"></script>
 </body>
 </html>

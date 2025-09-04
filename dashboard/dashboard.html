@@ -27,6 +27,7 @@
         <div class="version-info">
             <span>Version: <span id="current-version-display">Loading...</span></span>
             <button id="check-version-button" class="control-button secondary-button" title="Check for updates on GitHub">Check Version</button>
+            <span id="server-status-inline" style="margin-left: 12px; display: inline-flex; align-items: center; gap: 6px; font-size: 12px;"></span>
             <span id="update-status-display" style="margin-left: 10px; font-size: 0.9em;"></span>
         </div>
         <div class="header-controls">
@@ -86,6 +87,27 @@
                 <p style="font-size: 11px; color: var(--text-muted); margin-top: 5px;">
                     Warning: Enabling Debugger Mode attaches to tabs, may impact performance, and trigger browser warnings unless launched with specific flags. Use for research purposes.
                 </p>
+
+                <h3 style="margin-top: 20px;">LLM Settings (Optional)</h3>
+                <div class="sidebar-controls">
+                    <label for="llmProviderSelect" class="sidebar-label">Provider:</label>
+                    <select id="llmProviderSelect" class="control-select">
+                        <option value="none">None</option>
+                        <option value="openai">OpenAI</option>
+                        <option value="anthropic">Anthropic</option>
+                        <option value="groq">Groq</option>
+                        <option value="mistral">Mistral</option>
+                    </select>
+                    <label for="llmModelInput" class="sidebar-label" style="margin-top:8px;">Model:</label>
+                    <input type="text" id="llmModelInput" placeholder="e.g., gpt-4o-mini" />
+                    <label for="llmApiKeyInput" class="sidebar-label" style="margin-top:8px;">API Key:</label>
+                    <input type="password" id="llmApiKeyInput" placeholder="sk-..." />
+                    <button id="saveLlmSettingsBtn" class="control-button primary-button" style="margin-top:8px;">Save LLM Settings</button>
+                    <div id="llmSettingsStatus" class="callback-status"></div>
+                    <p style="font-size: 11px; color: var(--text-muted); margin-top: 5px;">
+                        LLM analysis is performed via the local helper server. Keys are stored locally.
+                    </p>
+                </div>
             </div>
         </div>
     </div>
@@ -96,7 +118,11 @@
         <iframe id="testFrame3"></iframe>
     </div>
 
-    <div id="reportPanelContainer"></div>
+    <div id="reportPanelContainer">
+        <section id="report">
+            <!-- existing report UI -->
+        </section>
+    </div>
     <div id="progressIndicatorContainer"></div>
     <div id="fullPayloadModalContainer"></div>
     <div id="editMessageModalContainer"></div>

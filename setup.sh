@@ -3,6 +3,116 @@
 # Exit on any error
 set -e
 
+# ========== COMMAND LINE ARGUMENT HANDLING ==========
+COMMAND="${1:-install}"
+SERVER_DIR="$HOME/Library/Application Support/NodeServerStarter"
+
+# Server management functions (available after installation)
+check_server_running() {
+    if command -v curl >/dev/null 2>&1; then
+        curl -s "http://127.0.0.1:1337/health" >/dev/null 2>&1
+    elif command -v wget >/dev/null 2>&1; then
+        wget -q --timeout=2 "http://127.0.0.1:1337/health" -O /dev/null >/dev/null 2>&1
+    else
+        return 1
+    fi
+}
+
+start_server() {
+    echo "🚀 Starting FrogPost server..."
+    
+    if [ ! -d "$SERVER_DIR" ]; then
+        echo "❌ FrogPost not installed. Please run: bash setup.sh"
+        exit 1
+    fi
+    
+    if check_server_running; then
+        echo "✅ Server already running on port 1337"
+        return 0
+    fi
+    
+    cd "$SERVER_DIR"
+    nohup node server.js >> frogpost-server.log 2>&1 &
+    SERVER_PID=$!
+    echo $SERVER_PID > .frogpost-server.pid
+    
+    echo "⏳ Waiting for server to start..."
+    for i in {1..10}; do
+        sleep 1
+        if check_server_running; then
+            echo "✅ FrogPost server started successfully (PID: $SERVER_PID)"
+            echo "📊 Server accessible at: http://127.0.0.1:1337"
+            return 0
+        fi
+    done
+    
+    echo "❌ Server failed to start within 10 seconds"
+    return 1
+}
+
+stop_server() {
+    echo "🛑 Stopping FrogPost server..."
+    
+    if [ -f "$SERVER_DIR/.frogpost-server.pid" ]; then
+        PID=$(cat "$SERVER_DIR/.frogpost-server.pid")
+        if ps -p "$PID" >/dev/null 2>&1; then
+            kill "$PID" 2>/dev/null
+            sleep 2
+            if ps -p "$PID" >/dev/null 2>&1; then
+                kill -9 "$PID" 2>/dev/null
+            fi
+        fi
+        rm -f "$SERVER_DIR/.frogpost-server.pid"
+    fi
+    
+    pkill -f "node.*server" 2>/dev/null || true
+    echo "✅ Server stopped"
+}
+
+server_status() {
+    if check_server_running; then
+        echo "Server status: ✅ Running"
+        return 0
+    else
+        echo "Server status: ❌ Stopped"
+        return 1
+    fi
+}
+
+# Handle server management commands
+case "$COMMAND" in
+    start)
+        start_server
+        exit 0
+        ;;
+    stop)
+        stop_server
+        exit 0
+        ;;
+    status)
+        server_status
+        exit $?
+        ;;
+    restart)
+        stop_server
+        sleep 2
+        start_server
+        exit 0
+        ;;
+    install)
+        # Continue with installation below
+        ;;
+    *)
+        echo "Usage: $0 [install|start|stop|status|restart]"
+        echo "  install - Install FrogPost (default)"
+        echo "  start   - Start server in background"
+        echo "  stop    - Stop background server"
+        echo "  status  - Check server status"
+        echo "  restart - Restart server"
+        exit 1
+        ;;
+esac
+
 cat << "EOF"
 ###############################################################################
 #                                                                             #
@@ -41,14 +151,13 @@ while [[ ! $EXTENSION_ID =~ ^[a-z0-9]{32}$ ]]; do
   read -p "Extension ID: " EXTENSION_ID
 done
 
-# Directory paths
-SERVER_DIR="$HOME/Library/Application Support/NodeServerStarter"
+# Directory paths (SERVER_DIR already defined above)
 NATIVE_HOST_DIR="$HOME/Library/Application Support/Google/Chrome/NativeMessagingHosts"
 
-# Source file paths
-SERVER_JS_SRC="$FROGPOST_REPO/server.js"
-START_SH_SRC="$FROGPOST_REPO/start_server.sh"
-MANIFEST_SRC="$FROGPOST_REPO/com.nodeserver.starter.json"
+# Source file paths (updated for new folder structure)
+SERVER_JS_SRC="$FROGPOST_REPO/server/server.js"
+START_SH_SRC="$FROGPOST_REPO/server/start_server.sh"
+MANIFEST_SRC="$FROGPOST_REPO/server/com.nodeserver.starter.json"
 
 # Target destination paths
 SERVER_JS_DST="$SERVER_DIR/server.js"
@@ -104,20 +213,43 @@ echo "✅ Log file ready."
 # ========== STEP 7: Install Node.js dependencies ==========
 echo "📦 Installing Node.js dependencies..."
 cd "$SERVER_DIR"
-npm install express cors body-parser
-echo "✅ Dependencies installed."
+cp "$FROGPOST_REPO/package.json" "$SERVER_DIR/package.json"
+npm i
+echo "✅ All dependencies installed from package.json."
+
+# ========== ASK TO START SERVER ==========
+echo ""
+read -p "🤔 Would you like to start the FrogPost server now? (y/n): " START_NOW
+if [[ $START_NOW =~ ^[Yy]$ ]]; then
+    start_server
+else
+    echo "⏭️ Server not started. You can start it later with:"
+    echo "   bash setup.sh start"
+    echo "   OR directly: cd \"$SERVER_DIR\" && node server.js"
+fi
 
 # ========== COMPLETE ==========
 echo ""
-echo "🎉 All done!"
-echo "👉 Open Chrome and go to chrome://extensions/"
-echo "   - Enable 'Developer Mode'"
-echo "   - Click 'Load unpacked' and select the FrogPost directory"
+echo "🎉 FrogPost installation complete!"
 echo ""
-echo "⚠️ Extension ID: $EXTENSION_ID"
-echo "   (This ID is also saved in extension_id.txt for your reference)"
+echo "📋 What was installed:"
+echo "   ✅ Native messaging host for Chrome extension"
+echo "   ✅ Server with all dependencies"
+echo "   ✅ Server management through setup.sh"
 echo ""
-echo "🚀 To start the local server, run:"
-echo "   bash \"$START_SH_DST\""
+echo "🚀 Server Management Commands:"
+echo "   bash setup.sh start     # Start server in background"
+echo "   bash setup.sh status    # Check server status"
+echo "   bash setup.sh stop      # Stop server"
+echo "   bash setup.sh restart   # Restart server"
 echo ""
+echo "👉 Chrome Extension Setup:"
+echo "   1. Go to chrome://extensions/"
+echo "   2. Enable 'Developer Mode'"
+echo "   3. Click 'Load unpacked' and select: $FROGPOST_REPO"
+echo ""
+echo "⚠️  Extension ID: $EXTENSION_ID"
+echo "    (This ID is configured for native messaging)"
+echo ""
+echo "🎯 Ready to use! Server management is now integrated into setup.sh"
 echo "💡 Happy Hacking with FrogPost 🐸"
