@@ -1,0 +1,25 @@
+{
+  "name": "frogpost",
+  "version": "1.0.0",
+  "description": "FrogPost is a powerful Chrome extension for testing and analyzing the security of `postMessage` communications between iframes. It helps developers and security professionals identify vulnerabilities in message-handling implementations.",
+  "main": "background.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node server.js",
+    "server": "node server.js",
+    "server:bg": "bash setup.sh start",
+    "server:stop": "bash setup.sh stop",
+    "server:restart": "bash setup.sh restart",
+    "server:status": "bash setup.sh status",
+    "dev": "bash setup.sh start && echo '🐸 FrogPost server ready for development!'",
+    "setup": "bash setup.sh"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "body-parser": "^2.2.0",
+    "cors": "^2.8.5",
+    "express": "^5.1.0"
+  }
+}

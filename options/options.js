@@ -1,11 +1,13 @@
 /**
  * FrogPost Extension
- * Originally Created by thisis0xczar/Lidor JFrog AppSec Team
- * Refined on: 2025-05-07
+ * Originally Created by thisis0xczar/Lidor 
+ * Refined on: 2025-09-04
  */
 const STORAGE_KEYS = {
     sinks: 'customSinks',
-    checks: 'customChecks'
+    checks: 'customChecks',
+    llmProvider: 'llm_provider',
+    llmModel: 'llm_model'
 };
 
 const sinkForm = document.getElementById('addSinkForm');
@@ -13,6 +15,16 @@ const checkForm = document.getElementById('addCheckForm');
 const sinksTableBody = document.getElementById('customSinksTableBody');
 const checksTableBody = document.getElementById('customChecksTableBody');
 const statusDiv = document.getElementById('statusMessage');
+const llmProviderSel = document.getElementById('llmProvider');
+const llmModelSel = document.getElementById('llmModel');
+const llmKeyInput = document.getElementById('llmKey');
+const saveLLMBtn = document.getElementById('saveLLM');
+const MODEL_PRESETS = {
+    openai: ['gpt-4o','gpt-4o-mini','gpt-4-turbo','gpt-3.5-turbo'],
+    anthropic: ['claude-3-5-sonnet-20241022','claude-3-5-haiku-20241022','claude-3-haiku-20240307'],
+    groq: ['llama-3.1-70b-versatile','llama-3.1-8b-instant','mixtral-8x7b-32768'],
+    mistral: ['mistral-large-latest','mistral-medium-latest','open-mixtral-8x7b']
+};
 
 function showStatus(message, isError = false) {
     statusDiv.textContent = message;
@@ -152,4 +164,23 @@ sinkForm.addEventListener('submit', (e) => {
 checkForm.addEventListener('submit', (e) => {
     e.preventDefault();
     addDefinition('check');
+});
+
+function populateModels(provider, prefill) {
+    llmModelSel.innerHTML = '';
+    const list = MODEL_PRESETS[provider] || [];
+    if (!list.length) { llmModelSel.innerHTML = '<option value="">Select model</option>'; return; }
+    list.forEach(m => { const o=document.createElement('option'); o.value=m; o.textContent=m; llmModelSel.appendChild(o); });
+    if (prefill && list.includes(prefill)) llmModelSel.value = prefill;
+}
+llmProviderSel?.addEventListener('change', () => populateModels(llmProviderSel.value));
+chrome.storage.sync.get([STORAGE_KEYS.llmProvider, STORAGE_KEYS.llmModel], (s) => {
+    const p = s?.[STORAGE_KEYS.llmProvider] || 'none';
+    llmProviderSel.value = p; populateModels(p, s?.[STORAGE_KEYS.llmModel]);
+});
+chrome.storage.session.get(['llm_api_key'], (sess) => { if (sess?.llm_api_key) llmKeyInput.value = sess.llm_api_key; });
+saveLLMBtn?.addEventListener('click', async () => {
+    await chrome.storage.sync.set({ [STORAGE_KEYS.llmProvider]: llmProviderSel.value, [STORAGE_KEYS.llmModel]: llmModelSel.value });
+    if (llmKeyInput.value) await chrome.storage.session.set({ llm_api_key: llmKeyInput.value });
+    showStatus('LLM settings saved', false);
 });

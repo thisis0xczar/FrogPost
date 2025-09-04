@@ -1,0 +1,119 @@
+# -----------------------------
+# OS junk
+# -----------------------------
+.DS_Store
+.DS_Store?
+Icon?
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# -----------------------------
+# Editors / IDEs
+# -----------------------------
+.vscode/
+.idea/
+*.code-workspace
+*.sublime-*
+.history/
+*.swp
+*.swo
+
+# -----------------------------
+# Node / JS
+# -----------------------------
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+package-lock.json
+.pnpm-debug.log*
+.eslintcache
+.parcel-cache/
+.npm/
+.nyc_output/
+coverage/
+dist/
+build/
+out/
+.tmp/
+temp/
+.cache/
+
+# -----------------------------
+# Archives & binaries
+# -----------------------------
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.7z
+*.gz
+*.bz2
+*.xz
+*.bin
+*.exe
+*.dll
+*.so
+*.dylib
+
+.env
+.env.*
+**/.env
+**/.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+*.gpg
+*.asc
+*.crt
+*.cer
+*.der
+*.kdb
+*.jks
+*.keystore
+*.p7b
+*.p7c
+secrets/
+**/secrets/
+server/*.env
+server/*.secret*
+# tokens / local-only configs
+*.token
+*.private
+*.creds
+*.credentials
+*.auth
+
+# -----------------------------
+# Logs / runtime files
+# -----------------------------
+*.log
+*.log.*
+logs/
+pids/
+*.pid
+*.pid.*
+*.seed
+*.pid.lock
+
+# -----------------------------
+# Test artifacts / fuzzing / profiling
+# -----------------------------
+*.prof
+*.heap
+fuzzer/.fuzz-cache/
+fuzzer/.results/
+fuzzer/results/
+fuzzer/tmp/
+*.har
+
+
+*.crx
+*.nex
+*.pem # (already covered above, kept for clarity)
+extension-dist/
+web-ext-artifacts/
+

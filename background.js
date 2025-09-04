@@ -1,7 +1,7 @@
 /**
  * FrogPost Extension
- * Originally Created by thisis0xczar/Lidor JFrog AppSec Team
- * Refined on: 2025-05-07
+ * Originally Created by thisis0xczar/Lidor 
+ * Refined on: 2025-09-04
  */
 
 try {
@@ -18,6 +18,68 @@ const log = { debug: (...args) => console.debug("BG:", ...args), info: (...args)
 let frameConnections = new Map();
 let messageBuffer;
 const injectedFramesAgents = new Map();
+
+// Server management
+let serverCheckInterval = null;
+const SERVER_PORT = 1337;
+const SERVER_URL = `http://127.0.0.1:${SERVER_PORT}`;
+
+/**
+ * Check if local FrogPost server is running
+ */
+async function isServerRunning() {
+    try {
+        const response = await fetch(`${SERVER_URL}/health`, { 
+            method: 'GET',
+            signal: AbortSignal.timeout(2000)
+        });
+        return response.ok;
+    } catch {
+        return false;
+    }
+}
+
+/**
+ * Attempt to start the local server (requires native messaging or user action)
+ */
+async function ensureServerRunning() {
+    if (await isServerRunning()) {
+        log.debug("Server already running");
+        return true;
+    }
+    
+    log.warn("Server not running. LLM features will be limited.");
+    
+    // Show notification to user about starting server
+    try {
+        await chrome.notifications.create('frogpost-server-needed', {
+            type: 'basic',
+            iconUrl: 'icons/frog-logo48.png',
+            title: 'FrogPost Server Needed',
+            message: 'Start the server with "node server.js" for AI analysis features.'
+        });
+    } catch (e) {
+        log.debug("Could not show notification:", e);
+    }
+    
+    return false;
+}
+
+/**
+ * Auto-check server status periodically when extension is active
+ */
+function startServerMonitoring() {
+    if (serverCheckInterval) return;
+    
+    serverCheckInterval = setInterval(async () => {
+        const running = await isServerRunning();
+        chrome.storage.session.set({ 'server-running': running });
+        
+        if (!running) {
+            log.debug("Server stopped - LLM features disabled");
+        }
+    }, 30000); // Check every 30 seconds
+}
 const HANDLER_ENDPOINT_KEYS_STORAGE_KEY = 'handler_endpoint_keys';
 let endpointsWithDetectedHandlers = new Set();
 let nativePort = null;
@@ -53,7 +115,8 @@ function normalizeEndpointUrl(url) { try { if (!url || typeof url !== 'string' |
 function addFrameConnection(origin, destinationUrl) { let addedNew = false; try { const normalizedOrigin = normalizeEndpointUrl(origin)?.normalized; const normalizedDestination = normalizeEndpointUrl(destinationUrl)?.normalized; if (!normalizedOrigin || !normalizedDestination || normalizedOrigin === 'null' || normalizedDestination === 'null' || normalizedOrigin === 'access-denied-or-invalid' || normalizedDestination === 'access-denied-or-invalid' || normalizedOrigin === normalizedDestination ) { return false; } if (!frameConnections.has(normalizedOrigin)) { frameConnections.set(normalizedOrigin, new Set()); addedNew = true; } const destSet = frameConnections.get(normalizedOrigin); if (!destSet.has(normalizedDestination)) { destSet.add(normalizedDestination); addedNew = true; } } catch (e) {} return addedNew; }
 async function isDashboardOpen() { try { const dashboardUrl = chrome.runtime.getURL("dashboard/dashboard.html"); const tabs = await chrome.tabs.query({ url: dashboardUrl }); return tabs.length > 0; } catch (e) { return false; } }
 async function notifyDashboard(type, payload) { if (!(await isDashboardOpen())) return; try { let serializablePayload; try { JSON.stringify(payload); serializablePayload = payload; } catch (e) { if (payload instanceof Map) serializablePayload = Object.fromEntries(payload); else if (payload instanceof Set) serializablePayload = Array.from(payload); else serializablePayload = { error: "Payload not serializable", type: payload?.constructor?.name }; } if (chrome?.runtime?.id) { await chrome.runtime.sendMessage({ type: type, payload: serializablePayload }); } } catch (error) { if (!error.message?.includes("Receiving end does not exist") && !error.message?.includes("Could not establish connection")) {} } }
-function agentFunctionToInject() { const AGENT_VERSION = 'v10_postMsg_inline'; const agentFlag = `__frogPostAgentInjected_${AGENT_VERSION}`; if (window[agentFlag]) return { success: true, alreadyInjected: true, message: `Agent ${AGENT_VERSION} already present.` }; window[agentFlag] = true; let errors = []; const MAX_LISTENER_CODE_LENGTH = 15000; const originalWindowAddEventListener = window.addEventListener; const capturedListenerSources = new Set(); const safeToString = (func) => { try { return func.toString(); } catch (e) { return `[Error converting function: ${e?.message}]`; } }; const sendListenerToForwarder = (listenerCode, contextInfo, destinationUrl) => { try { const codeStr = typeof listenerCode === 'string' ? listenerCode : safeToString(listenerCode); if (!codeStr || codeStr.includes('[native code]') || codeStr.length < 25) { return; } const fingerprint = codeStr.replace(/\s+/g, '').substring(0, 250); if (capturedListenerSources.has(fingerprint)) { return; } capturedListenerSources.add(fingerprint); let stack = ''; try { throw new Error('CaptureStack'); } catch (e) { stack = e.stack || ''; } const payload = { listenerCode: codeStr.substring(0, MAX_LISTENER_CODE_LENGTH), stackTrace: stack, destinationUrl: destinationUrl || window.location.href, context: contextInfo }; window.postMessage({ type: 'frogPostAgent->ForwardToBackground', payload: payload }, window.location.origin || '*'); } catch (e) { errors.push(`sendListener Error (${contextInfo}): ${e.message}`); } }; try { window.addEventListener = function (type, listener, options) { if (type === 'message' && typeof listener === 'function') { sendListenerToForwarder(listener, 'window.addEventListener', window.location.href); } return originalWindowAddEventListener.apply(this, arguments); }; } catch (e) { errors.push(`addEventListener hook failed: ${e.message}`); window.addEventListener = originalWindowAddEventListener; } let _currentWindowOnmessage = window.onmessage; try { Object.defineProperty(window, 'onmessage', { set: function (listener) { _currentWindowOnmessage = listener; if (typeof listener === 'function') { sendListenerToForwarder(listener, 'window.onmessage_set', window.location.href); } }, get: function () { return _currentWindowOnmessage; }, configurable: true, enumerable: true }); if (typeof _currentWindowOnmessage === 'function') { sendListenerToForwarder(_currentWindowOnmessage, 'window.onmessage_initial', window.location.href); } } catch (e) { errors.push(`onmessage hook failed: ${e.message}`); } try { const originalPortAddEventListener = MessagePort.prototype.addEventListener; MessagePort.prototype.addEventListener = function (type, listener, options) { try { if (type === 'message' && typeof listener === 'function') { sendListenerToForwarder(listener, 'port.addEventListener', window.location.href); } } catch(e) { errors.push(`port.addEventListener inner: ${e.message}`); } return originalPortAddEventListener.apply(this, arguments); }; const portOnMessageDescriptor = Object.getOwnPropertyDescriptor(MessagePort.prototype, 'onmessage'); const originalPortSetter = portOnMessageDescriptor?.set; const originalPortGetter = portOnMessageDescriptor?.get; const portOnmessageTracker = new WeakMap(); Object.defineProperty(MessagePort.prototype, 'onmessage', { set: function(listener) { try { portOnmessageTracker.set(this, listener); if (typeof listener === 'function') { sendListenerToForwarder(listener, 'port.onmessage_set', window.location.href); } if (originalPortSetter) originalPortSetter.call(this, listener); } catch(e) { errors.push(`port.onmessage set inner: ${e.message}`); } }, get: function() { try { let value = portOnmessageTracker.get(this); if (value === undefined && originalPortGetter) value = originalPortGetter.call(this); return value; } catch(e) { errors.push(`port.onmessage get inner: ${e.message}`); return undefined; } }, configurable: true, enumerable: true }); } catch (e) { errors.push(`MessagePort hook failed: ${e.message}`); } return { success: errors.length === 0, alreadyInjected: false, errors: errors, logsAdded: true }; }
+function agentFunctionToInject() { const AGENT_VERSION = 'v11_postMsg_inline'; const agentFlag = `__frogPostAgentInjected_${AGENT_VERSION}`; if (window[agentFlag]) return { success: true, alreadyInjected: true, message: `Agent ${AGENT_VERSION} already present.` }; window[agentFlag] = true; let errors = []; const MAX_LISTENER_CODE_LENGTH = 15000; const originalWindowAddEventListener = window.addEventListener; const capturedListenerSources = new Set(); const safeToString = (func) => { try { return func.toString(); } catch (e) { return `[Error converting function: ${e?.message}]`; } }; const sendListenerToForwarder = (listenerCode, contextInfo, destinationUrl) => { try { const codeStr = typeof listenerCode === 'string' ? listenerCode : safeToString(listenerCode); if (!codeStr || codeStr.includes('[native code]') || codeStr.length < 25) { return; } const fingerprint = codeStr.replace(/\s+/g, '').substring(0, 250); if (capturedListenerSources.has(fingerprint)) { return; } capturedListenerSources.add(fingerprint); let stack = ''; try { throw new Error('CaptureStack'); } catch (e) { stack = e.stack || ''; } const payload = { listenerCode: codeStr.substring(0, MAX_LISTENER_CODE_LENGTH), stackTrace: stack, destinationUrl: destinationUrl || window.location.href, context: contextInfo }; window.postMessage({ type: 'frogPostAgent->ForwardToBackground', payload: payload }, window.location.origin || '*'); } catch (e) { errors.push(`sendListener Error (${contextInfo}): ${e.message}`); } }; try { window.addEventListener = function (type, listener, options) { if (type === 'message' && typeof listener === 'function') { sendListenerToForwarder(listener, 'window.addEventListener', window.location.href); } return originalWindowAddEventListener.apply(this, arguments); }; } catch (e) { errors.push(`addEventListener hook failed: ${e.message}`); window.addEventListener = originalWindowAddEventListener; } try { if (window.EventTarget && window.EventTarget.prototype) { const originalProtoAddEventListener = window.EventTarget.prototype.addEventListener; window.EventTarget.prototype.addEventListener = function(type, listener, options) { try { const isWindowLike = this === window || this === self || (typeof Window !== 'undefined' && this instanceof Window); const isMessagePort = typeof MessagePort !== 'undefined' && this instanceof MessagePort; if ((isWindowLike || isMessagePort) && type === 'message' && typeof listener === 'function') { sendListenerToForwarder(listener, isMessagePort ? 'EventTarget(MessagePort).addEventListener' : 'EventTarget(Window).addEventListener', window.location.href); } } catch(e) { errors.push(`EventTarget.prototype.addEventListener hook inner failed: ${e.message}`); } return originalProtoAddEventListener.apply(this, arguments); }; } } catch(e) { errors.push(`EventTarget.prototype.addEventListener hook failed: ${e.message}`); }
+ let _currentWindowOnmessage = window.onmessage; try { Object.defineProperty(window, 'onmessage', { set: function (listener) { _currentWindowOnmessage = listener; if (typeof listener === 'function') { sendListenerToForwarder(listener, 'window.onmessage_set', window.location.href); } }, get: function () { return _currentWindowOnmessage; }, configurable: true, enumerable: true }); if (typeof _currentWindowOnmessage === 'function') { sendListenerToForwarder(_currentWindowOnmessage, 'window.onmessage_initial', window.location.href); } } catch (e) { errors.push(`onmessage hook failed: ${e.message}`); } try { const originalPortAddEventListener = MessagePort.prototype.addEventListener; MessagePort.prototype.addEventListener = function (type, listener, options) { try { if (type === 'message' && typeof listener === 'function') { sendListenerToForwarder(listener, 'port.addEventListener', window.location.href); } } catch(e) { errors.push(`port.addEventListener inner: ${e.message}`); } return originalPortAddEventListener.apply(this, arguments); }; const portOnMessageDescriptor = Object.getOwnPropertyDescriptor(MessagePort.prototype, 'onmessage'); const originalPortSetter = portOnMessageDescriptor?.set; const originalPortGetter = portOnMessageDescriptor?.get; const portOnmessageTracker = new WeakMap(); Object.defineProperty(MessagePort.prototype, 'onmessage', { set: function(listener) { try { portOnmessageTracker.set(this, listener); if (typeof listener === 'function') { sendListenerToForwarder(listener, 'port.onmessage_set', window.location.href); } if (originalPortSetter) originalPortSetter.call(this, listener); } catch(e) { errors.push(`port.onmessage set inner: ${e.message}`); } }, get: function() { try { let value = portOnmessageTracker.get(this); if (value === undefined && originalPortGetter) value = originalPortGetter.call(this); return value; } catch(e) { errors.push(`port.onmessage get inner: ${e.message}`); return undefined; } }, configurable: true, enumerable: true }); } catch (e) { errors.push(`MessagePort hook failed: ${e.message}`); } return { success: errors.length === 0, alreadyInjected: false, errors: errors, logsAdded: true }; }
 async function loadHandlerEndpoints() { try { const result = await chrome.storage.session.get([HANDLER_ENDPOINT_KEYS_STORAGE_KEY]); if (result[HANDLER_ENDPOINT_KEYS_STORAGE_KEY]) { endpointsWithDetectedHandlers = new Set(result[HANDLER_ENDPOINT_KEYS_STORAGE_KEY]); } else { endpointsWithDetectedHandlers = new Set(); } } catch (e) { endpointsWithDetectedHandlers = new Set(); } }
 async function saveHandlerEndpoints() { try { await chrome.storage.session.set({ [HANDLER_ENDPOINT_KEYS_STORAGE_KEY]: Array.from(endpointsWithDetectedHandlers) }); } catch (e) {} }
 function disconnectNativeHost() { if (nativePort) { nativePort.disconnect(); nativePort = null; } }
@@ -118,11 +181,59 @@ async function handleWebPageLoadForDebug(tabId, targetUrl) {
         if (typeof HandlerExtractor === 'undefined') { log.warn("[Debug Mode] HandlerExtractor class not available. Cannot analyze scripts."); await chrome.debugger.detach({ tabId: tabId }); attached = false; return; }
         extractor = new HandlerExtractor(); extractor.initialize(targetUrl, []);
         let analysisCompleteResolve; const analysisCompletionPromise = new Promise(resolve => { analysisCompleteResolve = resolve; }); analysisTimeout = setTimeout(() => { log.warn(`[Debug Mode] Analysis timeout for ${targetUrl}. Detaching.`); analysisCompleteResolve(); }, 10000);
+        
+        let lastScriptParsedAt = Date.now();
+        let idleTimer = null;
+        const refreshIdleTimer = () => {
+            lastScriptParsedAt = Date.now();
+            if (idleTimer) clearTimeout(idleTimer);
+            // Detach if idle for 5s with no new scripts
+            idleTimer = setTimeout(() => { 
+                if (analysisCompleteResolve) analysisCompleteResolve(); 
+            }, 5000);
+        };
+        
+        const tryDetach = async (tabId) => {
+            try {
+                if (attached) {
+                    await chrome.debugger.detach({ tabId });
+                    attached = false;
+                    log.debug(`[Debug Mode] Auto-detached from tab ${tabId} due to idle timeout.`);
+                }
+            } catch (e) {
+                log.warn(`[Debug Mode] Error during auto-detach from tab ${tabId}:`, e.message);
+            }
+        };
+        
         const onEvent = async (source, method, params) => {
             if (source.tabId !== tabId) return;
+            if (method === "Debugger.scriptParsed") refreshIdleTimer();
+            if (method === "Debugger.paused" && params?.reason === "EventListener") {
+                try {
+                    const frame = params.callFrames?.[0];
+                    const scriptId = frame?.location?.scriptId;
+                    if (scriptId) {
+                        const { scriptSource } = await chrome.debugger.sendCommand({ tabId }, "Debugger.getScriptSource", { scriptId });
+                        const found = extractor.analyzeScriptContent(scriptSource, `paused_${scriptId}`);
+                        if (found?.length) {
+                            const best = extractor.getBestHandler(found);
+                            if (best?.handler) {
+                                const endpointKey = normalizeEndpointUrl(targetUrl)?.normalized || targetUrl;
+                                await chrome.storage.local.set({ [`best-handler-${endpointKey}`]: best });
+                                notifyDashboard("handlerCaptured", { endpoint: targetUrl, bestHandler: { fn: best.functionName, score: best.score } });
+                            }
+                        }
+                    }
+                } catch (e) { log.warn("[Debug Mode] paused handler capture error:", e?.message); }
+                try { await chrome.debugger.sendCommand({ tabId }, "Debugger.resume"); } catch {}
+                return;
+            }
             if (method === 'Debugger.scriptParsed') {
                 const { scriptId, url } = params; const sourceUrl = url || `tab_${tabId}_script_${scriptId}`;
-                if (url && !url.startsWith('data:') && !url.startsWith('blob:') && url.endsWith('.js') && url.length < 1500000) {
+                const urlStr = url || '';
+                const baseUrl = urlStr.split(/[?#]/)[0];
+                const isLikelyJs = urlStr.startsWith('blob:') || urlStr.startsWith('data:') || urlStr.startsWith('webpack-internal:') || baseUrl.endsWith('.js') || baseUrl.endsWith('.mjs') || baseUrl.endsWith('.cjs');
+                if (urlStr && !urlStr.startsWith('chrome-extension://') && isLikelyJs && urlStr.length < 1500000) {
                     log.debug(`[Debug Mode] Relevant script parsed: ${url}`);
                     try {
                         const { scriptSource } = await chrome.debugger.sendCommand({ tabId: tabId }, "Debugger.getScriptSource", { scriptId: scriptId });
@@ -145,6 +256,21 @@ async function handleWebPageLoadForDebug(tabId, targetUrl) {
         const onDetach = (source, reason) => { if (source.tabId === tabId) { log.warn(`[Debug Mode] Detached from tab ${tabId}. Reason: ${reason}`); attached = false; try{chrome.debugger.onEvent.removeListener(onEvent);}catch(e){} try{chrome.debugger.onDetach.removeListener(onDetach);}catch(e){} clearTimeout(analysisTimeout); analysisCompleteResolve(); } };
         chrome.debugger.onEvent.addListener(onEvent); chrome.debugger.onDetach.addListener(onDetach);
         await Promise.all([ chrome.debugger.sendCommand({ tabId: tabId }, "Page.enable"), chrome.debugger.sendCommand({ tabId: tabId }, "Runtime.enable"), chrome.debugger.sendCommand({ tabId: tabId }, "Debugger.enable") ]); log.debug(`[Debug Mode] Domains enabled.`);
+        // Workers discovery & auto-attach
+        await chrome.debugger.sendCommand({ tabId }, "Target.setDiscoverTargets", { discover: true });
+        await chrome.debugger.sendCommand({ tabId }, "Target.setAutoAttach", {
+            autoAttach: true, waitForDebuggerOnStart: false, flatten: true
+        });
+        // Break on message listener registration (ignore duplicate)
+        try {
+            await chrome.debugger.sendCommand({ tabId }, "DOMDebugger.setEventListenerBreakpoint", { eventName: "message" });
+        } catch (e) {
+            if (e && (e.code === -32000 || /already exists/i.test(e.message||''))) {
+                log.info("[Debug Mode] EventListenerBreakpoint('message') already set; continuing.");
+            } else {
+                log.warn("[Debug Mode] DOMDebugger.setEventListenerBreakpoint failed:", e?.message);
+            }
+        }
         log.debug("[Debug Mode] Waiting for analysis timeout or detach..."); await analysisCompletionPromise;
     } catch (err) { log.error(`[Debug Mode] Error processing web page tab ${tabId}:`, err.message);
     } finally { clearTimeout(analysisTimeout); try { chrome.debugger.onEvent.removeListener(onEvent); } catch(e) {} try { chrome.debugger.onDetach.removeListener(onDetach); } catch(e) {} if (attached) { try { await chrome.debugger.detach({ tabId: tabId }); log.debug(`[Debug Mode] Detached in finally block for tab ${tabId}`); } catch (e) { log.warn(`[Debug Mode] Error detaching in finally for tab ${tabId}: ${e.message}`) } } autoAttachInProgress.delete(tabId); }
@@ -235,7 +361,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
 });
 
 chrome.tabs.onRemoved.addListener(tabId => { injectedFramesAgents.delete(tabId); detachDebugger({ tabId: tabId }).catch(()=>{}); });
-chrome.webNavigation.onCommitted.addListener(async (details) => { if (!details.url || (!details.url.startsWith('http:') && !details.url.startsWith('https://')) || details.transitionType === 'server_redirect') { return; } const tabFrames = injectedFramesAgents.get(details.tabId); if (tabFrames?.has(details.frameId)) { return; } try { const results = await chrome.scripting.executeScript({ target: { tabId: details.tabId, frameIds: [details.frameId] }, func: agentFunctionToInject, injectImmediately: true, world: 'MAIN' }); let injectionStatus = { success: false, alreadyInjected: false, errors: ["No result from executeScript"] }; if (results?.[0]?.result) { injectionStatus = results[0].result; } else if (results?.[0]?.error) { injectionStatus.errors = [`executeScript framework error: ${results[0].error.message || results[0].error}`]; } if (injectionStatus.success || injectionStatus.alreadyInjected) { if (!injectedFramesAgents.has(details.tabId)) { injectedFramesAgents.set(details.tabId, new Set()); } injectedFramesAgents.get(details.tabId).add(details.frameId); } } catch (error) { if (!error.message?.includes("Cannot access") && !error.message?.includes("No frame with id") && !error.message?.includes("target frame detached") && !error.message?.includes("The frame was removed") && !error.message?.includes("Could not establish connection") && !error.message?.includes("No tab with id")) {} const tf = injectedFramesAgents.get(details.tabId); if (tf) { tf.delete(details.frameId); } } }, { url: [{ schemes: ["http", "https"] }] });
+chrome.webNavigation.onCommitted.addListener(async (details) => { if (!details.url || details.transitionType === 'server_redirect') { return; } const tabFrames = injectedFramesAgents.get(details.tabId); if (tabFrames?.has(details.frameId)) { return; } try { const results = await chrome.scripting.executeScript({ target: { tabId: details.tabId, frameIds: [details.frameId] }, func: agentFunctionToInject, injectImmediately: true, world: 'MAIN' }); let injectionStatus = { success: false, alreadyInjected: false, errors: ["No result from executeScript"] }; if (results?.[0]?.result) { injectionStatus = results[0].result; } else if (results?.[0]?.error) { injectionStatus.errors = [`executeScript framework error: ${results[0].error.message || results[0].error}`]; } if (injectionStatus.success || injectionStatus.alreadyInjected) { if (!injectedFramesAgents.has(details.tabId)) { injectedFramesAgents.set(details.tabId, new Set()); } injectedFramesAgents.get(details.tabId).add(details.frameId); } } catch (error) { if (!error.message?.includes("Cannot access") && !error.message?.includes("No frame with id") && !error.message?.includes("target frame detached") && !error.message?.includes("The frame was removed") && !error.message?.includes("Could not establish connection") && !error.message?.includes("No tab with id")) {} const tf = injectedFramesAgents.get(details.tabId); if (tf) { tf.delete(details.frameId); } } });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     let isAsync = false; let responseFunction = sendResponse;
@@ -323,14 +449,43 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             case 'stopServer': isAsync = true; chrome.runtime.sendNativeMessage(NATIVE_HOST_NAME, { action: 'stopServer' }, (response) => { if (responseFunction) { try { responseFunction({ success: !chrome.runtime.lastError && response?.success, error: chrome.runtime.lastError?.message || response?.error }); } catch(e){} } }); disconnectNativeHost(); return true;
             case 'analyzeHandlerDynamically': isAsync = true; analyzeHandlerDynamically(payload, responseFunction); return true;
             case "setDebuggerMode": if (typeof payload?.enabled === 'boolean') { isDebuggerApiModeGloballyEnabled = payload.enabled; log.info(`Background Debugger API Mode set to: ${isDebuggerApiModeGloballyEnabled}`); if (responseFunction) responseFunction({ success: true }); } else { if (responseFunction) responseFunction({ success: false, error: "Invalid payload for setDebuggerMode" }); } return false;
-            case "contentScriptReady": break; default: break;
+            case "contentScriptReady":
+                try {
+                    const tabId = sender?.tab?.id;
+                    const frameId = sender?.frameId ?? 0;
+                    if (tabId != null) {
+                        const already = injectedFramesAgents.get(tabId)?.has(frameId);
+                        if (!already) {
+                            chrome.scripting.executeScript({ target: { tabId, frameIds: [frameId] }, func: agentFunctionToInject, injectImmediately: true, world: 'MAIN' })
+                                .then(results => {
+                                    const ok = results?.[0]?.result?.success || results?.[0]?.result?.alreadyInjected;
+                                    if (ok) {
+                                        if (!injectedFramesAgents.has(tabId)) injectedFramesAgents.set(tabId, new Set());
+                                        injectedFramesAgents.get(tabId).add(frameId);
+                                    }
+                                }).catch(()=>{});
+                        }
+                    }
+                } catch(e) {}
+                break; default: break;
         }
     } catch (error) { log.error("Top-level error processing message:", error, message); if (responseFunction) try { responseFunction({ success: false, error: "Handler error" }); } catch (e) {} }
     return isAsync;
 });
 
 chrome.action.onClicked.addListener((tab) => { chrome.tabs.create({ url: chrome.runtime.getURL("dashboard/dashboard.html") }); });
-chrome.runtime.onInstalled.addListener(details => { if (details.reason === 'install' || details.reason === 'update') { chrome.storage.session.remove(HANDLER_ENDPOINT_KEYS_STORAGE_KEY); chrome.storage.local.remove('debuggerApiModeEnabled'); } messageBuffer = new CircularMessageBuffer(1000); loadHandlerEndpoints(); });
+chrome.runtime.onInstalled.addListener(details => { 
+    if (details.reason === 'install' || details.reason === 'update') { 
+        chrome.storage.session.remove(HANDLER_ENDPOINT_KEYS_STORAGE_KEY); 
+        chrome.storage.local.remove('debuggerApiModeEnabled'); 
+    } 
+    messageBuffer = new CircularMessageBuffer(1000); 
+    loadHandlerEndpoints(); 
+    
+    // Start server monitoring for LLM features
+    startServerMonitoring();
+    log.info("Extension initialized - server monitoring started");
+});
 loadHandlerEndpoints();
 if (!messageBuffer) { messageBuffer = new CircularMessageBuffer(1000); }
 setInterval(() => { chrome.runtime.getPlatformInfo().then(info => {}); }, 25000);
