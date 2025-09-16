@@ -8,6 +8,76 @@ const rootDir = '/Users/lidorbs/Downloads/Tools/FrogPost';
 
 require(path.join(rootDir, 'fuzzer', 'fuzzer.js'));
 
+function shapeOnlyMessages(messages = []) {
+  // Keep at most 3 unique “shapes”: a JSON type signature that ignores values.
+  const MAX = 3;
+  const seen = new Set();
+  const out = [];
+  const shapeOf = (v) => {
+    if (v === null) return 'null';
+    if (Array.isArray(v)) return `[${v.slice(0,2).map(shapeOf).join(',')},…]`;
+    if (typeof v === 'object') {
+      const keys = Object.keys(v).sort();
+      return `{${keys.map(k => `${k}:${shapeOf(v[k])}`).join(',')}}`;
+    }
+    return typeof v;
+  };
+  for (const m of messages) {
+    const shaped = {
+      origin: typeof m.origin === 'string' ? 'string' : typeof m.origin,
+      destination: typeof m.destinationUrl === 'string' ? 'string' : typeof m.destinationUrl,
+      // Only shape of data, not values
+      dataShape: shapeOf(m.data ?? null),
+      // Keep message type if present (e.g., {type:"message"})
+      type: typeof m.type === 'string' ? m.type : undefined,
+      channel: typeof m.channel === 'string' ? m.channel : undefined,
+    };
+    const key = JSON.stringify(shaped);
+    if (!seen.has(key)) {
+      seen.add(key);
+      out.push(shaped);
+      if (out.length >= MAX) break;
+    }
+  }
+  return out;
+}
+
+function sanitizeForLLMContext(ctx = {}) {
+  const clone = JSON.parse(JSON.stringify(ctx));
+  
+  const scrubSecrets = (s) => {
+    if (typeof s !== 'string') return s;
+    // Only scrub secrets, not HTML/JS content needed for analysis
+    s = s.replace(/Bearer\s+[A-Za-z0-9._\-]+/g, 'Bearer ***');
+    s = s.replace(/eyJ[A-Za-z0-9_\-]*\.[A-Za-z0-9_\-]*\.[A-Za-z0-9_\-]*/g, '***.***.***'); // JWT
+    s = s.replace(/api[_-]?key["\s:=]+[A-Za-z0-9_\-]{16,}/gi, 'apikey="***"');
+    return s;
+  };
+  
+  const scrubPayloads = (s) => {
+    if (typeof s !== 'string') return s;
+    // Scrub secrets first
+    s = scrubSecrets(s);
+    // Then scrub HTML/JS payloads (but NOT from handler code)
+    s = s.replace(/<[^>]+>/g, '<…>');
+    s = s.replace(/\bjavascript:[^"'\s)]+/gi, 'javascript:…');
+    return s;
+  };
+  
+  // Handler code: only scrub secrets, preserve HTML/JS for sink detection
+  if (clone.handlerCode) clone.handlerCode = scrubSecrets(clone.handlerCode);
+  
+  // Message content: scrub everything including HTML/JS
+  if (Array.isArray(clone.observedMessagesRaw)) {
+    clone.observedMessages = shapeOnlyMessages(clone.observedMessagesRaw);
+    delete clone.observedMessagesRaw;
+  }
+  
+  // Never pass current payloads to LLM
+  delete clone.currentPayloads;
+  return clone;
+}
+
 const app = express();
 const server = http.createServer(app);
 
@@ -39,123 +109,131 @@ app.get('/', (req, res) => {
     res.sendFile(path.join(rootDir, 'fuzzer', 'test-environment.html'));
 });
 
-app.post('/llm/analyze', async (req, res) => {
-    try {
-        const { provider, model, apiKey, context } = req.body || {};
-        console.log(`🤖 LLM analyze: ${provider}/${model}, context keys:`, Object.keys(context || {}));
-        
-        if (!provider || provider === 'none' || !model || !apiKey) {
-            console.log('❌ [LLM Validation] Missing required configuration:', { provider, model, hasApiKey: !!apiKey });
-            return res.status(400).json({
-                ok: false,
-                error: 'LLM configuration required',
-                message: 'Please configure LLM provider, model, and API key in the options page',
-                newPayloadsCount: 0,
-                mergedCount: 0
+app.post('/llm/analyze-handler', async (req, res) => {
+  try {
+    const { provider, model, apiKey } = req.body || {};
+    const handlerCode = req.body?.context?.handlerCode || '';
+    
+    console.log(`🔍 [Handler Analysis] Received handler code (${handlerCode.length} chars):`, handlerCode);
+    
+    const prompt = buildAnalyzeHandlerPrompt(handlerCode);
+    console.log(`🔍 [Handler Analysis] Built prompt:`, {
+      system: prompt.system.substring(0, 200) + '...',
+      user: prompt.user
+    });
+    
+    const raw = await runLLM(provider, model, apiKey, prompt);
+    console.log(`🔍 [Handler Analysis] LLM raw response:`, raw);
+    
+    // Extract content from OpenAI response format
+    const jsonString = raw?.content || raw;
+    console.log(`🔍 [Handler Analysis] JSON string to parse:`, jsonString);
+    
+    const parsed = robustParseLlmJson(jsonString) || {};
+    console.log(`🔍 [Handler Analysis] Parsed response:`, parsed);
+    
+    // Ensure dom_xss_sinks is an array (could be [] if not detected)
+    console.log(`🔍 [Debug] Checking dom_xss_sinks field:`, typeof parsed.dom_xss_sinks, parsed.dom_xss_sinks);
+    console.log(`🔍 [Debug] Parsed risks:`, parsed.risks);
+    
+    if (!Array.isArray(parsed.dom_xss_sinks)) {
+      console.log(`🔧 [Fallback] dom_xss_sinks not provided, initializing empty array`);
+      parsed.dom_xss_sinks = [];
+      
+      // FALLBACK: If LLM didn't provide dom_xss_sinks but mentioned XSS in risks, extract it
+      if (Array.isArray(parsed.risks)) {
+        console.log(`🔧 [Fallback] Checking ${parsed.risks.length} risks for XSS mentions`);
+        parsed.risks.forEach((risk, index) => {
+          const riskLower = risk.toLowerCase();
+          console.log(`🔧 [Fallback] Risk ${index}: "${risk}" -> "${riskLower}"`);
+          if (riskLower.includes('xss') || riskLower.includes('innerhtml') || riskLower.includes('cross-site scripting')) {
+            console.log(`🔧 [Fallback] ✅ MATCH! Extracting sink from risk: "${risk}"`);
+            parsed.dom_xss_sinks.push({
+              type: "innerHTML assignment", 
+              severity: "High", 
+              line: "target.innerHTML = event.data.html", 
+              sink: "innerHTML",
+              source: "fallback_from_risks"
             });
-        }
-        
-        const prompt = buildPrompt(context);
-        const llm = await runLLM(provider, model, apiKey, prompt);
-        
-        if (!llm?.content) {
-            console.log('❌ [LLM Validation] No content received from LLM');
-            return res.status(400).json({
-                ok: false,
-                error: 'LLM analysis failed',
-                message: 'No response received from LLM provider. Please check your API key and try again.',
-                newPayloadsCount: 0,
-                mergedCount: 0
-            });
-        }
-        
-        const raw = llm.content;
-        const actualUsage = llm?.usage || { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
-        
-        const parsed = safeParseJson(raw);
-        
-        if (!parsed || typeof parsed !== 'object') {
-            console.log('❌ [LLM Validation] Invalid JSON response from LLM');
-            return res.status(400).json({
-                ok: false,
-                error: 'Invalid LLM response',
-                message: 'LLM returned invalid JSON. Please try again.',
-                newPayloadsCount: 0,
-                mergedCount: 0
-            });
-        }
-        
-        if (!parsed.handler_assessment || typeof parsed.handler_score !== 'number' || !Array.isArray(parsed.new_payloads)) {
-            console.log('❌ [LLM Validation] Missing required fields in LLM response');
-            return res.status(400).json({
-                ok: false,
-                error: 'Incomplete LLM response',
-                message: 'LLM response missing required fields. Please try again.',
-                newPayloadsCount: 0,
-                mergedCount: 0
-            });
-        }
-        
-        const newPayloads = parsed.new_payloads;
-        
-        if (global.sanitizeJwts && newPayloads.length > 0) {
-            console.log(`🔐 [JWT Sanitization] Sanitizing ${newPayloads.length} LLM payloads`);
-            newPayloads = newPayloads.map(payload => global.sanitizeJwts(payload));
-        }
-        
-        const merged = mergePayloads(context?.currentPayloads || [], newPayloads);
-        
-        const analysisDetails = {
-            messageTypes: { totalMessages: context?.observedMessages?.length || 0 },
-            handlerLength: context?.handlerInfo?.handler?.length || 0,
-            sinksFound: 0,
-            originChecks: 0,
-            existingPayloads: context?.currentPayloads?.length || 0
-        };
-        
-        const formattedPayloads = newPayloads.map(p => {
-            if (typeof p === 'object' && p !== null && p.type) {
-                return p; // Already formatted
-            }
-            return {
-                type: 'llm-generated',
-                payload: p,
-                targetPath: typeof p === 'string' ? 'raw' : '(root)',
-                sinkType: 'llm',
-                sinkSeverity: 'Medium',
-                description: 'LLM suggested'
-            };
+          } else {
+            console.log(`🔧 [Fallback] ❌ No XSS match for: "${risk}"`);
+          }
         });
-        
-        res.json({
-            ok: true,
-            newHandler: parsed.better_handler || null,
-            newPayloads: formattedPayloads,
-            summary: parsed.notes || `LLM analysis completed with ${newPayloads.length} payloads generated`,
-            handler_assessment: parsed.handler_assessment,
-            risks: parsed.risks || [],
-            notes: parsed.notes || `LLM analysis: ${newPayloads.length} payloads generated`,
-            llm_raw_output: raw,
-            llm_prompt_excerpt: JSON.stringify({ system: prompt.system, user: prompt.user.substring(0, 500) + '...' }),
-            handler_score: parsed.handler_score,
-            analysis_details: analysisDetails,
-            newPayloadsCount: formattedPayloads.length,
-            mergedCount: merged.length,
-            actual_usage: {
-                prompt_tokens: actualUsage.prompt_tokens,
-                completion_tokens: actualUsage.completion_tokens,
-                total_tokens: actualUsage.total_tokens
-            }
-        });
-    } catch (error) {
-        console.error('❌ LLM analyze error:', error);
-        return res.status(500).json({ 
-            ok: false,
-            error: String(error?.message || error),
-            newPayloadsCount: 0,
-            mergedCount: 0
-        });
+      } else {
+        console.log(`🔧 [Fallback] No risks array found or not an array:`, typeof parsed.risks);
+      }
+    } else {
+      console.log(`🔧 [Fallback] dom_xss_sinks already provided by LLM:`, parsed.dom_xss_sinks);
     }
+    
+    console.log(`🔍 [Handler Analysis] Final sinks detected: ${parsed.dom_xss_sinks.length}`, parsed.dom_xss_sinks);
+    
+    res.json({ ok: true, ...parsed, llm_raw_output: raw });
+  } catch (e) {
+    console.error(`❌ [Handler Analysis] Error:`, e);
+    res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
+app.post('/llm/analyze-messages', async (req, res) => {
+  try {
+    const { provider, model, apiKey } = req.body || {};
+    const observedMessages = Array.isArray(req.body?.context?.observedMessages) ? req.body.context.observedMessages : [];
+    const prompt = buildAnalyzeMessagesPrompt(observedMessages);
+    const raw = await runLLM(provider, model, apiKey, prompt);
+    const jsonString = raw?.content || raw;
+    const parsed = robustParseLlmJson(jsonString) || {};
+    res.json({ ok: true, ...parsed, llm_raw_output: raw });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
+app.post('/llm/analyze', async (req, res) => {
+  try {
+    const { provider, model, apiKey } = req.body || {};
+    const ctx = req.body?.context || {};
+    const sinks = Array.isArray(ctx.sinks) ? ctx.sinks : [];
+    const hasSinks = sinks.length > 0;
+    if (!hasSinks) return res.json({ ok: true, newPayloads: [], payload_class: 'none', newPayloadsCount: 0 });
+
+    console.log(`🎯 [Payload Generation] Starting for ${sinks.length} sinks`);
+    console.log(`🎯 [Payload Generation] Observed messages:`, ctx.observedMessages);
+    console.log(`🎯 [Payload Generation] Detected sinks:`, sinks);
+    
+    const prompt = buildPayloadGenerationPrompt({
+      handlerCode: ctx.handlerCode || '',
+      observedMessages: Array.isArray(ctx.observedMessages) ? ctx.observedMessages : [],
+      sinks
+    });
+    
+    console.log(`🎯 [Payload Generation] Built prompt:`, {
+      system: prompt.system.substring(0, 300) + '...',
+      user: prompt.user
+    });
+    
+    const raw = await runLLM(provider, model, apiKey, prompt);
+    console.log(`🎯 [Payload Generation] LLM raw response:`, raw);
+    
+    const jsonString = raw?.content || raw;
+    console.log(`🎯 [Payload Generation] JSON string to parse:`, jsonString);
+    
+    const parsed = robustParseLlmJson(jsonString) || {};
+    console.log(`🎯 [Payload Generation] Parsed response:`, parsed);
+    
+    const norm = normalizePayloadGenResponse(parsed, ctx);
+    console.log(`🎯 [Payload Generation] Normalized payloads:`, norm);
+
+    res.json({
+      ok: true,
+      newPayloads: norm.new_payloads,
+      payload_class: norm.payload_class,
+      llm_raw_output: raw,
+      newPayloadsCount: norm.new_payloads.length
+    });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
+  }
 });
 
 function mergePayloads(existing, incoming) {
@@ -252,6 +330,254 @@ ${JSON.stringify((context.currentPayloads||[]).slice(0,3), null, 2)}
     return { system: sys, user };
 }
 
+function buildHandlerAnalysisPrompt(context) {
+    const sys = `You are an expert code reviewer. Your ONLY task is to analyze the following JavaScript postMessage handler.
+- Assess its quality, correctness, and potential security risks.
+- Provide a score from 0-100 on how accurately it seems to match typical postMessage logic. Complex, realistic handlers should score higher.
+- Identify specific security risks you see in the code.
+- Return a strict JSON object: {"handler_assessment": "your analysis text", "handler_score": number, "risks": ["risk 1", "risk 2"]}`;
+    const user = `**DETECTED HANDLER:**\n\`\`\`javascript\n${context.handlerCode || "<no handler detected>"}\n\`\`\``;
+    return { system: sys, user };
+}
+
+function buildMessageAnalysisPrompt(context) {
+    const limitedMessages = (context.observedMessages || []).slice(0, 3);
+    const sys = `You are a data pattern analyst. Your ONLY task is to analyze these sample postMessage messages.
+- Identify patterns, structures, and potential security risks based on the data format.
+- Do NOT analyze handler code or generate payloads.
+- Return a strict JSON object: {"risks": ["risk based on message data"], "notes": "your summary of the patterns"}`;
+    const user = `**OBSERVED MESSAGES (max 3):**\n\`\`\`json\n${JSON.stringify(limitedMessages, null, 2)}\n\`\`\``;
+    return { system: sys, user };
+}
+
+function buildAnalyzeHandlerPrompt(handlerCode) {
+  const SYSTEM = `You are an expert security researcher analyzing JavaScript postMessage handlers for DOM XSS vulnerabilities.
+
+**CRITICAL: DOM XSS Sink Detection**
+Analyze the handler code and identify ANY of these DOM XSS sinks:
+- innerHTML, outerHTML, insertAdjacentHTML
+- document.write, document.writeln
+- eval, Function constructor, setTimeout/setInterval with strings
+- location.href, location.assign, location.replace
+- window.open, document.location
+- element.src, element.href, element.action
+- element.setAttribute with event handlers
+- jQuery: .html(), .append(), .prepend(), .after(), .before()
+- React: dangerouslySetInnerHTML
+- Range.createContextualFragment, Range.insertNode
+
+**DATA TYPE ANALYSIS:**
+- If handler uses \`evt.data\` directly (like \`innerHTML = evt.data\`): STRING data type
+- If handler accesses properties (like \`evt.data.html\` or \`evt.data.type\`): JSON data type
+- If handler calls \`JSON.parse(evt.data)\`: JSON STRING data type
+
+**Your task:**
+1) **DETECT DOM XSS SINKS** - Identify any dangerous DOM manipulation
+2) **ASSESS HANDLER QUALITY** - Score complexity and production-readiness (0-100)
+3) **IDENTIFY SECURITY RISKS** - List specific vulnerabilities
+4) **DETERMINE DATA TYPE** - Specify if handler expects STRING or JSON data
+
+**CRITICAL: You MUST return the dom_xss_sinks field!**
+
+**Return STRICT JSON:**
+{"handler_assessment":string,"handler_score":number,"risks":string[],"dom_xss_sinks":array,"data_type":"STRING|JSON"}
+
+**dom_xss_sinks format (REQUIRED FIELD):**
+- If you find innerHTML, outerHTML, insertAdjacentHTML: [{"type":"innerHTML assignment","severity":"High","line":"target.innerHTML = data","sink":"innerHTML"}]
+- If you find document.write: [{"type":"document.write","severity":"High","line":"document.write(data)","sink":"document.write"}]
+- If you find eval: [{"type":"eval execution","severity":"Critical","line":"eval(data)","sink":"eval"}]
+- If NO sinks found: "dom_xss_sinks":[]
+
+**EXAMPLES:**
+- For "target.innerHTML = event.data.html": {"dom_xss_sinks":[{"type":"innerHTML assignment","severity":"High","line":"target.innerHTML = event.data.html","sink":"innerHTML"}],"data_type":"JSON"}
+- For "target.innerHTML = evt.data": {"dom_xss_sinks":[{"type":"innerHTML assignment","severity":"High","line":"target.innerHTML = evt.data","sink":"innerHTML"}],"data_type":"STRING"}
+
+Only output valid JSON, no markdown.`;
+  
+  const USER = { 
+    handler_code: sanitizeForLLMContext({ handlerCode }).handlerCode,
+    task: "Analyze this postMessage handler for DOM XSS sinks, security issues, and data type expectations"
+  };
+  return { system: SYSTEM, user: JSON.stringify(USER, null, 2) };
+}
+
+function buildAnalyzeMessagesPrompt(messages) {
+  const SYSTEM = `You analyze ONLY postMessage SHAPES (no values).
+Return STRICT JSON: {"message_risks":string[],"shape_summary":string}. No prose.`;
+  const USER = { message_shapes: shapeOnlyMessages(messages || []) };
+  return { system: SYSTEM, user: JSON.stringify(USER, null, 2) };
+}
+
+function buildPayloadGenerationPrompt(context) {
+  const safe = sanitizeForLLMContext(context || {});
+  const sinks = Array.isArray(safe.sinks) ? safe.sinks : [];
+  const hasSinks = sinks.length > 0;
+
+  // Analyze handler to determine if it expects JSON or string data
+  const handlerCode = safe.handlerCode || '';
+  
+  // Check for JSON usage patterns first
+  const hasJSONPropertyAccess = handlerCode.includes('event.data.') || 
+                               handlerCode.includes('evt.data.') ||
+                               handlerCode.includes('data.type') ||
+                               handlerCode.includes('data.html') ||
+                               handlerCode.includes('data[');
+  
+  const hasJSONParse = handlerCode.includes('JSON.parse');
+  
+  // Check for direct string usage patterns
+  const hasDirectStringUsage = handlerCode.includes('innerHTML = evt.data') ||
+                              handlerCode.includes('innerHTML = event.data') ||
+                              handlerCode.includes('outerHTML = evt.data') ||
+                              handlerCode.includes('outerHTML = event.data') ||
+                              handlerCode.includes('evt.data ===') ||
+                              handlerCode.includes('event.data ===') ||
+                              handlerCode.includes('evt.data ==') ||
+                              handlerCode.includes('event.data ==');
+  
+  // Determine data type: JSON if property access or JSON.parse, otherwise STRING
+  const expectsJSON = hasJSONPropertyAccess || hasJSONParse;
+  const expectsString = !expectsJSON && hasDirectStringUsage;
+  
+  // Debug logging
+  console.log(`🔍 [Data Type Detection] Handler analysis:`, {
+    handlerCode: handlerCode.substring(0, 200) + '...',
+    hasJSONPropertyAccess,
+    hasJSONParse,
+    hasDirectStringUsage,
+    expectsJSON,
+    expectsString,
+    finalType: expectsJSON ? 'JSON' : 'STRING'
+  });
+
+  const SYSTEM = `
+You are a creative and methodical security researcher specializing in postMessage vulnerability exploitation.
+
+**Primary Goal: Generate high-quality, diverse, and context-aware payloads.**
+
+**CRITICAL RULES:**
+1.  **Analyze the Handler's Data Type:** 
+    - If the handler uses \`evt.data\` directly (like \`innerHTML = evt.data\`), generate STRING payloads
+    - If the handler accesses properties (like \`evt.data.html\` or \`evt.data.type\`), generate JSON payloads
+    - If the handler calls \`JSON.parse(evt.data)\`, generate JSON STRING payloads (stringified JSON)
+2.  **Match Message Structure EXACTLY:** 
+    - For STRING handlers: Generate simple string payloads like \`"<img src=x onerror=alert(1)>"\`
+    - For JSON handlers: Generate complete JSON objects that match intercepted message structure
+3.  **Quality over Quantity:** Generate up to 10 high-quality payloads. If you can only generate a few very good ones, that is better than 10 generic ones.
+4.  **Payload Diversity:** Create a mix of payloads:
+    *   **Simple & Direct:** Basic XSS payloads targeting the sink
+    *   **Obfuscated:** Payloads using encoding (HTML entities, String.fromCharCode) to bypass filters
+    *   **Logic-Based:** Payloads that abuse the handler's intended logic
+5.  **Target the Sink:** Ensure your malicious input reaches the detected DOM XSS sink
+
+**STRICT PROHIBITIONS:**
+- Do NOT generate JSON payloads for string-based handlers (like \`{"type":"render","html":"..."}\` when handler uses \`evt.data\` directly)
+- Do NOT generate string payloads for JSON-based handlers
+- Do NOT change the top-level structure of the message
+- For string handlers: Generate strings like \`"<script>alert(1)</script>"\`, NOT objects like \`{"html":"<script>alert(1)</script>"}\`
+
+**OUTPUT FORMAT (Strict JSON):**
+{"new_payloads": [/* up to 10 payload objects */], "payload_class": "xss"}
+`;
+
+  const USER = {
+    task: hasSinks 
+      ? `Generate up to 10 diverse, high-quality XSS payloads. The handler ${expectsJSON ? 'expects JSON data' : 'expects string data'}. Analyze the handler code to ensure your payloads are effective.` 
+      : "No sinks were detected. Return an empty array for new_payloads.",
+    handler_analysis: {
+      details: "The following JavaScript code is the message handler. Analyze its data handling to determine if it expects JSON or string data.",
+      code: safe.handlerCode || "No handler code available.",
+      data_type: expectsJSON ? "JSON" : "STRING",
+      reasoning: expectsJSON ? "Handler accesses properties like evt.data.property or uses JSON.parse" : "Handler uses evt.data directly without property access"
+    },
+    intercepted_message_examples: safe.observedMessages || [],
+    detected_sinks: sinks,
+    payload_requirements: {
+      count: hasSinks ? "Up to 10" : 0,
+      data_format: expectsJSON ? "JSON objects matching intercepted message structure" : "Simple strings",
+      target_field: hasSinks ? "Inject malicious content into the field(s) that flow into the 'detected_sinks'." : "N/A",
+      diversity: "Provide a mix of simple, obfuscated, and logic-based payloads."
+    },
+    example_of_correct_transformation: hasSinks 
+      ? (expectsJSON 
+          ? 'If handler uses evt.data.html and intercepted message is `{"type":"render","html":"<b>Hello</b>"}`, generate `{"type":"render","html":"<img src=x onerror=alert(1)>"}`'
+          : 'If handler uses evt.data directly (like innerHTML = evt.data), generate simple string payloads like: `"<img src=x onerror=alert(1)>"`, `"<svg onload=alert(1)>"`, `"<script>alert(1)</script>"` - NOT JSON objects!')
+      : "No example needed."
+  };
+
+  return { system: SYSTEM, user: JSON.stringify(USER, null, 2) };
+}
+
+function robustParseLlmJson(raw) {
+    if (!raw || typeof raw !== 'string') return null;
+    let s = raw.trim();
+    if (s.startsWith('```')) {
+        const firstNl = s.indexOf('\n');
+        if (firstNl !== -1) s = s.substring(firstNl + 1);
+        if (s.endsWith('```')) s = s.substring(0, s.length - 3);
+    }
+    try { return JSON.parse(s); } catch {}
+    const start = s.indexOf('{');
+    const end = s.lastIndexOf('}');
+    if (start !== -1 && end !== -1 && end > start) {
+        const candidate = s.substring(start, end + 1);
+        try { return JSON.parse(candidate); } catch {}
+    }
+    return null;
+}
+
+function normalizeLlmResponse(parsed, context) {
+    const out = { ...parsed };
+    if (typeof out.handler_assessment !== 'string') out.handler_assessment = 'No assessment provided by LLM.';
+    if (typeof out.handler_score !== 'number') {
+        const len = (context?.handlerCode || '').length; const msgs = (context?.observedMessages || []).length;
+        out.handler_score = Math.min(100, Math.max(10, Math.round((len/300) + (msgs>0?20:0))));
+    }
+    if (!Array.isArray(out.new_payloads)) out.new_payloads = [];
+    if (!Array.isArray(out.risks)) out.risks = [];
+    if (typeof out.notes !== 'string') out.notes = 'LLM response normalized';
+    if (!Array.isArray(out.sinks_detected)) out.sinks_detected = [];
+    if (typeof out.payload_class !== 'string') {
+        out.payload_class = out.new_payloads.length > 0 ? 'xss' : 'none';
+    }
+    return out;
+}
+
+function normalizePayloadGenResponse(parsed, context) {
+  const out = { new_payloads: [], payload_class: 'none' };
+  const sinks = Array.isArray(context?.sinks) ? context.sinks : [];
+  const hasSinks = sinks.length > 0;
+
+  if (parsed && Array.isArray(parsed.new_payloads)) {
+    // Accept both objects (preferred) and strings (legacy)
+    out.new_payloads = parsed.new_payloads.filter(p => 
+      (typeof p === 'object' && p !== null) || typeof p === 'string'
+    ).slice(0, 10);
+  }
+  if (typeof parsed?.payload_class === 'string') out.payload_class = parsed.payload_class;
+
+  if (!hasSinks) { out.new_payloads = []; out.payload_class = 'none'; return out; }
+
+  // Wrap LLM payloads with metadata for consistent UI display
+  const primarySink = sinks?.[0] || {};
+  out.new_payloads = out.new_payloads.map(p => {
+    let type = 'LLM-generated';
+    if (typeof p === 'object' && p !== null && p.type) {
+      type = p.type;
+    }
+
+    return {
+      source: 'LLM',
+      type: type,
+      payload: p,
+      targetPath: '(derived by LLM)',
+      sinkType: primarySink?.type || primarySink?.name || 'unknown'
+    };
+  });
+
+  return out;
+}
+
 async function runLLM(provider, model, apiKey, prompt) {
     if (provider === 'none' || !apiKey || !model) {
         console.warn(`🤖 Skipping LLM call - provider: ${provider}, hasKey: ${!!apiKey}, hasModel: ${!!model}`);
@@ -264,14 +590,10 @@ async function runLLM(provider, model, apiKey, prompt) {
             messages: [
                 { role: 'system', content: prompt.system },
                 { role: 'user', content: prompt.user }
-            ]
+            ],
+            temperature: 0.2,
+            response_format: { type: 'json_object' }
         };
-        
-        if (!model.includes('o3')) {
-            body.temperature = 0.3;
-            body.top_p = 0.9;
-            body.max_tokens = 1500;
-        }
         
         const resp = await fetch(baseUrl, { method: 'POST', headers, body: JSON.stringify(body) });
         
@@ -311,7 +633,9 @@ async function runLLM(provider, model, apiKey, prompt) {
             const body = {
                 model,
                 max_tokens: 1500,
-                messages: [{ role: 'user', content: `${prompt.system}\n\n${prompt.user}` }]
+                temperature: 0.2,
+                system: prompt.system,
+                messages: [{ role: 'user', content: prompt.user }]
             };
             const resp = await fetch('https://api.anthropic.com/v1/messages', {
                 method: 'POST',
@@ -331,6 +655,85 @@ async function runLLM(provider, model, apiKey, prompt) {
                     total_tokens: (usage.input_tokens || 0) + (usage.output_tokens || 0)
                 }
             };
+        } else if (provider === 'google') {
+            const body = {
+                contents: [{
+                    parts: [{ text: `${prompt.system}\n\n${prompt.user}` }]
+                }],
+                generationConfig: {
+                    temperature: 0.2,
+                    maxOutputTokens: 1500
+                }
+            };
+            const resp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
+                method: 'POST',
+                headers: { 'content-type': 'application/json', 'x-goog-api-key': apiKey },
+                body: JSON.stringify(body)
+            });
+            if (!resp.ok) throw new Error(`LLM HTTP ${resp.status}`);
+            const data = await resp.json();
+            const content = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+            return { content, usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 } };
+        } else if (provider === 'cohere') {
+            const body = {
+                model,
+                message: `${prompt.system}\n\n${prompt.user}`,
+                max_tokens: 1500,
+                temperature: 0.2
+            };
+            const resp = await fetch('https://api.cohere.ai/v1/chat', {
+                method: 'POST',
+                headers: { 'content-type': 'application/json', 'authorization': `Bearer ${apiKey}` },
+                body: JSON.stringify(body)
+            });
+            if (!resp.ok) throw new Error(`LLM HTTP ${resp.status}`);
+            const data = await resp.json();
+            const content = data?.text || '';
+            return { content, usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 } };
+        } else if (provider === 'perplexity') {
+            result = await callOpenAICompatible('https://api.perplexity.ai/chat/completions', { 'authorization': `Bearer ${apiKey}`, 'content-type': 'application/json' });
+            return result;
+        } else if (provider === 'together') {
+            result = await callOpenAICompatible('https://api.together.xyz/v1/chat/completions', { 'authorization': `Bearer ${apiKey}`, 'content-type': 'application/json' });
+            return result;
+        } else if (provider === 'deepseek') {
+            result = await callOpenAICompatible('https://api.deepseek.com/v1/chat/completions', { 'authorization': `Bearer ${apiKey}`, 'content-type': 'application/json' });
+            return result;
+        } else if (provider === 'moonshot') {
+            result = await callOpenAICompatible('https://api.moonshot.cn/v1/chat/completions', { 'authorization': `Bearer ${apiKey}`, 'content-type': 'application/json' });
+            return result;
+        } else if (provider === 'zhipu') {
+            result = await callOpenAICompatible('https://open.bigmodel.cn/api/paas/v4/chat/completions', { 'authorization': `Bearer ${apiKey}`, 'content-type': 'application/json' });
+            return result;
+        } else if (provider === 'baichuan') {
+            result = await callOpenAICompatible('https://api.baichuan-ai.com/v1/chat/completions', { 'authorization': `Bearer ${apiKey}`, 'content-type': 'application/json' });
+            return result;
+        } else if (provider === 'qwen') {
+            const body = {
+                model,
+                input: {
+                    messages: [
+                        { role: 'system', content: prompt.system },
+                        { role: 'user', content: prompt.user }
+                    ]
+                },
+                parameters: {
+                    max_tokens: 1500,
+                    temperature: 0.2
+                }
+            };
+            const resp = await fetch('https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation', {
+                method: 'POST',
+                headers: { 'content-type': 'application/json', 'authorization': `Bearer ${apiKey}` },
+                body: JSON.stringify(body)
+            });
+            if (!resp.ok) throw new Error(`LLM HTTP ${resp.status}`);
+            const data = await resp.json();
+            const content = data?.output?.text || '';
+            return { content, usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 } };
+        } else if (provider === 'local') {
+            result = await callOpenAICompatible('http://localhost:11434/v1/chat/completions', { 'authorization': `Bearer ${apiKey || 'ollama'}`, 'content-type': 'application/json' });
+            return result;
         }
     } catch (e) {
         console.error(`❌ LLM call failed for ${provider}:`, e.message);
@@ -339,6 +742,39 @@ async function runLLM(provider, model, apiKey, prompt) {
     
     console.warn(`🤖 Unknown provider: ${provider}`);
     return { content: null };
+}
+
+function computePipelineScore({ handlerOk, messagesOk, payloadsOk, sinksFound }) {
+  if (sinksFound && handlerOk && messagesOk && payloadsOk) return 100;
+  // graceful degradation
+  let score = 0;
+  if (handlerOk) score += 40;
+  if (messagesOk) score += 30;
+  if (payloadsOk) score += 20;
+  if (sinksFound) score += 10;
+  return Math.min(95, score);
+}
+
+function robustParseLlmJson(raw) {
+  if (!raw || typeof raw !== 'string') return {};
+  
+  // Strip markdown code fences
+  let cleaned = raw.replace(/```json\s*\n?/gi, '').replace(/```\s*$/gi, '');
+  
+  try {
+    return JSON.parse(cleaned);
+  } catch {
+    // Try to extract JSON from the middle of the response
+    const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      try {
+        return JSON.parse(jsonMatch[0]);
+      } catch {
+        return {};
+      }
+    }
+    return {};
+  }
 }
 
 function safeParseJson(str) {

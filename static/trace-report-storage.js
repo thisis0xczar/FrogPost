@@ -1,7 +1,7 @@
 /**
  * FrogPost Extension
  * Originally Created by thisis0xczar/Lidor 
- * Refined on: 2025-09-04
+ * Refined on: 2025-09-16
  */
 class TraceReportStorage {
     constructor() {
@@ -36,6 +36,7 @@ class TraceReportStorage {
 
         let mainReportData;
         try {
+            traceReport.endpoint = endpoint;
             mainReportData = structuredClone(traceReport);
             if (mainReportData.details) {
                 delete mainReportData.details.payloads;
@@ -126,6 +127,45 @@ class TraceReportStorage {
                 request.onsuccess = (event) => { resolve(event.target.result || []); };
                 request.onerror = (event) => { console.error('Error listing reports:', event.target.error); reject([]); };
             } catch (err) { console.error("Error creating list transaction for reports:", err); reject([]); }
+        });
+    }
+
+    async saveLLMPayloadCount(reportKey, count) {
+        if (!this.db) await this.openDatabase();
+        return new Promise((resolve, reject) => {
+            try {
+                const transaction = this.db.transaction(['reports'], 'readwrite');
+                const store = transaction.objectStore('reports');
+                const request = store.get(reportKey);
+                request.onsuccess = (event) => {
+                    const report = event.target.result;
+                    if (report) {
+                        report.llmPayloadCount = count;
+                        const updateRequest = store.put(report);
+                        updateRequest.onsuccess = () => resolve();
+                        updateRequest.onerror = (e) => { console.error('Error updating LLM payload count:', e.target.error); reject(e.target.error); };
+                    } else {
+                        reject(new Error('Report not found'));
+                    }
+                };
+                request.onerror = (event) => { console.error('Error getting report for LLM payload count:', event.target.error); reject(event.target.error); };
+            } catch (err) { console.error("Error saving LLM payload count:", err); reject(err); }
+        });
+    }
+
+    async getLLMPayloadCount(reportKey) {
+        if (!this.db) await this.openDatabase();
+        return new Promise((resolve, reject) => {
+            try {
+                const transaction = this.db.transaction(['reports'], 'readonly');
+                const store = transaction.objectStore('reports');
+                const request = store.get(reportKey);
+                request.onsuccess = (event) => { 
+                    const report = event.target.result;
+                    resolve(report ? (report.llmPayloadCount || 0) : 0);
+                };
+                request.onerror = (event) => { console.error('Error getting LLM payload count:', event.target.error); resolve(0); };
+            } catch (err) { console.error("Error getting LLM payload count:", err); resolve(0); }
         });
     }
 }

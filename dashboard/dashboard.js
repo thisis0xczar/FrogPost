@@ -1,7 +1,7 @@
 /**
  * FrogPost Extension
  * Originally Created by thisis0xczar/Lidor 
- * Refined on: 2025-09-04
+ * Refined on: 2025-09-16
  */
 
 
@@ -320,7 +320,6 @@ class SensitiveDataDetector {
         try { return JSON.parse(sanitizedString); } catch { return sanitizedString; }
     }
 }
-
 /**
  * LLM Cost Protection System for FrogPost
  * Prevents expensive API calls and provides cost estimates
@@ -408,7 +407,6 @@ class LLMCostProtector {
         analysis.optimizedSize = this.calculatePayloadSize(optimizedRequest);
 
         const model = analysisRequest.model || this.getDefaultModel(provider);
-        console.log('🔍 [Model Detection] Using model:', { requested: analysisRequest.model, provider, selected: model });
         
         const inputTokenEstimate = this.estimateTokens(optimizedRequest, provider, model);
         
@@ -422,14 +420,6 @@ class LLMCostProtector {
         analysis.costEstimate = costBreakdown.total || 0;
         analysis.costBreakdown = costBreakdown;
         
-        console.log('💰 [Cost Calculation] Debug:', {
-            provider,
-            model,
-            inputTokens: inputTokenEstimate,
-            outputTokens: expectedOutputTokens,
-            costBreakdown,
-            finalCost: analysis.costEstimate
-        });
 
         if (analysis.costEstimate > this.limits.costWarningThreshold) {
             analysis.warnings.push(`💰 High cost estimate: ~$${analysis.costEstimate.toFixed(4)} USD`);
@@ -818,7 +808,6 @@ const log = {
     debug: (msg, ...args) => { if (debugMode) console.log('%c 🔧 ' + msg, log.styles.debug, ...args); }
 };
 window.log = log;
-
 let currentVersion = 'N/A';
 const endpointsWithDetectedHandlers = new Set();
 const knownHandlerEndpoints = new Set();
@@ -968,6 +957,17 @@ function sanitizeString(str) {
     return str;
 }
 
+// Treat localhost and 127.0.0.1 as non-targets for dashboard endpoint listing
+function isLocalDevUrl(urlString) {
+    if (!urlString) return false;
+    try {
+        const u = new URL(urlString);
+        return u.hostname === 'localhost' || u.hostname === '127.0.0.1';
+    } catch {
+        return false;
+    }
+}
+
 function isEndpointAlreadyScanned(endpoint) {
     if (!endpoint) return false;
     const key = getStorageKeyForUrl(endpoint);
@@ -1002,8 +1002,8 @@ function normalizeEndpointUrl(url) {
 
         if (url.startsWith('about:') || url.startsWith('chrome:') || url.startsWith('chrome-extension:') || 
             url.startsWith('moz-extension:') || url.startsWith('safari-extension:') || url.startsWith('ms-browser-extension:') ||
-            url.startsWith('blob:') || url.startsWith('data:')) {
-            log.debug(`[Normalize URL] Special browser URL detected: ${url}`);
+            url.startsWith('blob:') || url.startsWith('data:') || url.startsWith('http://127.0.0.1:1337/')) {
+            log.debug(`[Normalize URL] Special browser URL or FrogPost fuzzer URL detected: ${url}`);
             return { normalized: url, components: null, key: url };
         }
 
@@ -1215,12 +1215,10 @@ function generateFallbackMessageId(messageObject) {
         return 'local-' + Date.now().toString(36) + '-' + Math.random().toString(16).slice(2);
     }
 }
-
 function createMessageElement(msg, indexInList, totalCount) {
     const item = document.createElement('div');
     item.classList.add('message-item');
     const visibleId = msg?.messageId || generateFallbackMessageId(msg);
-    item.setAttribute('data-message-id', visibleId);
 
     const source = msg?.origin || 'Unknown Source';
     const target = msg?.destinationUrl || 'Unknown Target';
@@ -1406,6 +1404,8 @@ function updateMessageListForUrl(url) {
             if (messageElement) messageList.appendChild(messageElement);
         });
     }
+    // Restore the report *after* the message list for the active URL is rendered
+    restoreLastReport(url);
 }
 
 function setActiveUrl(url) {
@@ -1464,231 +1464,243 @@ function createActionButtonContainer(endpointKey) {
     return buttonContainer;
 }
 
-async function analyzeWithLLM(endpointKey, buttonEl) {
-    try {
-        if (buttonEl) { buttonEl.classList.add('checking'); buttonEl.disabled = true; }
-        const settings = await chrome.storage.sync.get(['llm_provider','llm_model']);
-        const sess = await chrome.storage.session.get(['llm_api_key']);
-        const provider = settings.llm_provider || 'none';
-        const model = settings.llm_model || '';
-        const apiKey = sess.llm_api_key || '';
-        const bestKey = `best-handler-${endpointKey}`;
-        const saved = await chrome.storage.local.get([bestKey]);
-        const handlerInfo = saved[bestKey] || {};
-        const report = await window.traceReportStorage.getTraceReport(endpointKey);
-        const payloads = await window.traceReportStorage.getReportPayloads(endpointKey);
-        
-        const savedMessages = await chrome.storage.local.get([`saved-messages-${endpointKey}`]);
-        let capturedMessages = savedMessages[`saved-messages-${endpointKey}`] || [];
-        
-        try {
-            const TEST_MESSAGE_KEY = 'FrogPost';
-            const TEST_MESSAGE_VALUE = 'BreakpointTest';
-            const panelKey = getStorageKeyForUrl(endpointKey);
-            const uiRelated = (window.frogPostState?.messages || []).filter(msg => {
-                const originKey = msg.origin ? getStorageKeyForUrl(msg.origin) : null;
-                const destKey = msg.destinationUrl ? getStorageKeyForUrl(msg.destinationUrl) : null;
-                return originKey === panelKey || destKey === panelKey;
-            }).filter(msg => !(typeof msg.data === 'object' && msg.data !== null && Object.prototype.hasOwnProperty.call(msg.data, TEST_MESSAGE_KEY) && msg.data[TEST_MESSAGE_KEY] === TEST_MESSAGE_VALUE));
-            if (uiRelated.length > 0) capturedMessages = uiRelated;
-            const seen = new Set();
-            const deduped = [];
-            for (const m of capturedMessages) {
-                const id = m?.messageId || `${m?.origin || ''}|${m?.destinationUrl || ''}|${m?.timestamp || ''}|${typeof m?.data === 'string' ? m.data : JSON.stringify(m?.data || {})}`;
-                if (!seen.has(id)) { seen.add(id); deduped.push(m); }
-            }
-            capturedMessages = deduped;
-        } catch (e) { console.warn('⚠️ [LLM] UI message alignment failed, using raw storage list:', e); }
-        
-        console.log(`🤖 [LLM Analysis] Starting analysis for: ${endpointKey}`);
-        console.log(`🤖 [LLM Settings] Provider: ${provider}, Model: ${model}, HasKey: ${!!apiKey}`);
-        
-        if (!provider || provider === 'none' || !model || !apiKey) {
-            showToastNotification('⚠️ LLM configuration required. Please configure provider, model, and API key in Options.', 'warning');
-            console.log('❌ [LLM Validation] Missing configuration:', { provider, model, hasApiKey: !!apiKey });
-            return;
-        }
-        console.log(`🤖 [LLM Context] Handler: ${!!handlerInfo?.handler}, Messages (UI-aligned): ${capturedMessages.length}, Payloads: ${payloads?.length || 0}`);
-        console.log(`🤖 [LLM Context] Captured messages details:`, capturedMessages.map(m => ({ 
-            id: m.messageId, 
-            type: m.messageType, 
-            data: m.data,
-            origin: m.origin,
-            destination: m.destinationUrl 
-        })));
-        
-        const context = {
-            url: endpointKey,
-            observedMessages: capturedMessages,
-            currentPayloads: payloads || [],
-            handlerCode: handlerInfo?.handler || '',
-            sinks: report?.details?.sinks || [],
-            originChecks: report?.details?.originValidationChecks || []
-        };
-        
-        console.log('🛡️ [Safety] Performing pre-LLM safety analysis...');
-        
-        const sensitiveDetector = new SensitiveDataDetector();
-        const costProtector = new LLMCostProtector();
-        
-        const sensitivityAnalysis = sensitiveDetector.analyzeLLMSafety(capturedMessages);
-        console.log('🔍 [Sensitive Data] Analysis results:', sensitivityAnalysis);
-        
-        const costAnalysis = costProtector.analyzeRequest(context, provider);
-        console.log('💰 [Cost Protection] Analysis results:', costAnalysis);
-        
-        console.log('🛡️ [Safety Check] Triggering consent dialog:', {
-            sensitiveMsgCount: sensitivityAnalysis.sensitiveMsgCount,
-            costEstimate: costAnalysis.costEstimate,
-            shouldShowDialog: true
-        });
-        
-        console.log('🛡️ [Safety] About to show consent dialog...');
-        try {
-            const proceed = await showSafetyConsentDialog(sensitivityAnalysis, costAnalysis);
-            console.log('🛡️ [Safety] Dialog result:', proceed);
-            if (!proceed) {
-                showToastNotification('🛡️ LLM analysis cancelled by user', 'info');
-                return;
-            }
-        } catch (error) {
-            console.error('❌ [Safety] Error showing consent dialog:', error);
-            showToastNotification('❌ Error showing safety dialog. Proceeding with analysis.', 'warning');
-        }
-        
-        if (!costAnalysis.approved) {
-            showToastNotification(`🚫 Request blocked: ${costAnalysis.warnings.join(', ')}`, 'error');
-            return;
-        }
-        
-        const safeContext = {
-            ...costAnalysis.optimizedRequest,
-            observedMessages: sensitivityAnalysis.sanitizedMessages.map(sm => sm.sanitized)
-        };
-        
-        console.log('🧮 [Messages] Counts:', {
-            captured: capturedMessages.length,
-            sentToLLM: safeContext.observedMessages.length,
-            optimizedReduction: `${sensitivityAnalysis.totalMessages - safeContext.observedMessages.length}/${sensitivityAnalysis.totalMessages}`
-        });
-        
-        console.log(`🛡️ [Safety] Protected context - Original: ${JSON.stringify(context).length} bytes, Safe: ${JSON.stringify(safeContext).length} bytes`);
-        
-        costProtector.recordAPICall();
-        
-        console.log(`🤖 [LLM Context Details]:`, {
-            messagesCount: safeContext.observedMessages.length,
-            messageTypes: safeContext.observedMessages.map(m => ({type: typeof m, hasData: !!m?.data, dataType: typeof m?.data})),
-            currentPayloadsCount: safeContext.currentPayloads.length,
-            handlerLength: safeContext.handlerCode.length,
-            sinksCount: safeContext.sinks.length,
-            originChecksCount: safeContext.originChecks.length,
-            safetyInfo: {
-                sensitiveDataDetected: sensitivityAnalysis.sensitiveMsgCount,
-                costEstimate: costAnalysis.costEstimate,
-                costBreakdown: costAnalysis.costBreakdown,
-                tokenBreakdown: {
-                    input: costAnalysis.tokenEstimate,
-                    output: costAnalysis.expectedOutputTokens,
-                    total: costAnalysis.totalTokenEstimate
-                },
-                payloadReduction: costAnalysis.originalSize > 0 ? ((costAnalysis.originalSize - costAnalysis.optimizedSize) / costAnalysis.originalSize * 100).toFixed(1) + '%' : '0%'
-            }
-        });
-        
-        const reqBody = { provider, model, apiKey, context: safeContext };
-        console.log(`🤖 [LLM Request] Sending to server with safety protections...`);
-        const res = await fetch('http://127.0.0.1:1337/llm/analyze', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(reqBody) });
-        
-        if (!res.ok) {
-            const errorData = await res.json().catch(() => ({}));
-            if (res.status === 400 && errorData.error === 'LLM configuration required') {
-                showToastNotification('⚠️ LLM configuration required. Please set up provider, model, and API key in Options.', 'warning');
-                return;
-            }
-            throw new Error(`LLM server responded ${res.status}: ${errorData.message || 'Unknown error'}`);
-        }
-        const data = await res.json();
-        
-        if (!data || !data.llm_raw_output || (Array.isArray(data.newPayloads) && data.newPayloads.length === 0)) {
-            console.warn('⚠️ [LLM Gating] Missing llm_raw_output or no new payloads. Blocking heuristic/fallback results.');
-            showToastNotification('⚠️ LLM returned no content. Please check your API key/model and try again.', 'warning');
-            return;
-        }
-        
-        console.log(`LLM analysis complete. +${data.newPayloadsCount || 0} new, total merged: ${data.mergedCount || 0}`);
-        console.log('Full LLM response:', data);
-        if (data.analysis_details) {
-            console.log('🔍 [LLM Analysis Details]:', data.analysis_details);
-        }
-        
-        if (data.handler_assessment || data.risks || data.notes || data.handler_score !== undefined) {
-            const llmAnalysisData = {
-                handler_assessment: data.handler_assessment,
-                handler_score: data.handler_score,
-                risks: data.risks,
-                notes: data.notes,
-                summary: data.summary,
-                newPayloadsCount: data.newPayloadsCount,
-                llm_raw_output: data.llm_raw_output,
-                llm_prompt_excerpt: data.llm_prompt_excerpt
-            };
-            
-            console.log('🤖 [LLM Analysis] Structured data to save:', llmAnalysisData);
-            
-            try {
-                const report = await window.traceReportStorage.getTraceReport(endpointKey);
-                if (report && report.summary) {
-                    report.summary.messagesAnalyzed = (capturedMessages || []).length;
-                    await window.traceReportStorage.saveTraceReport(endpointKey, report);
-                    console.log('🧮 [Report] Updated messagesAnalyzed in summary to', report.summary.messagesAnalyzed);
-                }
-            } catch (e) { console.warn('⚠️ [Report] Unable to update messagesAnalyzed:', e); }
-            
-            try {
-                const existing = report?.details || {};
-                existing.llmAnalysis = existing.llmAnalysis || {};
-                Object.assign(existing.llmAnalysis, llmAnalysisData);
-                report.details = existing;
-                await window.traceReportStorage.saveTraceReport(endpointKey, report);
-            } catch (e) { console.warn('⚠️ [LLM Analysis] Unable to persist LLM analysis into report:', e); }
-            
-            updateExistingReportWithLLM(llmAnalysisData);
-        }
-        
-        if (data?.betterHandler || data?.better_handler) { 
-            const newHandler = data.betterHandler || data.better_handler;
-            const merged = { ...(handlerInfo||{}), handler: newHandler }; 
-            await chrome.storage.local.set({ [bestKey]: merged }); 
-        }
-        
-        let newPayloads = [];
-        if (Array.isArray(data?.new_payloads)) {
-            newPayloads = data.new_payloads;
-        } else if (Array.isArray(data?.newPayloads)) {
-            newPayloads = data.newPayloads;
-        }
-        
-        if (newPayloads.length > 0) { 
-            console.log(`Saving ${newPayloads.length} new LLM payloads:`, newPayloads);
-            const existing = await window.traceReportStorage.getReportPayloads(endpointKey); 
-            await window.traceReportStorage.saveReportPayloads(endpointKey, [ ...(existing||[]), ...newPayloads ]); 
-        }
-        if (report) { 
-            report.details = report.details || {}; 
-            report.details.llmAnalysis = {
-                summary: `${data.newPayloadsCount} new payloads generated`,
-                newPayloadsCount: data?.newPayloadsCount || 0,
-                mergedCount: data?.mergedCount || 0,
-                raw_output: data?.llm_raw_output || ''
-            };
-            await window.traceReportStorage.saveTraceReport(endpointKey, report); 
-        }
-        if (buttonEl) { buttonEl.classList.remove('checking'); buttonEl.classList.add('green'); setTimeout(()=> buttonEl.classList.remove('green'), 1500); }
-    } catch (e) { if (buttonEl) { buttonEl.classList.remove('checking'); buttonEl.classList.add('error'); setTimeout(()=> buttonEl.classList.remove('error'), 2000); } }
-    finally { if (buttonEl) buttonEl.disabled = false; }
+function computePipelineScoreClient({ handlerOk, messagesOk, payloadsOk, sinksFound }) {
+  if (sinksFound && handlerOk && messagesOk && payloadsOk) return 100;
+  let score = 0;
+  if (handlerOk) score += 40;
+  if (messagesOk) score += 30;
+  if (payloadsOk) score += 20;
+  if (sinksFound) score += 10;
+  return Math.min(95, score);
 }
 
+async function analyzeWithLLM(endpointKey, buttonEl) {
+  try {
+    if (buttonEl) { buttonEl.classList.add('checking'); buttonEl.disabled = true; }
+    
+    console.log(`🚀 [LLM Pipeline] Starting STRICT 3-call analysis for: ${endpointKey}`);
+    
+    // Get LLM settings
+    const settings = await chrome.storage.sync.get(['llm_provider','llm_model']);
+    const sess = await chrome.storage.session.get(['llm_api_key']);
+    const provider = settings.llm_provider || 'none';
+    const model = settings.llm_model || '';
+    const apiKey = sess.llm_api_key || '';
+
+    if (!provider || provider === 'none' || !model || !apiKey) {
+      showToastNotification('⚠️ LLM configuration required in Options.', 'warning');
+      return;
+    }
+
+    // Get handler and messages
+    const bestKey = `best-handler-${endpointKey}`;
+    const saved = await chrome.storage.local.get([bestKey]);
+    const handlerInfo = saved[bestKey] || {};
+    const handlerCode = handlerInfo?.handler || handlerInfo?.code || '';
+    
+    const savedMessages = await chrome.storage.local.get([`saved-messages-${endpointKey}`]);
+    const capturedMessages = savedMessages[`saved-messages-${endpointKey}`] || [];
+    
+    console.log(`📊 [Pipeline] Handler: ${handlerCode.length} chars, Messages: ${capturedMessages.length} total`);
+
+    // Safety analysis and consent (using actual message count)
+    const sensitiveDetector = new SensitiveDataDetector();
+    const costProtector = new LLMCostProtector();
+    
+    const sensitivityAnalysis = sensitiveDetector.analyzeLLMSafety(capturedMessages);
+    const costAnalysis = costProtector.analyzeRequest({
+      url: endpointKey,
+      observedMessages: capturedMessages,
+      handlerCode: handlerCode
+    }, provider);
+    
+    console.log(`🛡️ [Safety] Messages for analysis: ${sensitivityAnalysis.totalMessages}`);
+    
+    const proceed = await showSafetyConsentDialog(sensitivityAnalysis, costAnalysis);
+    if (!proceed) {
+      showToastNotification('🛡️ LLM analysis cancelled by user', 'info');
+      return;
+    }
+    
+    if (!costAnalysis.approved) {
+      showToastNotification(`🚫 Request blocked: ${costAnalysis.warnings.join(', ')}`, 'error');
+      return;
+    }
+    
+    costProtector.recordAPICall();
+
+    // STEP 1: Handler Analysis (handler code ONLY)
+    console.log(`🔥 [Step 1/3] Handler analysis - sending ${handlerCode.length} chars of handler code`);
+    
+    const step1Res = await fetch('http://127.0.0.1:1337/llm/analyze-handler', { 
+      method: 'POST', 
+      headers: {'Content-Type':'application/json'}, 
+      body: JSON.stringify({
+        provider, model, apiKey,
+        context: { handlerCode }
+      })
+    });
+    
+    if (!step1Res.ok) {
+      throw new Error(`Step 1 failed: ${step1Res.status}`);
+    }
+    
+    const step1Data = await step1Res.json();
+    const handlerOk = !!step1Data?.ok;
+    const detectedSinks = Array.isArray(step1Data?.dom_xss_sinks) ? step1Data.dom_xss_sinks : [];
+    
+    console.log(`✅ [Step 1] Handler analysis complete. Sinks detected: ${detectedSinks.length}`);
+    console.log(`🔍 [Step 1] Detected sinks:`, detectedSinks);
+
+    // STEP 2: Message Analysis (≤3 shapes ONLY)
+    console.log(`🔥 [Step 2/3] Message analysis - sending ${capturedMessages.length} raw messages (server will shape to ≤3)`);
+    const step2Res = await fetch('http://127.0.0.1:1337/llm/analyze-messages', { 
+      method: 'POST', 
+      headers: {'Content-Type':'application/json'}, 
+      body: JSON.stringify({
+        provider, model, apiKey,
+        context: { observedMessages: capturedMessages }
+      })
+    });
+    
+    if (!step2Res.ok) {
+      throw new Error(`Step 2 failed: ${step2Res.status}`);
+    }
+    
+    const step2Data = await step2Res.json();
+    const messagesOk = !!step2Data?.ok;
+    
+    console.log(`✅ [Step 2] Message analysis complete`);
+
+    // STEP 3: Payload Generation (ONLY if sinks detected)
+    let payloadsOk = false;
+    let payloadData = { newPayloads: [], payload_class: 'none' };
+    const sinksFound = detectedSinks.length > 0;
+    
+    if (sinksFound) {
+      console.log(`🔥 [Step 3/3] Payload generation - ${detectedSinks.length} sinks detected, generating payloads`);
+      const step3Res = await fetch('http://127.0.0.1:1337/llm/analyze', { 
+        method: 'POST', 
+        headers: {'Content-Type':'application/json'}, 
+        body: JSON.stringify({
+          provider, model, apiKey,
+          context: {
+            handlerCode,
+            observedMessages: capturedMessages,
+            sinks: detectedSinks
+          }
+        })
+      });
+      
+      if (!step3Res.ok) {
+        throw new Error(`Step 3 failed: ${step3Res.status}`);
+      }
+      
+      payloadData = await step3Res.json();
+      payloadsOk = !!payloadData?.ok;
+      
+      console.log(`✅ [Step 3] Payload generation complete. Generated: ${payloadData?.newPayloads?.length || 0} payloads`);
+    } else {
+      console.log(`⏭️ [Step 3/3] Skipped - no sinks detected`);
+      payloadsOk = true; // No sinks = successful "no-op"
+    }
+
+    // Calculate final score
+    const finalScore = computePipelineScoreClient({ handlerOk, messagesOk, payloadsOk, sinksFound });
+    
+    console.log(`🏆 [Pipeline Complete] Final Score: ${finalScore}/100`);
+    console.log(`📊 [Pipeline Summary] Handler: ${handlerOk ? '✅' : '❌'}, Messages: ${messagesOk ? '✅' : '❌'}, Payloads: ${payloadsOk ? '✅' : '❌'}, Sinks: ${sinksFound ? detectedSinks.length : 0}`);
+
+    // Build and save report (merge with existing trace report metadata)
+    const existingReport = await window.traceReportStorage.getTraceReport(endpointKey);
+    const reportToSave = {
+      endpoint: endpointKey,
+      timestamp: Date.now(),
+      details: {
+        handlerAssessment: step1Data?.handler_assessment || '',
+        risks: Array.isArray(step1Data?.risks) ? step1Data.risks : [],
+        messageFindings: Array.isArray(step2Data?.message_risks) ? step2Data.message_risks : [],
+        sinks: detectedSinks,
+        sinksFound,
+        llmProvider: provider,
+        model,
+        score: finalScore
+      },
+      summary: { 
+        totalPayloads: payloadData?.newPayloads?.length || 0,
+        pipelineSteps: { handlerOk, messagesOk, payloadsOk }
+      }
+    };
+
+    if (existingReport && typeof existingReport === 'object') {
+      try {
+        const llmGeneratedDetails = reportToSave.details;
+        reportToSave = JSON.parse(JSON.stringify(existingReport)); // Deep clone to avoid mutation
+        reportToSave.details = { ...(existingReport.details || {}), ...llmGeneratedDetails };
+        
+        // Preserve best/analyzed handler if present in existing report
+        if (!reportToSave.details.analyzedHandler && existingReport.details?.analyzedHandler) {
+          reportToSave.details.analyzedHandler = existingReport.details.analyzedHandler;
+        }
+        if (!reportToSave.details.bestHandler && existingReport.details?.bestHandler) {
+          reportToSave.details.bestHandler = existingReport.details.bestHandler;
+        }
+        // Keep structures and static analysis outputs if available
+        if (!reportToSave.details.uniqueStructures && existingReport.details?.uniqueStructures) {
+          reportToSave.details.uniqueStructures = existingReport.details.uniqueStructures;
+        }
+        if (!reportToSave.details.originValidationChecks && existingReport.details?.originValidationChecks) {
+          reportToSave.details.originValidationChecks = existingReport.details.originValidationChecks;
+        }
+      } catch {}
+    }
+
+    // Merge LLM payloads with existing FrogPost payloads instead of overwriting
+    const existingPayloads = await window.traceReportStorage.getReportPayloads(endpointKey);
+    const incoming = Array.isArray(payloadData?.newPayloads) ? payloadData.newPayloads : [];
+    const combined = (() => {
+      const all = [...(existingPayloads || []), ...incoming];
+      const uniq = new Map();
+      all.forEach(p => {
+        try {
+          const payloadStr = typeof p?.payload === 'object' && p?.payload !== null ? JSON.stringify(p.payload) : String(p?.payload);
+          const key = `${p?.type || p?.generator || 'unknown'}|${p?.targetPath || ''}|${payloadStr}`;
+          if (!uniq.has(key)) uniq.set(key, p);
+        } catch { /* ignore */ }
+      });
+      return Array.from(uniq.values());
+    })();
+
+    reportToSave.summary.totalPayloads = combined.length;
+    await window.traceReportStorage.saveTraceReport(endpointKey, reportToSave);
+    await window.traceReportStorage.saveReportPayloads(endpointKey, combined);
+
+    console.log('💾 [Report] Saved complete pipeline results to IndexedDB');
+
+    // Patch the currently open report UI instead of full re-render
+    try {
+        const llmSummary = {
+            handler_assessment: step1Data?.handler_assessment || '',
+            handler_score: step1Data?.handler_score || 0,
+            risks: step1Data?.risks || [],
+            notes: step1Data?.notes || '',
+            newPayloadsCount: payloadData?.newPayloads?.length || 0,
+            payload_class: payloadData?.payload_class || 'none',
+            sinks_detected: detectedSinks || [],
+            samplePayloads: payloadData?.newPayloads?.slice(0, 2) || []
+        };
+        updateExistingReportWithLLM(llmSummary);
+    } catch(e){ console.error('[LLM UI Patch] Failed:',e);}
+
+    showToastNotification(`🎯 Pipeline Complete! Score: ${finalScore}/100, Payloads: +${incoming.length} added (total ${combined.length})`, 'success');
+
+  } catch (e) {
+    console.error('💥 [LLM Pipeline] Failed:', e);
+    showToastNotification(`❌ Pipeline failed: ${e.message}`, 'error');
+  } finally {
+    if (buttonEl) { buttonEl.classList.remove('checking'); buttonEl.disabled = false; }
+  }
+}
 /**
  * Show safety consent dialog for LLM analysis
  * @param {Object} sensitivityAnalysis - Results from sensitive data detection
@@ -1936,9 +1948,10 @@ function createEndpointGroupElement(parentKey, childKeysSet, filterText) {
     hostName.textContent = parentKey;
     hostName.title = parentKey;
 
-    hostRow.addEventListener("click", (e) => {
+    hostRow.addEventListener("click", async (e) => {
         e.stopPropagation();
         setActiveUrl(parentKey);
+        await restoreLastReport(parentKey);
     });
 
     const parentButtonContainer = createActionButtonContainer(parentKey);
@@ -1978,9 +1991,10 @@ function createEndpointGroupElement(parentKey, childKeysSet, filterText) {
             iframeName.textContent = childKey;
             iframeName.title = childKey;
 
-            iframeRow.addEventListener("click", (e) => {
+            iframeRow.addEventListener("click", async (e) => {
                 e.stopPropagation();
                 setActiveUrl(childKey);
+                await restoreLastReport(childKey);
             });
 
             const childButtonContainer = createActionButtonContainer(childKey);
@@ -2013,7 +2027,24 @@ function updateDashboardUI() {
     const groupsByTopLevel = new Map();
     const allKnownKeys = new Set();
 
+    // Create a Set to track unique endpoints to prevent duplicates
+    const processedEndpoints = new Set();
+
     window.frogPostState.messages.forEach(msg => {
+        // Filter out FrogPost fuzzer URLs completely
+        if (msg.origin && msg.origin.startsWith('http://127.0.0.1:1337/')) return;
+        if (msg.destinationUrl && msg.destinationUrl.startsWith('http://127.0.0.1:1337/')) return;
+        if (msg.topLevelUrl && msg.topLevelUrl.startsWith('http://127.0.0.1:1337/')) return;
+        // Filter out generic localhost/127.0.0.1 traffic from dashboard
+        if (isLocalDevUrl(msg.origin)) return;
+        if (isLocalDevUrl(msg.destinationUrl)) return;
+        if (isLocalDevUrl(msg.topLevelUrl)) return;
+        
+        // Filter out messages from handler extraction tabs
+        if (msg.origin && msg.origin.includes('frogpost_handler_extraction=true')) return;
+        if (msg.destinationUrl && msg.destinationUrl.includes('frogpost_handler_extraction=true')) return;
+        if (msg.topLevelUrl && msg.topLevelUrl.includes('frogpost_handler_extraction=true')) return;
+        
         if (!msg.topLevelUrl) { // Can't group without top-level context
             if(msg.origin) allKnownKeys.add(getStorageKeyForUrl(msg.origin));
             if(msg.destinationUrl) allKnownKeys.add(getStorageKeyForUrl(msg.destinationUrl));
@@ -2033,20 +2064,21 @@ function updateDashboardUI() {
         const sourceKey = msg.origin ? getStorageKeyForUrl(msg.origin) : null;
         const destKey = msg.destinationUrl ? getStorageKeyForUrl(msg.destinationUrl) : null;
 
-        if (sourceKey && sourceKey !== topLevelKey && sourceKey !== 'null') {
+        if (sourceKey && sourceKey !== topLevelKey && sourceKey !== 'null' && !isLocalDevUrl(msg.origin)) {
             relatedEndpoints.add(sourceKey);
             allKnownKeys.add(sourceKey);
         }
-        if (destKey && destKey !== topLevelKey && destKey !== 'null') {
+        if (destKey && destKey !== topLevelKey && destKey !== 'null' && !isLocalDevUrl(msg.destinationUrl)) {
             relatedEndpoints.add(destKey);
             allKnownKeys.add(destKey);
         }
     });
 
-    knownHandlerEndpoints.forEach(key => allKnownKeys.add(key));
+    // Include non-local endpoints we already know about
+    knownHandlerEndpoints.forEach(key => { if (!isLocalDevUrl(key)) allKnownKeys.add(key); });
     window.frogPostState.loadedData.urls.forEach(url => {
         const key = getStorageKeyForUrl(url);
-        if(key && key !== 'null') allKnownKeys.add(key);
+        if(key && key !== 'null' && !isLocalDevUrl(url) && !isLocalDevUrl(key)) allKnownKeys.add(key);
     });
 
 
@@ -2054,7 +2086,7 @@ function updateDashboardUI() {
     let displayedEndpointCount = 0;
     const renderedKeys = new Set();
 
-    const sortedTopLevelKeys = Array.from(groupsByTopLevel.keys()).sort();
+    const sortedTopLevelKeys = Array.from(groupsByTopLevel.keys()).filter(k => !isLocalDevUrl(k)).sort();
 
     sortedTopLevelKeys.forEach(topLevelKey => {
         if (renderedKeys.has(topLevelKey)) return;
@@ -2084,6 +2116,7 @@ function updateDashboardUI() {
     });
 
     allKnownKeys.forEach(key => {
+        if (isLocalDevUrl(key)) return;
         if (!renderedKeys.has(key)) {
             const matchesFilter = !filterText || key.toLowerCase().includes(filterText);
             const isSilent = getMessageCount(key) === 0;
@@ -2141,8 +2174,6 @@ function updateEndpointCounts() {
         log.error("Error updating endpoint counts", e);
     }
 }
-
-
 function initializeMessageHandling() {
     chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         if (!message?.type) return false;
@@ -2520,9 +2551,7 @@ async function handlePlayButton(endpoint, button, skipCheck = false) {
         }
         return;
     }
-
     launchInProgressEndpoints.add(endpointKey);
-
     const isExtensionUrl = endpointKey.startsWith('chrome-extension://');
     const reportButton = button.closest('.button-container')?.querySelector('.iframe-report-button');
     let endpointUrlForAnalysis = originalFullEndpoint;
@@ -2807,7 +2836,1370 @@ async function handlePlayButton(endpoint, button, skipCheck = false) {
     }
 }
 
-function getRiskLevelAndColor(score) { if (score <= 20) return { riskLevel: 'Critical', riskColor: 'critical' }; if (score <= 40) return { riskLevel: 'High', riskColor: 'high' }; if (score <= 60) return { riskLevel: 'Medium', riskColor: 'medium' }; if (score <= 80) return { riskLevel: 'Low', riskColor: 'low' }; return { riskLevel: 'Good', riskColor: 'negligible' }; }
+function getRiskLevelAndColor(score) {
+  // Lower score => higher risk. Collapse to three bands.
+  if (score <= 40) return { riskLevel: 'High', riskColor: 'high' };
+  if (score <= 70) return { riskLevel: 'Medium', riskColor: 'medium' };
+  return { riskLevel: 'Low', riskColor: 'low' };
+}
+
+// Map handler 1-10 score to a display color class for the metric value
+function getHandlerScoreClass(score10) {
+  const n = Number(score10 || 0);
+  if (n >= 10) return 'score-safe';      // explicitly "Safe"
+  if (n >= 7) return 'score-risk-low';   // good
+  if (n >= 4) return 'score-risk-medium';// caution
+  return 'score-risk-high';              // 1-3 high risk
+}
+
+// ===== LLM Analysis System =====
+function sanitizeMessagesForLLM(messages) {
+    if (!Array.isArray(messages)) return [];
+    
+    const commonSecretPatterns = [
+        // JWT tokens
+        { pattern: /eyJ[A-Za-z0-9_-]*\.eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]*/g, replacement: '[JWT_TOKEN]' },
+        // API keys
+        { pattern: /sk-[A-Za-z0-9]{20,}/g, replacement: '[API_KEY]' },
+        { pattern: /pk_[A-Za-z0-9]{20,}/g, replacement: '[API_KEY]' },
+        // Bearer tokens
+        { pattern: /Bearer\s+[A-Za-z0-9_-]{20,}/g, replacement: 'Bearer [TOKEN]' },
+        // AWS keys
+        { pattern: /AKIA[0-9A-Z]{16}/g, replacement: '[AWS_ACCESS_KEY]' },
+        { pattern: /[A-Za-z0-9/+=]{40}/g, replacement: '[AWS_SECRET_KEY]' },
+        // Database URLs
+        { pattern: /mongodb:\/\/[^@]+@[^/]+\/[^\s]*/g, replacement: 'mongodb://[USER]:[PASSWORD]@[HOST]/[DB]' },
+        { pattern: /postgres:\/\/[^@]+@[^/]+\/[^\s]*/g, replacement: 'postgres://[USER]:[PASSWORD]@[HOST]/[DB]' },
+        // Credit card numbers
+        { pattern: /\b\d{4}[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}\b/g, replacement: '[CREDIT_CARD]' },
+        // Email addresses
+        { pattern: /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b/g, replacement: '[EMAIL]' }
+    ];
+    
+    return messages.map(msg => {
+        const sanitized = JSON.parse(JSON.stringify(msg)); // Deep clone
+        
+        // Sanitize the data field
+        if (sanitized.data && typeof sanitized.data === 'object') {
+            const dataStr = JSON.stringify(sanitized.data);
+            let sanitizedDataStr = dataStr;
+            
+            // Apply all sanitization patterns
+            commonSecretPatterns.forEach(({ pattern, replacement }) => {
+                sanitizedDataStr = sanitizedDataStr.replace(pattern, replacement);
+            });
+            
+            try {
+                sanitized.data = JSON.parse(sanitizedDataStr);
+            } catch (e) {
+                // If parsing fails, keep original data
+                console.warn('Failed to parse sanitized data, keeping original');
+            }
+        }
+        
+        // Sanitize other string fields
+        Object.keys(sanitized).forEach(key => {
+            if (typeof sanitized[key] === 'string') {
+                let sanitizedStr = sanitized[key];
+                commonSecretPatterns.forEach(({ pattern, replacement }) => {
+                    sanitizedStr = sanitizedStr.replace(pattern, replacement);
+                });
+                sanitized[key] = sanitizedStr;
+            }
+        });
+        
+        return sanitized;
+    });
+}
+
+function estimateTokenCount(text) {
+    // Rough estimation: 1 token ≈ 4 characters for English text
+    // This is a conservative estimate
+    if (typeof text === 'string') {
+        return Math.ceil(text.length / 4);
+    }
+    if (typeof text === 'object') {
+        return Math.ceil(JSON.stringify(text).length / 4);
+    }
+    return 0;
+}
+
+function analyzeSensitiveDataInMessages(messages) {
+    const detectedTypes = new Set();
+    let hasSensitiveData = false;
+    
+    const commonSecretPatterns = [
+        { name: 'JWT Tokens', pattern: /eyJ[A-Za-z0-9_-]*\.eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]*/g },
+        { name: 'API Keys', pattern: /sk-[A-Za-z0-9]{20,}|pk_[A-Za-z0-9]{20,}/g },
+        { name: 'Bearer Tokens', pattern: /Bearer\s+[A-Za-z0-9_-]{20,}/g },
+        { name: 'AWS Keys', pattern: /AKIA[0-9A-Z]{16}|[A-Za-z0-9/+=]{40}/g },
+        { name: 'Database URLs', pattern: /mongodb:\/\/[^@]+@[^/]+\/[^\s]*|postgres:\/\/[^@]+@[^/]+\/[^\s]*/g },
+        { name: 'Credit Cards', pattern: /\b\d{4}[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}\b/g },
+        { name: 'Email Addresses', pattern: /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b/g }
+    ];
+    
+    messages.forEach(msg => {
+        const msgStr = JSON.stringify(msg);
+        commonSecretPatterns.forEach(({ name, pattern }) => {
+            if (pattern.test(msgStr)) {
+                detectedTypes.add(name);
+                hasSensitiveData = true;
+            }
+        });
+    });
+    
+    return { hasSensitiveData, detectedTypes };
+}
+
+function generateSanitizationSummary(originalMessages, sanitizedMessages) {
+    const changes = [];
+    
+    originalMessages.forEach((original, index) => {
+        const sanitized = sanitizedMessages[index];
+        const originalStr = JSON.stringify(original);
+        const sanitizedStr = JSON.stringify(sanitized);
+        
+        if (originalStr !== sanitizedStr) {
+            changes.push(`Message ${index + 1}: ${originalStr.length} → ${sanitizedStr.length} chars`);
+        }
+    });
+    
+    return {
+        hasChanges: changes.length > 0,
+        changes: changes,
+        totalOriginalSize: JSON.stringify(originalMessages).length,
+        totalSanitizedSize: JSON.stringify(sanitizedMessages).length
+    };
+}
+
+function showLLMConsentPopup(handlerCode, messages, onConfirm, onCancel) {
+    const sanitizedMessages = sanitizeMessagesForLLM(messages);
+    const handlerTokens = estimateTokenCount(handlerCode);
+    const messagesTokens = estimateTokenCount(sanitizedMessages);
+    const totalTokens = handlerTokens + messagesTokens;
+    
+    // Analyze sensitive data detection
+    const sensitiveDataAnalysis = analyzeSensitiveDataInMessages(messages);
+    const hasSensitiveData = sensitiveDataAnalysis.hasSensitiveData;
+    const detectedTypes = Array.from(sensitiveDataAnalysis.detectedTypes);
+    const sanitizationSummary = generateSanitizationSummary(messages, sanitizedMessages);
+    
+    console.log('🔍 [Consent Popup] Sensitive data analysis:', {
+        hasSensitiveData,
+        detectedTypes,
+        sanitizationSummary
+    });
+    
+    // Create popup HTML
+    const popupHTML = `
+        <div id="llm-consent-overlay" style="
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.7);
+            z-index: 10000;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-family: var(--font-sans);
+        ">
+            <div style="
+                background: var(--bg-primary);
+                border: 1px solid var(--border-color);
+                border-radius: 12px;
+                padding: 30px;
+                max-width: 600px;
+                width: 90%;
+                max-height: 80vh;
+                overflow-y: auto;
+                box-shadow: 0 20px 40px rgba(0, 0, 0, 0.3);
+            ">
+                <h3 style="
+                    margin: 0 0 20px 0;
+                    color: var(--accent-primary);
+                    font-size: 20px;
+                    display: flex;
+                    align-items: center;
+                    gap: 10px;
+                ">
+                    🤖 LLM Analysis Consent
+                </h3>
+                
+                <div style="margin-bottom: 20px;">
+                    <h4 style="color: var(--text-primary); margin: 0 0 10px 0; font-size: 16px;">What will be sent to the LLM:</h4>
+                    <ul style="margin: 0; padding-left: 20px; color: var(--text-secondary); line-height: 1.6;">
+                        <li><strong>Handler Code:</strong> ${handlerCode.length} characters (~${handlerTokens} tokens)</li>
+                        <li><strong>Intercepted Messages:</strong> ${messages.length} messages (~${messagesTokens} tokens)</li>
+                        <li><strong>Total Estimated Tokens:</strong> ~${totalTokens} tokens</li>
+                    </ul>
+                </div>
+                
+                <div style="margin-bottom: 20px;">
+                    <h4 style="color: var(--text-primary); margin: 0 0 10px 0; font-size: 16px;">🔒 Data Protection:</h4>
+                    <div style="
+                        background: var(--bg-secondary);
+                        border: 1px solid var(--border-color);
+                        border-radius: 8px;
+                        padding: 15px;
+                        font-size: 14px;
+                        color: var(--text-secondary);
+                        line-height: 1.5;
+                    ">
+                        ${hasSensitiveData ? `
+                            <div style="
+                                background: #ff6b6b20;
+                                border: 1px solid #ff6b6b;
+                                border-radius: 6px;
+                                padding: 12px;
+                                margin-bottom: 15px;
+                            ">
+                                <p style="margin: 0 0 8px 0; color: #ff6b6b; font-weight: 600;">
+                                    ⚠️ Sensitive Data Detected
+                                </p>
+                                <p style="margin: 0 0 8px 0; font-size: 13px;">
+                                    <strong>Found:</strong> ${detectedTypes.join(', ')}
+                                </p>
+                                <p style="margin: 0; font-size: 13px;">
+                                    <strong>Action:</strong> Will be sanitized before sending to LLM
+                                </p>
+                            </div>
+                        ` : `
+                            <div style="
+                                background: #66bb6a20;
+                                border: 1px solid #66bb6a;
+                                border-radius: 6px;
+                                padding: 12px;
+                                margin-bottom: 15px;
+                            ">
+                                <p style="margin: 0; color: #66bb6a; font-weight: 600;">
+                                    ✅ No Sensitive Data Detected
+                                </p>
+                            </div>
+                        `}
+                        
+                        <p style="margin: 0 0 10px 0;"><strong>FrogPost automatically sanitizes sensitive data before sending:</strong></p>
+                        <ul style="margin: 0; padding-left: 20px;">
+                            <li>JWT tokens, API keys, and bearer tokens</li>
+                            <li>AWS access keys and secret keys</li>
+                            <li>Database connection strings</li>
+                            <li>Credit card numbers and email addresses</li>
+                            <li>Other common secret patterns</li>
+                        </ul>
+                        <p style="margin: 10px 0 0 0; font-style: italic;">
+                            Sensitive data is replaced with placeholder values like [JWT_TOKEN], [API_KEY], etc.
+                        </p>
+                        
+                        ${sanitizationSummary.hasChanges ? `
+                            <div style="
+                                background: var(--bg-primary);
+                                border: 1px solid var(--border-color);
+                                border-radius: 6px;
+                                padding: 10px;
+                                margin-top: 15px;
+                                font-size: 12px;
+                            ">
+                                <p style="margin: 0 0 8px 0; font-weight: 600;">📊 Sanitization Preview:</p>
+                                <p style="margin: 0 0 5px 0;">Data size: ${sanitizationSummary.totalOriginalSize} → ${sanitizationSummary.totalSanitizedSize} characters</p>
+                                <p style="margin: 0; font-size: 11px; color: var(--text-secondary);">
+                                    ${sanitizationSummary.changes.join(', ')}
+                                </p>
+                            </div>
+                        ` : ''}
+                    </div>
+                </div>
+                
+                <div style="margin-bottom: 20px;">
+                    <h4 style="color: var(--text-primary); margin: 0 0 10px 0; font-size: 16px;">📊 Analysis Process:</h4>
+                    <ol style="margin: 0; padding-left: 20px; color: var(--text-secondary); line-height: 1.6;">
+                        <li>Analyze handler code for DOM XSS vulnerabilities</li>
+                        <li>Examine intercepted messages for security patterns</li>
+                        <li>Generate targeted payloads based on detected vulnerabilities</li>
+                    </ol>
+                </div>
+                
+                <div style="
+                    display: flex;
+                    gap: 15px;
+                    justify-content: flex-end;
+                    margin-top: 25px;
+                ">
+                    <button id="llm-consent-cancel" style="
+                        padding: 10px 20px;
+                        background: var(--bg-secondary);
+                        color: var(--text-primary);
+                        border: 1px solid var(--border-color);
+                        border-radius: 6px;
+                        cursor: pointer;
+                        font-size: 14px;
+                        font-weight: 500;
+                    ">Cancel</button>
+                    <button id="llm-consent-confirm" style="
+                        padding: 10px 20px;
+                        background: var(--accent-primary);
+                        color: #111;
+                        border: none;
+                        border-radius: 6px;
+                        cursor: pointer;
+                        font-size: 14px;
+                        font-weight: 600;
+                    ">Proceed with Analysis</button>
+                </div>
+            </div>
+        </div>
+    `;
+    
+    // Add popup to DOM
+    document.body.insertAdjacentHTML('beforeend', popupHTML);
+    
+    // Add event listeners
+    document.getElementById('llm-consent-cancel').addEventListener('click', () => {
+        document.getElementById('llm-consent-overlay').remove();
+        onCancel();
+    });
+    
+    document.getElementById('llm-consent-confirm').addEventListener('click', () => {
+        document.getElementById('llm-consent-overlay').remove();
+        onConfirm();
+    });
+    
+    // Close on overlay click
+    document.getElementById('llm-consent-overlay').addEventListener('click', (e) => {
+        if (e.target.id === 'llm-consent-overlay') {
+            document.getElementById('llm-consent-overlay').remove();
+            onCancel();
+        }
+    });
+}
+
+function parseLLMResponse(response) {
+    try {
+        // Remove markdown code blocks if present
+        let cleanResponse = response.trim();
+        if (cleanResponse.startsWith('```json')) {
+            cleanResponse = cleanResponse.replace(/^```json\s*/, '').replace(/\s*```$/, '');
+        } else if (cleanResponse.startsWith('```')) {
+            cleanResponse = cleanResponse.replace(/^```\s*/, '').replace(/\s*```$/, '');
+        }
+        
+        return JSON.parse(cleanResponse);
+    } catch (error) {
+        console.error('Failed to parse LLM response as JSON:', error);
+        console.log('Raw response:', response);
+        
+        // Return a fallback structure if JSON parsing fails
+        return {
+            error: 'Failed to parse LLM response',
+            rawResponse: response,
+            analysis: 'The LLM response could not be parsed as valid JSON. Please check the response format.'
+        };
+    }
+}
+
+class LLMAnalyzer {
+    constructor() {
+        this.providers = {
+            'openai': {
+                name: 'OpenAI',
+                models: [
+                    'gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo', 'gpt-4', 'gpt-3.5-turbo',
+                    'gpt-4o-2024-08-06', 'gpt-4-turbo-2024-04-09', 'gpt-4-0613',
+                    'gpt-3.5-turbo-1106', 'gpt-3.5-turbo-0613', 'gpt-3.5-turbo-16k'
+                ],
+                baseUrl: 'https://api.openai.com/v1/chat/completions',
+                headers: (apiKey) => ({
+                    'Authorization': `Bearer ${apiKey}`,
+                    'Content-Type': 'application/json'
+                })
+            },
+            'anthropic': {
+                name: 'Anthropic',
+                models: [
+                    'claude-3-5-sonnet-20241022', 'claude-3-5-haiku-20241022', 
+                    'claude-3-opus-20240229', 'claude-3-sonnet-20240229',
+                    'claude-3-haiku-20240307', 'claude-2.1', 'claude-2.0'
+                ],
+                baseUrl: 'https://api.anthropic.com/v1/messages',
+                headers: (apiKey) => ({
+                    'x-api-key': apiKey,
+                    'Content-Type': 'application/json',
+                    'anthropic-version': '2023-06-01'
+                })
+            },
+            'groq': {
+                name: 'Groq',
+                models: [
+                    'llama-3.1-70b-versatile', 'llama-3.1-8b-instant', 'mixtral-8x7b-32768',
+                    'llama-3-70b-8192', 'llama-3-8b-8192', 'gemma-7b-it', 'gemma-2-9b-it',
+                    'llama-2-70b-4096', 'llama-2-13b-chat', 'llama-2-7b-chat'
+                ],
+                baseUrl: 'https://api.groq.com/openai/v1/chat/completions',
+                headers: (apiKey) => ({
+                    'Authorization': `Bearer ${apiKey}`,
+                    'Content-Type': 'application/json'
+                })
+            },
+            'mistral': {
+                name: 'Mistral',
+                models: [
+                    'mistral-large-latest', 'mistral-medium-latest', 'open-mixtral-8x7b',
+                    'mistral-small-latest', 'mistral-7b-instruct', 'mistral-tiny'
+                ],
+                baseUrl: 'https://api.mistral.ai/v1/chat/completions',
+                headers: (apiKey) => ({
+                    'Authorization': `Bearer ${apiKey}`,
+                    'Content-Type': 'application/json'
+                })
+            },
+            'google': {
+                name: 'Google',
+                models: [
+                    'gemini-1.5-pro', 'gemini-1.5-flash', 'gemini-1.0-pro',
+                    'gemini-1.5-pro-latest', 'gemini-1.5-flash-latest'
+                ],
+                baseUrl: 'https://generativelanguage.googleapis.com/v1beta/models',
+                headers: (apiKey) => ({
+                    'x-goog-api-key': apiKey,
+                    'Content-Type': 'application/json'
+                })
+            },
+            'cohere': {
+                name: 'Cohere',
+                models: [
+                    'command-r-plus', 'command-r', 'command', 'command-light',
+                    'command-nightly', 'command-light-nightly'
+                ],
+                baseUrl: 'https://api.cohere.ai/v1/chat',
+                headers: (apiKey) => ({
+                    'Authorization': `Bearer ${apiKey}`,
+                    'Content-Type': 'application/json'
+                })
+            },
+            'perplexity': {
+                name: 'Perplexity',
+                models: [
+                    'llama-3.1-sonar-small-128k-online', 'llama-3.1-sonar-large-128k-online',
+                    'llama-3.1-sonar-huge-128k-online', 'llama-3.1-sonar-small-128k-chat',
+                    'llama-3.1-sonar-large-128k-chat', 'llama-3.1-sonar-huge-128k-chat'
+                ],
+                baseUrl: 'https://api.perplexity.ai/chat/completions',
+                headers: (apiKey) => ({
+                    'Authorization': `Bearer ${apiKey}`,
+                    'Content-Type': 'application/json'
+                })
+            },
+            'together': {
+                name: 'Together AI',
+                models: [
+                    'meta-llama/Llama-2-70b-chat-hf', 'meta-llama/Llama-2-13b-chat-hf',
+                    'meta-llama/Llama-2-7b-chat-hf', 'mistralai/Mistral-7B-Instruct-v0.1',
+                    'mistralai/Mixtral-8x7B-Instruct-v0.1', 'codellama/CodeLlama-34b-Instruct-hf',
+                    'WizardLM/WizardCoder-15B-V1.0', 'NousResearch/Nous-Hermes-2-Mixtral-8x7B-DPO'
+                ],
+                baseUrl: 'https://api.together.xyz/v1/chat/completions',
+                headers: (apiKey) => ({
+                    'Authorization': `Bearer ${apiKey}`,
+                    'Content-Type': 'application/json'
+                })
+            },
+            'replicate': {
+                name: 'Replicate',
+                models: [
+                    'meta/llama-2-70b-chat', 'meta/llama-2-13b-chat', 'meta/llama-2-7b-chat',
+                    'mistralai/mistral-7b-instruct-v0.1', 'mistralai/mixtral-8x7b-instruct-v0.1',
+                    'codellama/codellama-34b-instruct', 'wizardlm/wizardcoder-15b-v1.0'
+                ],
+                baseUrl: 'https://api.replicate.com/v1/predictions',
+                headers: (apiKey) => ({
+                    'Authorization': `Token ${apiKey}`,
+                    'Content-Type': 'application/json'
+                })
+            },
+            'huggingface': {
+                name: 'Hugging Face',
+                models: [
+                    'microsoft/DialoGPT-large', 'microsoft/DialoGPT-medium', 'microsoft/DialoGPT-small',
+                    'facebook/blenderbot-400M-distill', 'facebook/blenderbot-1B-distill',
+                    'microsoft/DialoGPT-medium', 'google/flan-t5-large', 'google/flan-t5-xl'
+                ],
+                baseUrl: 'https://api-inference.huggingface.co/models',
+                headers: (apiKey) => ({
+                    'Authorization': `Bearer ${apiKey}`,
+                    'Content-Type': 'application/json'
+                })
+            },
+            'deepseek': {
+                name: 'DeepSeek',
+                models: [
+                    'deepseek-chat', 'deepseek-coder', 'deepseek-coder-6.7b-instruct',
+                    'deepseek-coder-33b-instruct', 'deepseek-llm-7b-chat', 'deepseek-llm-67b-chat'
+                ],
+                baseUrl: 'https://api.deepseek.com/v1/chat/completions',
+                headers: (apiKey) => ({
+                    'Authorization': `Bearer ${apiKey}`,
+                    'Content-Type': 'application/json'
+                })
+            },
+            'qwen': {
+                name: 'Qwen (Alibaba)',
+                models: [
+                    'qwen-turbo', 'qwen-plus', 'qwen-max', 'qwen-long',
+                    'qwen-72b-chat', 'qwen-14b-chat', 'qwen-7b-chat'
+                ],
+                baseUrl: 'https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation',
+                headers: (apiKey) => ({
+                    'Authorization': `Bearer ${apiKey}`,
+                    'Content-Type': 'application/json'
+                })
+            },
+            'moonshot': {
+                name: 'Moonshot AI',
+                models: [
+                    'moonshot-v1-8k', 'moonshot-v1-32k', 'moonshot-v1-128k',
+                    'moonshot-v1-8k-2024-03-01', 'moonshot-v1-32k-2024-03-01'
+                ],
+                baseUrl: 'https://api.moonshot.cn/v1/chat/completions',
+                headers: (apiKey) => ({
+                    'Authorization': `Bearer ${apiKey}`,
+                    'Content-Type': 'application/json'
+                })
+            },
+            'zhipu': {
+                name: 'Zhipu AI (GLM)',
+                models: [
+                    'glm-4', 'glm-4v', 'glm-3-turbo', 'glm-3-turbo-128k',
+                    'glm-3-6b', 'glm-3-6b-32k', 'glm-3-6b-128k'
+                ],
+                baseUrl: 'https://open.bigmodel.cn/api/paas/v4/chat/completions',
+                headers: (apiKey) => ({
+                    'Authorization': `Bearer ${apiKey}`,
+                    'Content-Type': 'application/json'
+                })
+            },
+            'baichuan': {
+                name: 'Baichuan AI',
+                models: [
+                    'Baichuan2-Turbo', 'Baichuan2-Turbo-192k', 'Baichuan2-53B',
+                    'Baichuan2-13B-Chat', 'Baichuan2-7B-Chat', 'Baichuan2-13B'
+                ],
+                baseUrl: 'https://api.baichuan-ai.com/v1/chat/completions',
+                headers: (apiKey) => ({
+                    'Authorization': `Bearer ${apiKey}`,
+                    'Content-Type': 'application/json'
+                })
+            },
+            'local': {
+                name: 'Local/OpenAI Compatible',
+                models: [
+                    'llama-3.1-70b', 'llama-3.1-8b', 'mixtral-8x7b', 'codellama-34b',
+                    'wizardcoder-15b', 'vicuna-13b', 'alpaca-13b', 'dolphin-2.6-mistral-7b'
+                ],
+                baseUrl: 'http://localhost:11434/v1/chat/completions', // Default Ollama
+                headers: (apiKey) => ({
+                    'Authorization': `Bearer ${apiKey || 'ollama'}`,
+                    'Content-Type': 'application/json'
+                })
+            }
+        };
+    }
+
+    async analyzeHandler(provider, model, apiKey, handlerCode) {
+        try {
+            const response = await fetch('http://localhost:1337/llm/analyze-handler', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    provider,
+                    model,
+                    apiKey,
+                    context: {
+                        handlerCode
+                    }
+                })
+            });
+
+            if (!response.ok) {
+                throw new Error(`Server request failed: ${response.status} ${response.statusText}`);
+            }
+
+            const result = await response.json();
+            if (!result.ok) {
+                throw new Error(result.error || 'Server returned error');
+            }
+
+            // Return the analysis data as JSON string
+            return JSON.stringify({
+                handler_assessment: result.handler_assessment || result.analysis || 'No analysis provided',
+                security_assessment: result.handler_assessment || result.analysis || 'No analysis provided',
+                handler_score: result.handler_score || result.accuracy_score || 0,
+                risk_score: result.handler_score || result.accuracy_score || 0,
+                dom_xss_sinks: result.dom_xss_sinks || [],
+                prototype_pollution: (result.prototype_pollution_sinks || []).length > 0,
+                risks: result.risks || [],
+                recommendations: result.recommendations || []
+            });
+        } catch (error) {
+            console.error('Handler analysis error:', error);
+            throw error;
+        }
+    }
+
+    async analyzeMessages(provider, model, apiKey, messages) {
+        try {
+            const response = await fetch('http://localhost:1337/llm/analyze-messages', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    provider,
+                    model,
+                    apiKey,
+                    context: {
+                        observedMessages: messages
+                    }
+                })
+            });
+
+            if (!response.ok) {
+                throw new Error(`Server request failed: ${response.status} ${response.statusText}`);
+            }
+
+            const result = await response.json();
+            if (!result.ok) {
+                throw new Error(result.error || 'Server returned error');
+            }
+
+            // Return the analysis data as JSON string
+            return JSON.stringify({
+                message_analysis: result.analysis || 'No analysis provided',
+                suspicious_patterns: result.suspicious_patterns || [],
+                security_concerns: result.security_concerns || [],
+                risk_level: result.risk_level || 'low'
+            });
+        } catch (error) {
+            console.error('Message analysis error:', error);
+            throw error;
+        }
+    }
+
+    async generatePayloads(provider, model, apiKey, handlerCode, messages, handlerAnalysis = null) {
+        try {
+            let sinks = [];
+            
+            if (handlerAnalysis && handlerAnalysis.dom_xss_sinks) {
+                // Use the already analyzed handler data
+                sinks = handlerAnalysis.dom_xss_sinks;
+                console.log('🎯 [Payload Generation] Using existing handler analysis, sinks:', sinks);
+            } else {
+                // Fallback: get handler analysis if not provided
+                console.log('🎯 [Payload Generation] Getting fresh handler analysis...');
+                const handlerResponse = await fetch('http://localhost:1337/llm/analyze-handler', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        provider,
+                        model,
+                        apiKey,
+                        context: {
+                            handlerCode
+                        }
+                    })
+                });
+
+                if (!handlerResponse.ok) {
+                    throw new Error(`Handler analysis failed: ${handlerResponse.status} ${handlerResponse.statusText}`);
+                }
+
+                const handlerResult = await handlerResponse.json();
+                if (!handlerResult.ok) {
+                    throw new Error(handlerResult.error || 'Handler analysis returned error');
+                }
+
+                sinks = handlerResult.dom_xss_sinks || [];
+            }
+            
+            if (sinks.length === 0) {
+                // No sinks found, return empty payloads
+                console.log('🎯 [Payload Generation] No sinks found, returning empty payloads');
+                return JSON.stringify({
+                    payloads_generated: false,
+                    xss_payloads: [],
+                    prototype_pollution_payloads: [],
+                    explanation: "No DOM XSS sinks or prototype pollution vulnerabilities found in the handler code."
+                });
+            }
+
+            // Generate payloads using the server endpoint
+            console.log('🎯 [Payload Generation] Sending request with:', {
+                provider,
+                model,
+                context: {
+                    handlerCode: handlerCode.substring(0, 100) + '...',
+                    observedMessages: messages.length,
+                    sinks: sinks.length
+                }
+            });
+            
+            const response = await fetch('http://localhost:1337/llm/analyze', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    provider,
+                    model,
+                    apiKey,
+                    context: {
+                        handlerCode,
+                        observedMessages: messages,
+                        sinks: sinks
+                    }
+                })
+            });
+
+            if (!response.ok) {
+                throw new Error(`Server request failed: ${response.status} ${response.statusText}`);
+            }
+
+            const result = await response.json();
+            if (!result.ok) {
+                throw new Error(result.error || 'Server returned error');
+            }
+
+            // Return the payload data as JSON string
+            return JSON.stringify({
+                payloads_generated: result.newPayloadsCount > 0,
+                xss_payloads: result.newPayloads || [],
+                prototype_pollution_payloads: [], // Server doesn't distinguish between types
+                explanation: result.explanation || 'Payloads generated based on detected sinks'
+            });
+        } catch (error) {
+            console.error('Payload generation error:', error);
+            throw error;
+        }
+    }
+
+    async makeRequest(config, model, apiKey, prompt) {
+        const headers = config.headers(apiKey);
+        let requestBody;
+        let responseUrl = config.baseUrl;
+
+        // Handle different API formats
+        if (config.name === 'Anthropic') {
+            requestBody = {
+                model: model,
+                max_tokens: 4000,
+                messages: [{ role: 'user', content: prompt }]
+            };
+        } else if (config.name === 'Google') {
+            responseUrl = `${config.baseUrl}/${model}:generateContent`;
+            requestBody = {
+                contents: [{
+                    parts: [{ text: prompt }]
+                }],
+                generationConfig: {
+                    temperature: 0.1,
+                    maxOutputTokens: 4000
+                }
+            };
+        } else if (config.name === 'Cohere') {
+            requestBody = {
+                model: model,
+                message: prompt,
+                max_tokens: 4000,
+                temperature: 0.1
+            };
+        } else if (config.name === 'Hugging Face') {
+            responseUrl = `${config.baseUrl}/${model}`;
+            requestBody = {
+                inputs: prompt,
+                parameters: {
+                    max_new_tokens: 4000,
+                    temperature: 0.1
+                }
+            };
+        } else if (config.name === 'Replicate') {
+            requestBody = {
+                version: model,
+                input: {
+                    prompt: prompt,
+                    max_length: 4000,
+                    temperature: 0.1
+                }
+            };
+        } else if (config.name === 'Qwen (Alibaba)') {
+            requestBody = {
+                model: model,
+                input: {
+                    messages: [{ role: 'user', content: prompt }]
+                },
+                parameters: {
+                    max_tokens: 4000,
+                    temperature: 0.1
+                }
+            };
+        } else if (config.name === 'Zhipu AI (GLM)') {
+            requestBody = {
+                model: model,
+                messages: [{ role: 'user', content: prompt }],
+                max_tokens: 4000,
+                temperature: 0.1
+            };
+        } else if (config.name === 'Baichuan AI') {
+            requestBody = {
+                model: model,
+                messages: [{ role: 'user', content: prompt }],
+                max_tokens: 4000,
+                temperature: 0.1
+            };
+        } else {
+            // OpenAI-compatible format (OpenAI, Groq, Mistral, Perplexity, Together, DeepSeek, Moonshot, Local)
+            requestBody = {
+                model: model,
+                messages: [{ role: 'user', content: prompt }],
+                max_tokens: 4000,
+                temperature: 0.1
+            };
+        }
+
+        const response = await fetch(responseUrl, {
+            method: 'POST',
+            headers: headers,
+            body: JSON.stringify(requestBody)
+        });
+
+        if (!response.ok) {
+            throw new Error(`API request failed: ${response.status} ${response.statusText}`);
+        }
+
+        const data = await response.json();
+        
+        // Handle different response formats
+        if (config.name === 'Anthropic') {
+            return data.content[0].text;
+        } else if (config.name === 'Google') {
+            return data.candidates[0].content.parts[0].text;
+        } else if (config.name === 'Cohere') {
+            return data.text;
+        } else if (config.name === 'Hugging Face') {
+            return data[0].generated_text;
+        } else if (config.name === 'Replicate') {
+            return data.output;
+        } else if (config.name === 'Qwen (Alibaba)') {
+            return data.output.text;
+        } else if (config.name === 'Zhipu AI (GLM)') {
+            return data.choices[0].message.content;
+        } else if (config.name === 'Baichuan AI') {
+            return data.choices[0].message.content;
+        } else {
+            // OpenAI-compatible response format
+            return data.choices[0].message.content;
+        }
+    }
+}
+
+function createLLMAnalysisSection(analysisStorageKey, endpointDisplay) {
+    const llmSection = document.createElement('div');
+    llmSection.className = 'report-section report-llm';
+    llmSection.innerHTML = `
+        <h4 class="report-section-title">🤖 LLM Security Analysis</h4>
+        <div class="llm-config">
+            <div class="llm-provider-selector">
+                <label for="llm-provider">🔧 Provider:</label>
+                <select id="llm-provider" class="llm-select">
+                    <option value="openai">OpenAI</option>
+                    <option value="anthropic">Anthropic</option>
+                    <option value="groq">Groq</option>
+                    <option value="mistral">Mistral</option>
+                    <option value="google">Google (Gemini)</option>
+                    <option value="cohere">Cohere</option>
+                    <option value="perplexity">Perplexity</option>
+                    <option value="together">Together AI</option>
+                    <option value="replicate">Replicate</option>
+                    <option value="huggingface">Hugging Face</option>
+                    <option value="deepseek">DeepSeek</option>
+                    <option value="qwen">Qwen (Alibaba)</option>
+                    <option value="moonshot">Moonshot AI</option>
+                    <option value="zhipu">Zhipu AI (GLM)</option>
+                    <option value="baichuan">Baichuan AI</option>
+                    <option value="local">Local/OpenAI Compatible</option>
+                </select>
+            </div>
+            <div class="llm-model-selector">
+                <label for="llm-model">🧠 Model:</label>
+                <select id="llm-model" class="llm-select">
+                    <option value="gpt-4o">GPT-4o</option>
+                    <option value="gpt-4o-mini">GPT-4o Mini</option>
+                    <option value="gpt-3.5-turbo">GPT-3.5 Turbo</option>
+                </select>
+            </div>
+            <div class="llm-api-key">
+                <label for="llm-api-key">🔑 API Key:</label>
+                <input type="password" id="llm-api-key" class="llm-input" placeholder="Enter your API key">
+            </div>
+            <div class="llm-save-button">
+                <button id="save-api-key" class="llm-button">💾 Save</button>
+            </div>
+            <div class="llm-actions">
+                <button id="analyze-llm" class="llm-analyze-button" disabled>🚀 Analyze using LLM</button>
+                <div id="llm-status" class="llm-status"></div>
+            </div>
+        </div>
+    `;
+
+    // Store the analysisStorageKey for later use
+    llmSection.dataset.analysisKey = analysisStorageKey;
+    
+    return llmSection;
+}
+
+function setupLLMEventListeners(analysisStorageKey) {
+    // Use setTimeout to ensure DOM elements are available
+    setTimeout(() => {
+        const providerSelect = document.getElementById('llm-provider');
+        const modelSelect = document.getElementById('llm-model');
+        const apiKeyInput = document.getElementById('llm-api-key');
+        const saveButton = document.getElementById('save-api-key');
+        const analyzeButton = document.getElementById('analyze-llm');
+        if (!providerSelect || !modelSelect || !apiKeyInput || !saveButton || !analyzeButton) {
+            console.warn('LLM elements not found, retrying...');
+            setupLLMEventListeners(analysisStorageKey);
+            return;
+        }
+
+        // Load saved API key
+        loadSavedAPIKey();
+
+        // Provider change handler
+        providerSelect.addEventListener('change', updateModelOptions);
+        
+        // Save API key handler
+        saveButton.addEventListener('click', saveAPIKey);
+        
+        // Analyze button handler
+        analyzeButton.addEventListener('click', () => performLLMAnalysis(analysisStorageKey));
+    }, 100);
+}
+
+function updateModelOptions() {
+    const provider = document.getElementById('llm-provider').value;
+    const modelSelect = document.getElementById('llm-model');
+    
+    const analyzer = new LLMAnalyzer();
+    const models = analyzer.providers[provider]?.models || [];
+    
+    modelSelect.innerHTML = models.map(model => 
+        `<option value="${model}">${model}</option>`
+    ).join('');
+}
+
+async function loadSavedAPIKey() {
+    try {
+        const result = await chrome.storage.local.get(['llm_api_key']);
+        if (result.llm_api_key) {
+            document.getElementById('llm-api-key').value = result.llm_api_key;
+            document.getElementById('analyze-llm').disabled = false;
+        }
+    } catch (error) {
+        console.error('Error loading API key:', error);
+    }
+}
+
+async function saveAPIKey() {
+    const apiKey = document.getElementById('llm-api-key').value.trim();
+    if (!apiKey) {
+        alert('Please enter an API key');
+        return;
+    }
+    
+    try {
+        await chrome.storage.local.set({ llm_api_key: apiKey });
+        document.getElementById('analyze-llm').disabled = false;
+        updateLLMStatus('API key saved successfully', 'success');
+    } catch (error) {
+        console.error('Error saving API key:', error);
+        updateLLMStatus('Error saving API key', 'error');
+    }
+}
+
+async function performLLMAnalysis(analysisStorageKey) {
+    const provider = document.getElementById('llm-provider').value;
+    const model = document.getElementById('llm-model').value;
+    const apiKey = document.getElementById('llm-api-key').value.trim();
+    
+    if (!apiKey) {
+        alert('Please enter and save your API key first');
+        return;
+    }
+    
+    const analyzer = new LLMAnalyzer();
+    const statusEl = document.getElementById('llm-status');
+    
+    try {
+        updateLLMStatus('Preparing analysis...', 'info');
+        
+        // Get handler code
+        const reportData = await getReportData(analysisStorageKey);
+        if (!reportData) {
+            throw new Error('No report data found');
+        }
+        
+        const details = reportData.details || {};
+        const bestHandler = details.bestHandler || details.analyzedHandler || reportData.bestHandler || reportData.analyzedHandler;
+        const handlerCode = bestHandler?.handler || bestHandler?.code || '';
+        
+        if (!handlerCode) {
+            throw new Error('No handler code found for analysis');
+        }
+        
+        // Get messages (max 3 from each unique structure)
+        const messages = await getMessagesForAnalysis(analysisStorageKey);
+        
+        // Show consent popup
+        showLLMConsentPopup(handlerCode, messages, async () => {
+            await executeLLMAnalysis(analyzer, provider, model, apiKey, handlerCode, messages, analysisStorageKey);
+        }, () => {
+            updateLLMStatus('Analysis cancelled by user', 'info');
+        });
+        
+    } catch (error) {
+        console.error('LLM analysis error:', error);
+        updateLLMStatus(`Analysis failed: ${error.message}`, 'error');
+    }
+}
+
+async function executeLLMAnalysis(analyzer, provider, model, apiKey, handlerCode, messages, analysisStorageKey) {
+    try {
+        updateLLMStatus('Starting LLM analysis...', 'info');
+        
+        // Sanitize messages before sending to LLM
+        const sanitizedMessages = sanitizeMessagesForLLM(messages);
+        console.log('🔒 [Sanitization] Sanitized messages for LLM:', sanitizedMessages);
+        
+        // Step 1: Analyze handler
+        updateLLMStatus('Step 1/3: Analyzing handler...', 'info');
+        const handlerAnalysis = await analyzer.analyzeHandler(provider, model, apiKey, handlerCode);
+        const parsedHandlerAnalysis = parseLLMResponse(handlerAnalysis);
+        
+        updateHandlerWithLLMAnalysis(parsedHandlerAnalysis);
+        
+        // Save LLM analysis to report data for persistence
+        await saveLLMAnalysisToReport(analysisStorageKey, parsedHandlerAnalysis);
+        
+        // Step 2: Analyze messages
+        updateLLMStatus('Step 2/3: Analyzing messages...', 'info');
+        const messageAnalysis = await analyzer.analyzeMessages(provider, model, apiKey, sanitizedMessages);
+        const parsedMessageAnalysis = parseLLMResponse(messageAnalysis);
+        
+        // Step 3: Generate payloads
+        updateLLMStatus('Step 3/3: Generating payloads...', 'info');
+        const payloadAnalysis = await analyzer.generatePayloads(provider, model, apiKey, handlerCode, sanitizedMessages, parsedHandlerAnalysis);
+        const parsedPayloadAnalysis = parseLLMResponse(payloadAnalysis);
+        updatePayloadsWithLLM(parsedPayloadAnalysis, analysisStorageKey);
+        
+        updateLLMStatus('LLM analysis completed successfully!', 'success');
+        
+    } catch (error) {
+        console.error('LLM analysis error:', error);
+        updateLLMStatus(`Analysis failed: ${error.message}`, 'error');
+    }
+}
+
+async function getReportData(analysisStorageKey) {
+    try {
+        // Use the same method as the dashboard to get report data from IndexedDB
+        const reportData = await window.traceReportStorage.getTraceReport(analysisStorageKey);
+        
+        if (!reportData) {
+            console.error('No report data found for key:', analysisStorageKey);
+            return null;
+        }
+        
+        // Debug: Log the structure to understand what we have
+        console.log('Report data structure:', {
+            hasDetails: !!reportData.details,
+            hasBestHandler: !!reportData.details?.bestHandler,
+            hasAnalyzedHandler: !!reportData.details?.analyzedHandler,
+            bestHandlerKeys: reportData.details?.bestHandler ? Object.keys(reportData.details.bestHandler) : [],
+            analyzedHandlerKeys: reportData.details?.analyzedHandler ? Object.keys(reportData.details.analyzedHandler) : []
+        });
+        
+        return reportData;
+    } catch (error) {
+        console.error('Error getting report data:', error);
+        return null;
+    }
+}
+
+async function getMessagesForAnalysis(analysisStorageKey) {
+    try {
+        const messages = (window.frogPostState?.messages || []).filter(msg => {
+            const k = analysisStorageKey;
+            const o = msg.origin ? getStorageKeyForUrl(msg.origin) : null;
+            const d = msg.destinationUrl ? getStorageKeyForUrl(msg.destinationUrl) : null;
+            const isTest = (typeof msg.data === 'object' && msg.data !== null && Object.prototype.hasOwnProperty.call(msg.data, 'FrogPost') && msg.data['FrogPost'] === 'BreakpointTest');
+            return !isTest && (o === k || d === k);
+        });
+        
+        // Group by structure and take max 3 from each
+        const structureGroups = {};
+        messages.forEach(msg => {
+            const structure = JSON.stringify(msg.data);
+            if (!structureGroups[structure]) {
+                structureGroups[structure] = [];
+            }
+            if (structureGroups[structure].length < 3) {
+                structureGroups[structure].push(msg);
+            }
+        });
+        
+        return Object.values(structureGroups).flat();
+    } catch (error) {
+        console.error('Error getting messages:', error);
+        return [];
+    }
+}
+
+
+function updateLLMStatus(message, type) {
+    const statusEl = document.getElementById('llm-status');
+    statusEl.textContent = message;
+    statusEl.className = `llm-status ${type}`;
+}
+
+function updateHandlerWithLLMAnalysis(analysis) {
+    const handlerSection = document.querySelector('.report-handler');
+    if (!handlerSection) return;
+
+    const summaryElement = handlerSection.querySelector('.handler-meta');
+    if (summaryElement && !analysis.error) {
+        const riskScore = analysis.risk_score || analysis.handler_score || 0;
+        const riskColor = riskScore >= 70 ? '#ff6b6b' : riskScore >= 40 ? '#ffa726' : '#66bb6a';
+        
+        const originalText = summaryElement.textContent;
+        summaryElement.innerHTML = `${originalText} | <span style="color: ${riskColor};">LLM Score: ${riskScore}/100</span>`;
+        
+        const codeBlock = handlerSection.querySelector('.handler-code');
+        if (codeBlock) {
+            const assessment = analysis.security_assessment || analysis.handler_assessment || 'No assessment provided';
+            const riskScore = analysis.risk_score || analysis.handler_score || 0;
+            
+            let llmSummary = `
+                <div style="margin-top: 15px; padding: 12px; background: var(--bg-primary); border-radius: 6px; border: 1px solid var(--border-color);">
+                    <h6 style="margin: 0 0 8px 0; color: var(--accent-primary); font-size: 13px;">🤖 LLM Handler Summary</h6>
+                    <p style="margin: 4px 0; font-size: 12px;"><strong>Security Assessment:</strong> ${assessment}</p>
+                    <p style="margin: 4px 0; font-size: 12px;"><strong>Risk Score:</strong> ${riskScore}/100</p>
+            `;
+            
+            if (analysis.dom_xss_sinks && analysis.dom_xss_sinks.length > 0) {
+                const sinksText = Array.isArray(analysis.dom_xss_sinks) 
+                    ? analysis.dom_xss_sinks.map(sink => typeof sink === 'object' ? sink.sink || sink.type : sink).join(', ')
+                    : analysis.dom_xss_sinks;
+                llmSummary += `<p style="margin: 4px 0; font-size: 12px;"><strong>DOM XSS Sinks:</strong> ${sinksText}</p>`;
+            }
+            
+            if (analysis.prototype_pollution) {
+                llmSummary += `<p style="margin: 4px 0; font-size: 12px; color: #ff6b6b;"><strong>⚠️ Prototype Pollution Risk Detected</strong></p>`;
+            }
+            
+            if (analysis.recommendations && analysis.recommendations.length > 0) {
+                llmSummary += `<p style="margin: 4px 0; font-size: 12px;"><strong>Recommendations:</strong> ${analysis.recommendations.join('; ')}</p>`;
+            }
+            
+            llmSummary += `</div>`;
+            codeBlock.insertAdjacentHTML('afterend', llmSummary);
+        }
+    }
+}
+
+async function saveLLMAnalysisToReport(analysisStorageKey, llmAnalysis) {
+    try {
+        const reportData = await window.traceReportStorage.getTraceReport(analysisStorageKey);
+        if (reportData) {
+            if (!reportData.llmAnalysis) {
+                reportData.llmAnalysis = {};
+            }
+            reportData.llmAnalysis.handlerAnalysis = llmAnalysis;
+            await window.traceReportStorage.saveTraceReport(analysisStorageKey, reportData);
+            console.log('💾 [LLM Analysis] Saved handler analysis to report data');
+        }
+    } catch (error) {
+        console.error('Error saving LLM analysis to report:', error);
+    }
+}
+
+async function updatePayloadsWithLLM(payloadAnalysis, analysisStorageKey) {
+    if (!payloadAnalysis.payloads_generated || payloadAnalysis.error) {
+        return;
+    }
+
+    try {
+        // Get existing payloads from storage
+        const existingPayloads = await window.traceReportStorage.getReportPayloads(analysisStorageKey) || [];
+        
+        // Add LLM-generated payloads
+        const llmPayloads = [
+            ...(payloadAnalysis.xss_payloads || []),
+            ...(payloadAnalysis.prototype_pollution_payloads || [])
+        ];
+        
+        if (llmPayloads.length > 0) {
+            // Save updated payloads to storage
+            const updatedPayloads = [...existingPayloads, ...llmPayloads];
+            await window.traceReportStorage.saveReportPayloads(analysisStorageKey, updatedPayloads);
+            
+            // Store LLM payload count for persistence
+            await window.traceReportStorage.saveLLMPayloadCount(analysisStorageKey, llmPayloads.length);
+            
+            // Update the payload count display
+            const payloadCountElement = document.querySelector(`[id*="payload-count-display"]`);
+            if (payloadCountElement) {
+                const currentCount = parseInt(payloadCountElement.textContent) || 0;
+                const newCount = currentCount + llmPayloads.length;
+                payloadCountElement.textContent = newCount;
+                
+                // Add LLM indicator
+                const payloadSection = payloadCountElement.closest('.metric');
+                if (payloadSection) {
+                    const existingIndicator = payloadSection.querySelector('.llm-payload-indicator');
+                    if (!existingIndicator) {
+                        const indicator = document.createElement('div');
+                        indicator.className = 'llm-payload-indicator';
+                        indicator.style.cssText = 'font-size: 10px; color: var(--accent-primary); margin-top: 2px;';
+                        indicator.textContent = `+${llmPayloads.length} Added by LLM!`;
+                        payloadCountElement.parentNode.appendChild(indicator);
+                    }
+                }
+            }
+            
+            // Refresh the payloads list if it's currently displayed
+            const payloadsList = document.getElementById('payloads-list');
+            if (payloadsList) {
+                // Trigger a refresh of the payloads display
+                const reportButton = document.querySelector('.iframe-report-button');
+                if (reportButton) {
+                    reportButton.click();
+                }
+            }
+        }
+    } catch (error) {
+        console.error('Error updating payloads with LLM results:', error);
+    }
+}
+
+// ===== Risk badge helpers (for metric cubes) =====
+function getWorstRiskLevel(levelA, levelB) {
+  const order = { 'LOW': 0, 'MEDIUM': 1, 'HIGH': 2, 'CRITICAL': 3 };
+  const a = order[String(levelA || 'LOW').toUpperCase()] ?? 0;
+  const b = order[String(levelB || 'LOW').toUpperCase()] ?? 0;
+  const worst = a >= b ? String(levelA || 'LOW').toUpperCase() : String(levelB || 'LOW').toUpperCase();
+  return worst;
+}
+
+function getRiskBadgeClass(level) {
+  const map = { 'LOW': 'risk-low', 'MEDIUM': 'risk-medium', 'HIGH': 'risk-high', 'CRITICAL': 'risk-critical' };
+  return map[String(level || 'LOW').toUpperCase()] || 'risk-low';
+}
+
+function createRiskBadge(level) {
+  const normalized = String(level || 'LOW').toUpperCase();
+  return `<span class="risk-badge ${getRiskBadgeClass(normalized)}">${normalized}</span>`;
+}
+
+function summarizeTypesFromDetections(sanitizedMessages) {
+  const allTypes = new Set();
+  sanitizedMessages?.forEach(m => {
+    if (m?.detection?.detectedTypes) {
+      m.detection.detectedTypes.forEach(t => allTypes.add(t));
+    }
+  });
+  return Array.from(allTypes);
+}
+
+function computeMessagesRisk(messages) {
+  try {
+    const detector = new SensitiveDataDetector();
+    const analysis = detector.analyzeLLMSafety(messages || []);
+    const types = summarizeTypesFromDetections(analysis.sanitizedMessages);
+    const has = analysis.sensitiveMsgCount > 0;
+    const summary = has
+      ? `Found ${analysis.sensitiveMsgCount}/${analysis.totalMessages} messages with sensitive data (${types.join(', ') || 'types unknown'})`
+      : 'No sensitive data detected in messages';
+    return {
+      level: String(analysis.riskLevel || 'LOW').toUpperCase(),
+      summary,
+      recommendations: analysis.recommendations || []
+    };
+  } catch (e) {
+    return { level: 'LOW', summary: 'Risk analysis unavailable', recommendations: [] };
+  }
+}
+
+function computeStructuresRisk(structures) {
+  try {
+    const detector = new SensitiveDataDetector();
+    let worst = 'LOW';
+    let totalSensitive = 0;
+    const types = new Set();
+    (structures || []).forEach(s => {
+      const example = s?.examples?.[0]?.data ?? s?.examples?.[0] ?? s;
+      const det = detector.detectSensitiveData(example);
+      if (det?.hasSensitiveData) {
+        totalSensitive += 1;
+        worst = getWorstRiskLevel(worst, det.riskLevel);
+        det.detectedTypes?.forEach?.(t => types.add(t));
+      }
+    });
+    const summary = totalSensitive > 0
+      ? `Sensitive indicators in ${totalSensitive}/${(structures || []).length} structures (${Array.from(types).join(', ') || 'types unknown'})`
+      : 'No sensitive indicators in example structures';
+    const recs = totalSensitive > 0 ? ['Review and redact sensitive fields from structure examples'] : [];
+    return { level: String(worst || 'LOW').toUpperCase(), summary, recommendations: recs };
+  } catch {
+    return { level: 'LOW', summary: 'Risk analysis unavailable', recommendations: [] };
+  }
+}
+
+function mapSeverityToRisk(sev) {
+  const s = String(sev || '').toUpperCase();
+  if (s === 'CRITICAL') return 'CRITICAL';
+  if (s === 'HIGH') return 'HIGH';
+  if (s === 'MEDIUM') return 'MEDIUM';
+  if (!s) return 'LOW';
+  return 'LOW';
+}
+
+function computeSeverityArrayRisk(items) {
+  let worst = 'LOW';
+  (items || []).forEach(it => { worst = getWorstRiskLevel(worst, mapSeverityToRisk(it?.severity)); });
+  return String(worst || 'LOW').toUpperCase();
+}
+
+function computeSinksRisk(sinks) {
+  const level = computeSeverityArrayRisk(sinks || []);
+  const summary = (sinks?.length || 0) > 0 ? `Detected ${sinks.length} potential sinks` : 'No sinks detected';
+  const recs = (sinks?.length || 0) > 0 ? ['Validate data paths and sanitize before sink usage'] : [];
+  return { level, summary, recommendations: recs };
+}
+
+function computeIssuesRisk(issues) {
+  const level = computeSeverityArrayRisk(issues || []);
+  const summary = (issues?.length || 0) > 0 ? `${issues.length} security issues reported` : 'No security issues reported';
+  const recs = (issues?.length || 0) > 0 ? ['Prioritize remediation of highest-severity issues'] : [];
+  return { level, summary, recommendations: recs };
+}
+
+function computePayloadsRisk(count) {
+  const summary = `${count} default payloads ready`;
+  const recs = ['Use responsibly in controlled environments'];
+  return { level: 'LOW', summary, recommendations: recs };
+}
 
 function getRecommendationText(score, reportData) { const hasCriticalSink = reportData?.details?.sinks?.some(s => s.severity?.toLowerCase() === 'critical') || false; const hasHighSink = reportData?.details?.sinks?.some(s => s.severity?.toLowerCase() === 'high') || false; const hasHighIssue = reportData?.details?.securityIssues?.some(s => s.severity?.toLowerCase() === 'high') || false; const mediumIssueCount = reportData?.details?.securityIssues?.filter(s => s.severity?.toLowerCase() === 'medium')?.length || 0; if (hasCriticalSink) return 'Immediate attention required. Critical vulnerabilities present. Fix critical sinks (eval, innerHTML, etc.) and implement strict origin/data validation.'; if (score <= 20) return 'Immediate attention required. Security posture is critically weak. Focus on fixing high-risk issues and implementing strict origin/data validation.'; if (hasHighSink || hasHighIssue || score <= 40) return 'Significant risks identified. Implement strict origin checks and sanitize all inputs used in sinks. Consider a Content Security Policy (CSP).'; if (mediumIssueCount >= 3 || score <= 60) return 'Potential vulnerabilities detected. Review security issues (e.g., origin checks, data validation) and ensure data flowing to sinks is safe.'; if (score <= 80) return 'Low risk detected, but review identified issues and follow security best practices (origin/data validation).'; const hasFindings = (reportData?.details?.sinks?.length > 0) || (reportData?.details?.securityIssues?.length > 0); if (hasFindings) return 'Good score, but minor issues or informational findings detected. Review details and ensure best practices are followed.'; return 'Excellent score. Analysis found no major vulnerabilities. Continue to follow security best practices for postMessage handling.'; }
 
@@ -2867,171 +4259,46 @@ function attachReportEventListeners(panel, reportData) { panel.querySelectorAll(
 }
 
 function renderPayloadItem(payloadItem, index) {
-    let displayString = '(Error displaying payload)';
-    const maxDisplayLength = 500;
-    const escapeHTML = window.escapeHTML || function(str) {
-        return String(str ?? '').replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
-    };
-    try {
-        const actualPayloadData = (payloadItem && payloadItem.payload !== undefined) ? payloadItem.payload : payloadItem;
-        if (typeof actualPayloadData === 'object' && actualPayloadData !== null) {
-            const payloadJson = JSON.stringify(actualPayloadData, null, 2);
-            displayString = payloadJson.substring(0, maxDisplayLength) + (payloadJson.length > maxDisplayLength ? '...' : '');
-        } else {
-            const payloadAsString = String(actualPayloadData ?? '');
-            displayString = payloadAsString.substring(0, maxDisplayLength) + (payloadAsString.length > maxDisplayLength ? '...' : '');
-        }
-    } catch (e) {
-        return `<div class="payload-item error" style="padding:10px; border:1px solid var(--accent-secondary); background:rgba(240,113,120,0.1);">Error rendering payload ${index + 1}.</div>`;
+    if (!payloadItem) {
+        return `<div class="payload-item error">Error: Invalid payload data for item ${index + 1}.</div>`;
     }
-    const payloadType = payloadItem?.type || 'unknown';
-    const payloadSource = payloadItem?.baseSource || 'unknown';
-    const payloadDesc = payloadItem?.description || 'N/A';
-    const typeClass = `payload-type-${escapeHTML(payloadType).split('-')[0]}`;
+
+    const actualPayload = payloadItem.payload ?? payloadItem;
+    const payloadJson = typeof actualPayload === 'object' ? JSON.stringify(actualPayload, null, 2) : String(actualPayload);
+    const displayString = payloadJson.substring(0, 300) + (payloadJson.length > 300 ? '...' : '');
+
+    // Determine Source
+    let source = 'unknown';
+    if (payloadItem.source === 'LLM' || payloadItem.generator === 'LLM') {
+        source = 'LLM';
+    } else if (payloadItem.type) {
+        source = 'FrogPost';
+    }
+
+    // Determine Type
+    let type = payloadItem.type || 'unknown';
+    if (source === 'LLM') {
+        type = payloadItem.payload_class || 'AI-Generated';
+    } else {
+        // Clean up FrogPost types
+        type = type.replace(/^(FrogPost|default)-/i, '');
+    }
+
+    const typeClass = `payload-type-${escapeHTML(type).split('-')[0]}`;
 
     return `
-        <div class="payload-item" data-payload-index="${index}" style="background: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: 4px; margin-bottom: 10px; padding: 10px 12px; font-size: 13px;">
-            <div class="payload-meta-info ${typeClass}" style="font-size: 11px; color: var(--text-secondary); margin-bottom: 8px; padding-bottom: 5px; border-bottom: 1px dashed var(--border-color); text-transform: capitalize;">
-                Type: ${escapeHTML(payloadType)} | Source: ${escapeHTML(payloadSource)}
-            </div>
-            <pre class="report-code-block" style="margin: 8px 0; padding: 10px; background: var(--code-bg); border: 1px solid var(--border-color); border-radius: 3px; max-height: 150px; overflow: auto;"><code>${escapeHTML(displayString)}</code></pre>
-            <div class="payload-description" style="font-size: 11px; color: var(--text-muted); margin-top: 8px; font-style: italic;">
-                Desc: ${escapeHTML(payloadDesc)}
-            </div>
-        </div>`;
+        <div class="payload-item" data-payload-index="${index}">
+            <div class="payload-meta ${typeClass}">
+                Type: ${escapeHTML(type)} | Source: ${escapeHTML(source)}
+                    </div>
+            <div class="report-code-block">
+                <pre><code>${escapeHTML(displayString)}</code></pre>
+                </div>
+            ${payloadJson.length > 300 ? `<button class="control-button secondary-button view-full-payload-btn" style="margin: 0 12px 12px;">View Full Payload</button>` : ''}
+            </div>`;
 }
 
-
-function updateExistingReportWithLLM(llmAnalysisData) {
-    console.log('🤖 [LLM Update] Updating existing report sections with LLM analysis');
-    
-    const escapeHTML = window.escapeHTML || function(str) { 
-        return String(str ?? '').replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;"); 
-    };
-
-    const handlerSection = document.querySelector('.report-handler');
-    console.log('🤖 [Debug] Handler section found:', !!handlerSection);
-    console.log('🤖 [Debug] LLM data:', {
-        handler_score: llmAnalysisData.handler_score,
-        handler_assessment: llmAnalysisData.handler_assessment ? 'present' : 'missing',
-        newPayloadsCount: llmAnalysisData.newPayloadsCount
-    });
-    
-    if (handlerSection && (llmAnalysisData.handler_score !== undefined || llmAnalysisData.handler_assessment)) {
-        const existingValidation = handlerSection.querySelector('.llm-handler-validation');
-        if (existingValidation) {
-            existingValidation.remove();
-        }
-
-        const score = llmAnalysisData.handler_score || 0;
-        const scoreColor = score >= 80 ? '#4CAF50' : score >= 60 ? '#FF9800' : score >= 40 ? '#FF5722' : '#f44336';
-        const scoreDescription = score >= 80 ? 'Excellent handler detection' : 
-                              score >= 60 ? 'Good handler detection' : 
-                              score >= 40 ? 'Partial handler detection' : 'Poor/incomplete handler';
-
-        const validationHTML = `
-            <div class="llm-handler-validation" style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; padding: 12px; margin-top: 12px;">
-                <div style="display: flex; align-items: center; margin-bottom: 8px;">
-                    <span style="font-size: 14px; margin-right: 6px;">🤖</span>
-                    <strong style="color: #2d3748; font-size: 13px;">AI Handler Validation</strong>
-                </div>
-                ${llmAnalysisData.handler_assessment ? `<div style="font-size: 12px; line-height: 1.4; color: #4a5568; margin-bottom: 8px;">${escapeHTML(llmAnalysisData.handler_assessment)}</div>` : ''}
-                ${llmAnalysisData.handler_score !== undefined ? `
-                    <div style="margin-top: 8px;">
-                        <div style="font-size: 11px; color: #718096; margin-bottom: 3px;">Accuracy Score:</div>
-                        <div style="background-color: #e2e8f0; border-radius: 8px; height: 18px; width: 200px; position: relative; overflow: hidden;">
-                            <div style="background: ${scoreColor}; height: 100%; width: ${Math.min(100, Math.max(0, score))}%; transition: width 0.5s ease;"></div>
-                            <div style="position: absolute; top: 0; left: 0; right: 0; text-align: center; line-height: 18px; font-weight: bold; color: #2d3748; font-size: 10px;">${score}/100</div>
-                        </div>
-                        <div style="margin-top: 3px; font-size: 10px; color: #718096; font-style: italic;">${scoreDescription}</div>
-                    </div>
-                ` : ''}
-            </div>`;
-
-        const handlerDetailsContent = handlerSection.querySelector('.report-details > .report-code-block');
-        if (handlerDetailsContent) {
-            handlerDetailsContent.insertAdjacentHTML('afterend', validationHTML);
-        }
-    }
-
-    const findingsSection = document.querySelector('.report-findings');
-    if (findingsSection && llmAnalysisData.risks && Array.isArray(llmAnalysisData.risks) && llmAnalysisData.risks.length > 0) {
-        const existingLLMRisks = findingsSection.querySelector('.llm-security-risks');
-        if (existingLLMRisks) {
-            existingLLMRisks.remove();
-        }
-
-        const risksHTML = `
-            <div class="subsection llm-security-risks">
-                <h5 class="report-subsection-title">🤖 AI-Identified Security Risks (${llmAnalysisData.risks.length})</h5>
-                <div class="llm-risks-container" style="background: #fef5e7; border: 1px solid #f6ad55; border-radius: 6px; padding: 12px; margin-bottom: 15px;">
-                    <ul style="margin: 0; padding-left: 20px;">
-                        ${llmAnalysisData.risks.map(risk => `<li style="font-size: 13px; line-height: 1.4; color: #744210; margin-bottom: 4px;">${escapeHTML(risk)}</li>`).join('')}
-                    </ul>
-                    ${llmAnalysisData.notes ? `<div style="margin-top: 8px; padding-top: 8px; border-top: 1px solid #f6ad55; font-size: 11px; color: #744210; font-style: italic;">Note: ${escapeHTML(llmAnalysisData.notes)}</div>` : ''}
-                </div>
-            </div>`;
-
-        const findingsTitle = findingsSection.querySelector('.report-section-title');
-        if (findingsTitle && findingsTitle.nextSibling) {
-            findingsTitle.insertAdjacentHTML('afterend', risksHTML);
-        }
-    }
-
-    if (llmAnalysisData.newPayloadsCount) {
-        const payloadSection = document.querySelector('.report-payloads');
-        if (payloadSection) {
-            const payloadTitle = payloadSection.querySelector('.report-section-title');
-            if (payloadTitle) {
-                const currentText = payloadTitle.textContent;
-                if (!currentText.includes('🤖')) {
-                    const match = currentText.match(/Generated Payloads \((\d+)/);
-                    if (match) {
-                        const totalCount = parseInt(match[1]);
-                        payloadTitle.innerHTML = `Generated Payloads (${totalCount} total, <span style="color: #4CAF50;">+${llmAnalysisData.newPayloadsCount} 🤖 AI-generated</span> - <span id="payload-mode-display-${payloadSection.id?.split('-')?.pop() || 'default'}">enhanced</span>)`;
-                    }
-                }
-            }
-            
-            const existingLLMSummary = payloadSection.querySelector('.llm-payload-summary');
-            if (existingLLMSummary) {
-                existingLLMSummary.remove();
-            }
-            
-            const llmSummaryHTML = `
-                <div class="llm-payload-summary" style="background: #e8f5e8; border: 1px solid #4CAF50; border-radius: 4px; padding: 8px; margin-bottom: 12px; font-size: 12px;">
-                    <div style="display: flex; align-items: center; margin-bottom: 4px;">
-                        <span style="font-size: 14px; margin-right: 6px;">🤖</span>
-                        <strong style="color: #2e7d2e;">AI Generated ${llmAnalysisData.newPayloadsCount} New Payloads</strong>
-                    </div>
-                    <div style="color: #2e7d2e;">
-                        Types: Mixed attack vectors including XSS, prototype pollution, type confusion, and injection payloads
-                        ${llmAnalysisData.notes ? `<br>Strategy: ${escapeHTML(llmAnalysisData.notes)}` : ''}
-                    </div>
-                </div>`;
-            
-            const payloadTitle2 = payloadSection.querySelector('.report-section-title');
-            if (payloadTitle2) {
-                payloadTitle2.insertAdjacentHTML('afterend', llmSummaryHTML);
-            }
-        }
-    }
-
-    const llmControls = document.querySelector('.llm-controls');
-    if (llmControls) {
-        const statusSpan = llmControls.querySelector('#llm-status-inline');
-        if (statusSpan) {
-            statusSpan.innerHTML = `<span style="color: #4CAF50;">✅ Analysis complete! Generated ${llmAnalysisData.newPayloadsCount || 0} new payloads</span>`;
-            setTimeout(() => {
-                if (statusSpan) statusSpan.innerHTML = '';
-            }, 5000); // Clear after 5 seconds
-        }
-    }
-
-    console.log('🤖 [LLM Update] Successfully updated existing report sections with handler score and payload info');
-}
-
-function displayReport(reportData, panel) {
+async function displayReport(reportData, panel) {
     try {
         panel.innerHTML = '';
     } catch (clearError) {
@@ -3100,26 +4367,119 @@ function displayReport(reportData, panel) {
         summarySection.className = 'report-section report-summary';
         summarySection.innerHTML = `
             <h4 class="report-section-title">Analysis Summary - <span class="report-endpoint-title">${escapeHTML(endpointDisplay)}</span></h4>
-            <div class="summary-grid">
+            <div class="summary-grid compact">
                 <div class="security-score-container">
-                     <h5 class="risk-score-title">Risk Score:</h5>
-                     <div class="security-score ${riskColor}" title="Score: ${score} (${riskLevel})">
-                         <div class="security-score-value">${score}</div>
-                         <div class="security-score-label">${riskLevel}</div>
+                     <h5 class="risk-score-title">Risk</h5>
+                     <div class="risk-inline-container">
+                         <div class="risk-track">
+                             <span class="tick t33"></span>
+                             <span class="tick t67"></span>
+                             <span class="risk-caret" style="left: ${Math.max(0, Math.min(100, score))}%"></span>
+                         </div>
+                         <span class="risk-level-text ${riskColor}">${riskLevel}</span>
                      </div>
-                 </div>
-                 <div class="summary-metrics">
-                     <div class="metric"><span class="metric-label">Msgs</span><span class="metric-value">${uiMessageCount}</span></div>
-                     <div class="metric"><span class="metric-label">Structs</span><span class="metric-value">${structures?.length ?? 0}</span></div>
-                     <div class="metric"><span class="metric-label">Sinks</span><span class="metric-value">${uniqueVulns?.length ?? 0}</span></div>
-                     <div class="metric"><span class="metric-label">Issues</span><span class="metric-value">${uniqueIssues?.length ?? 0}</span></div>
-                     <div class="metric" id="report-payload-count-metric-${safeKeyIdPart}">
+                </div>
+                 <div class="summary-metrics" id="summary-metrics">
+                     <div class="metric" data-metric="handler">
+                        <div class="metric-header"><span class="metric-label">Handler Security Score</span></div>
+                        <span class="metric-value ${getHandlerScoreClass(Math.round(Math.max(1, Math.min(10, Math.round((10*score)/100))))) }">${Math.round(Math.max(1, Math.min(10, Math.round((10*score)/100))))}/10</span>
+                     </div>
+                     <div class="metric" data-metric="msgs">
+                        <div class="metric-header">
+                            <span class="metric-label">Msgs</span>
+                        </div>
+                         <span class="metric-value">${uiMessageCount}</span>
+                         <div class="risk-details"></div>
+                     </div>
+                     <div class="metric" data-metric="structs">
+                        <div class="metric-header">
+                            <span class="metric-label">Structs</span>
+                        </div>
+                         <span class="metric-value">${structures?.length ?? 0}</span>
+                         <div class="risk-details"></div>
+                     </div>
+                     <div class="metric" data-metric="sinks">
+                        <div class="metric-header">
+                            <span class="metric-label">Sinks</span>
+                        </div>
+                         <span class="metric-value">${uniqueVulns?.length ?? 0}</span>
+                         <div class="risk-details"></div>
+                     </div>
+                     <div class="metric" data-metric="payloads" id="report-payload-count-metric-${safeKeyIdPart}">
+                         <div class="metric-header">
                          <span class="metric-label">Payloads (<span id="payload-mode-display-${safeKeyIdPart}">${currentPayloadMode.replace(/_/g, ' ')}</span>)</span>
+                         </div>
                          <span class="metric-value" id="payload-count-display-${safeKeyIdPart}">${currentPayloadCount}</span>
+                         <div class="risk-details"></div>
                      </div>
                  </div>
             </div>`;
         content.appendChild(summarySection);
+
+        // Check for and display LLM payload indicator if it exists
+        try {
+            const llmPayloadCount = await window.traceReportStorage.getLLMPayloadCount(analysisStorageKey);
+            if (llmPayloadCount > 0) {
+                const payloadSection = content.querySelector(`#report-payload-count-metric-${safeKeyIdPart}`);
+                if (payloadSection) {
+                    const existingIndicator = payloadSection.querySelector('.llm-payload-indicator');
+                    if (!existingIndicator) {
+                        const indicator = document.createElement('div');
+                        indicator.className = 'llm-payload-indicator';
+                        indicator.style.cssText = 'font-size: 10px; color: var(--accent-primary); margin-top: 2px;';
+                        indicator.textContent = `+${llmPayloadCount} Added by LLM!`;
+                        const payloadCountElement = payloadSection.querySelector(`#payload-count-display-${safeKeyIdPart}`);
+                        if (payloadCountElement) {
+                            payloadCountElement.parentNode.appendChild(indicator);
+                        }
+                    }
+                }
+            }
+        } catch (error) {
+            console.warn('Could not load LLM payload count:', error);
+        }
+
+        // Check for and display saved LLM analysis if it exists
+        try {
+            if (reportData.llmAnalysis && reportData.llmAnalysis.handlerAnalysis) {
+                console.log('💾 [LLM Analysis] Found saved LLM analysis, displaying...');
+                updateHandlerWithLLMAnalysis(reportData.llmAnalysis.handlerAnalysis);
+            }
+        } catch (error) {
+            console.warn('Could not load saved LLM analysis:', error);
+        }
+
+        // After rendering, populate risk details and global overview
+        try {
+            const messagesForPanel = (window.frogPostState?.messages || []).filter(msg => {
+                const k = analysisStorageKey;
+                const o = msg.origin ? getStorageKeyForUrl(msg.origin) : null;
+                const d = msg.destinationUrl ? getStorageKeyForUrl(msg.destinationUrl) : null;
+                const isTest = (typeof msg.data === 'object' && msg.data !== null && Object.prototype.hasOwnProperty.call(msg.data, 'FrogPost') && msg.data['FrogPost'] === 'BreakpointTest');
+                return !isTest && (o === k || d === k);
+            });
+
+            const risks = {
+                msgs: computeMessagesRisk(messagesForPanel),
+                structs: computeStructuresRisk(structures),
+                sinks: computeSinksRisk(uniqueVulns),
+                issues: computeIssuesRisk(uniqueIssues),
+                payloads: computePayloadsRisk(currentPayloadCount)
+            };
+
+            const metricsEl = content.querySelector('#summary-metrics');
+            if (metricsEl) {
+                Object.entries(risks).forEach(([key, r]) => {
+                    const tile = null;
+                    
+                });
+                metricsEl.querySelectorAll('.metric').forEach(m => {
+                    m.addEventListener('click', (e) => { if (e.target.closest('button') || e.target.closest('a')) return; m.classList.toggle('open'); });
+                });
+            }
+
+            
+        } catch {}
 
         const bestHandlerCode = bestHandler?.handler || bestHandler?.code;
         if (bestHandlerCode) {
@@ -3130,8 +4490,8 @@ function displayReport(reportData, panel) {
             const handlerScore = llmAnalysis.handler_score;
             const handlerAssessment = llmAnalysis.handler_assessment;
             
-            let handlerHTML = `<details class="report-details">
-                     <summary class="report-summary-toggle"><strong>Analyzed Handler</strong><span class="handler-meta">(Cat: ${escapeHTML(bestHandler.category || 'N/A')} | Score: ${bestHandler.score?.toFixed(1) || 'N/A'})</span><span class="toggle-icon">▶</span></summary>
+            let handlerHTML = `<details class="report-details" open>
+                     <summary class="report-summary-toggle"><strong>Analyzed Handler</strong><span class="handler-meta">(Cat: ${escapeHTML(bestHandler.category || 'N/A')} | Score: ${bestHandler.score?.toFixed(1) || 'N/A'})</span><span class="toggle-icon">▼</span></summary>
                 <div class="report-code-block handler-code"><pre><code>${escapeHTML(bestHandlerCode)}</code></pre></div>`;
             
             if (handlerScore !== undefined || handlerAssessment) {
@@ -3166,36 +4526,12 @@ function displayReport(reportData, panel) {
             content.appendChild(handlerSection);
         }
 
-        const llmSection = document.createElement('div');
-        llmSection.className = 'report-section report-llm';
-        
-        let llmHTML = `
-            <details class="report-details">
-                <summary class="report-summary-toggle"><strong>🤖 AI Security Analysis</strong><span class="handler-meta">(Enhanced Analysis)</span><span class="toggle-icon">▶</span></summary>
-                <div class="llm-controls" data-endpoint-key="${escapeHTML(originalEndpointKey)}" style="padding: 15px; background: var(--bg-secondary); border-radius: 6px; margin-top: 8px;">
-                <div style="display:flex; gap:10px; flex-wrap: wrap; align-items: center;">
-                    <label>Provider:</label>
-                    <select id="llm-provider-inline" class="control-select">
-                        <option value="none">None</option>
-                        <option value="openai">OpenAI</option>
-                        <option value="anthropic">Anthropic</option>
-                        <option value="groq">Groq</option>
-                        <option value="mistral">Mistral</option>
-                    </select>
-                    <label>Model:</label>
-                    <select id="llm-model-inline" class="control-select" style="min-width:220px;"></select>
-                    <label>API Key:</label>
-                    <input type="password" id="llm-key-inline" placeholder="sk-..." style="min-width:220px;"/>
-                    <button id="llm-save-inline" class="control-button secondary-button">Save</button>
-                    <button id="llm-run-inline" class="control-button primary-button">Analyze with LLM</button>
-                    <span id="llm-status-inline" style="margin-left:8px; font-style: italic; color: var(--text-secondary);"></span>
-                </div>
-                    <p style="font-size: 11px; color: var(--text-muted); margin-top: 6px;">AI analysis integrates directly into Handler and Findings sections above. Keys are stored locally.</p>
-                                </div>
-            </details>`;
-        
-        llmSection.innerHTML = llmHTML;
+        // Add LLM Analysis Section after handler
+        const llmSection = createLLMAnalysisSection(analysisStorageKey, endpointDisplay);
         content.appendChild(llmSection);
+        
+        // Setup LLM event listeners after DOM is updated
+        setupLLMEventListeners(analysisStorageKey);
 
         const findingsSection = document.createElement('div');
         findingsSection.className = 'report-section report-findings';
@@ -3219,52 +4555,34 @@ function displayReport(reportData, panel) {
 
         if (originChecks.length > 0) {
             findingsExist = true;
-            findingsHTML += `<div class="subsection"><h5 class="report-subsection-title">Origin Validation (${originChecks.length})</h5><table class="report-table"><thead><tr><th>Check Type</th><th>Strength</th><th>Compared Value</th><th>Snippet</th></tr></thead><tbody>`;
+            findingsHTML += `<div class="subsection"><h5 class="report-subsection-title">Origin Validation (${originChecks.length})</h5><table class="report-table"><thead><tr><th>Check Type</th><th>Compared Value</th><th>Snippet</th></tr></thead><tbody>`;
             originChecks.forEach(check => {
                 const type = check?.type || '?'; const strength = check?.strength || 'N/A'; const value = check?.comparedValue !== null && check?.comparedValue !== undefined ? String(check.comparedValue).substring(0, 100) : 'N/A'; const snippetHTML = check?.rawSnippet ? `<code class="context-snippet">${escapeHTML(check.rawSnippet)}</code>` : 'N/A';
                 let strengthClass = strength.toLowerCase(); if(strength === 'Missing') strengthClass = 'critical'; else if(strength === 'Weak') strengthClass = 'high'; else if(strength === 'Medium') strengthClass = 'medium'; else if(strength === 'Strong') strengthClass = 'negligible'; else strengthClass='low';
-                findingsHTML += `<tr class="severity-row-${strengthClass}"><td>${escapeHTML(type)}</td><td><span class="severity-badge severity-${strengthClass}">${escapeHTML(strength)}</span></td><td><code>${escapeHTML(value)}</code></td><td>${snippetHTML}</td></tr>`;
+                findingsHTML += `<tr class="severity-row-${strengthClass}"><td>${escapeHTML(type)}</td><td><code>${escapeHTML(value)}</code></td><td>${snippetHTML}</td></tr>`;
             });
             findingsHTML += `</tbody></table></div>`;
         }
 
         if (uniqueVulns.length > 0) {
             findingsExist = true;
-            findingsHTML += `<div class="subsection"><h5 class="report-subsection-title">Potential Sinks Reached (${uniqueVulns.length})</h5><table class="report-table"><thead><tr><th>Sink</th><th>Severity</th><th>Data Path</th><th>Conditions</th><th>Context Snippet</th></tr></thead><tbody>`;
+            findingsHTML += `<div class="subsection"><h5 class="report-subsection-title">Potential Sinks Reached (${uniqueVulns.length})</h5><table class="report-table"><thead><tr><th>Sink</th><th>Data Path</th><th>Conditions</th><th>Context Snippet</th></tr></thead><tbody>`;
             uniqueVulns.forEach(vuln => {
                 const type = vuln?.name || vuln?.type || '?'; const severity = vuln?.severity || 'N/A'; const contextHTML = vuln?.context || ''; const sourcePath = vuln?.sourcePath || '(unknown)'; const conditions = vuln?.conditions || [];
                 let conditionsHtml = 'None'; if (conditions.length > 0) { conditionsHtml = conditions.map(c => { let valStr = escapeHTML(String(c.value)); if (typeof c.value === 'string') valStr = `'${valStr}'`; return `<code>${escapeHTML(c.path)} ${escapeHTML(c.op)} ${valStr}</code>`; }).join('<br>'); }
-                findingsHTML += `<tr class="severity-row-${severity.toLowerCase()}"><td>${escapeHTML(type)}</td><td><span class="severity-badge severity-${severity.toLowerCase()}">${escapeHTML(severity)}</span></td><td><code>${escapeHTML(sourcePath)}</code></td><td>${conditionsHtml}</td><td class="context-snippet-cell">${contextHTML}</td></tr>`;
+                findingsHTML += `<tr class="severity-row-${severity.toLowerCase()}"><td>${escapeHTML(type)}</td><td><code>${escapeHTML(sourcePath)}</code></td><td>${conditionsHtml}</td><td class="context-snippet-cell">${contextHTML}</td></tr>`;
             });
             findingsHTML += `</tbody></table></div>`;
 
-            const smartPayloadDescription = staticAnalysisUsed 
-                ? "Generate targeted payloads based on identified sinks and data flows. This will merge with any existing default payloads."
-                : "Generate enhanced payloads using advanced fuzzing techniques. Static analysis wasn't available, but smart fuzzing can still be performed.";
-            
-            const buttonText = staticAnalysisUsed 
-                ? "Generate & Merge Smart Payloads" 
-                : "Generate & Merge Enhanced Payloads";
-                
-                findingsHTML += `
-                     <div class="subsection smart-payload-section">
-                         <h5 class="report-subsection-title">Smart Payload Generation</h5>
-                     <div id="smart-payload-controls-${safeKeyIdPart}" class="smart-payload-controls" data-analysis-key="${escapeHTML(analysisStorageKey)}" data-endpoint-key="${escapeHTML(originalEndpointKey)}" data-static-analysis="${staticAnalysisUsed}">
-                         <p>${smartPayloadDescription}</p>
-                             <button class="control-button primary-button generate-smart-payloads-btn">
-                             ${buttonText}
-                             </button>
-                             <span class="smart-payload-status" style="margin-left: 10px; font-style: italic; color: var(--text-secondary);"></span>
-                         </div>
-                     </div>`;
+            // Smart payload UI removed by request
         }
 
         if (uniqueIssues.length > 0) {
             findingsExist = true;
-            findingsHTML += `<div class="subsection"><h5 class="report-subsection-title">Other Security Issues (${uniqueIssues.length})</h5><table class="report-table"><thead><tr><th>Issue</th><th>Severity</th><th>Context Snippet</th></tr></thead><tbody>`;
+            findingsHTML += `<div class="subsection"><h5 class="report-subsection-title">Other Security Issues (${uniqueIssues.length})</h5><table class="report-table"><thead><tr><th>Issue</th><th>Context Snippet</th></tr></thead><tbody>`;
             uniqueIssues.forEach(issue => {
                 const type = issue?.type || '?'; const severity = issue?.severity || 'N/A'; const contextHTML = issue?.context || '';
-                findingsHTML += `<tr class="severity-row-${severity.toLowerCase()}"><td>${escapeHTML(type)}</td><td><span class="severity-badge severity-${severity.toLowerCase()}">${escapeHTML(severity)}</span></td><td class="context-snippet-cell">${contextHTML}</td></tr>`;
+                findingsHTML += `<tr class="severity-row-${severity.toLowerCase()}"><td>${escapeHTML(type)}</td><td class="context-snippet-cell">${contextHTML}</td></tr>`;
             });
             findingsHTML += `</tbody></table></div>`;
         }
@@ -3335,196 +4653,102 @@ function displayReport(reportData, panel) {
     }
 }
 
-async function handleLoadPayloadsClick(event) {
-    const button = event.target;
-    const analysisKey = button.dataset.analysisKey;
-    const reportPanel = button.closest('.trace-results-panel');
-    const safeKeyIdPart = analysisKey?.replace(/[^a-zA-Z0-9_-]/g, '_');
-    const payloadListElement = reportPanel?.querySelector(`#payloads-list-${safeKeyIdPart}`);
-
-    if (!analysisKey || !payloadListElement) {
-        log.error("Cannot load payloads: missing analysis key or list element.", { key: analysisKey, listFound: !!payloadListElement });
-        showToastNotification("Error: Could not find elements to load payloads.", "error");
-        button.textContent = `Load Payloads`;
-        button.disabled = false;
-        return;
-    }
-
-    button.textContent = 'Loading...';
-    button.disabled = true;
-
-    try {
-        const payloads = await window.traceReportStorage.getReportPayloads(analysisKey);
-        if (payloads && payloads.length > 0) {
-            payloadListElement.innerHTML = payloads.map((p, i) => renderPayloadItem(p, i)).join('');
-            const countDisplay = reportPanel.querySelector(`#payload-count-display-${safeKeyIdPart}`);
-            if(countDisplay) countDisplay.textContent = payloads.length;
-
-        } else {
-            payloadListElement.innerHTML = `<p>No payloads found in storage for this report.</p>`;
-        }
-        button.remove();
-    } catch (error) {
-        log.error(`Error loading payloads:`, error);
-        payloadListElement.innerHTML = `<p class="error-message">Error loading payloads.</p>`;
-        button.textContent = `Retry Load Payloads`;
-        button.disabled = false;
-    }
-}
-
-async function handleGenerateSmartPayloadsClick(event) {
-    const button = event.target;
-    const controlsDiv = button.closest('.smart-payload-controls');
-    if (!controlsDiv) {
-        log.error("Cannot find smart payload controls container.");
-        return;
-    }
-
-    const statusSpan = controlsDiv.querySelector('.smart-payload-status');
-    const analysisKey = controlsDiv.dataset.analysisKey;
-    const originalEndpointKey = controlsDiv.dataset.endpointKey;
-    const reportPanel = button.closest('.trace-results-panel');
-    const safeKeyIdPart = analysisKey?.replace(/[^a-zA-Z0-9_-]/g, '_');
-
-    if (!analysisKey || !originalEndpointKey || !reportPanel) {
-        log.error("Missing analysis key, original endpoint key, or report panel for generating smart payloads.");
-        if (statusSpan) statusSpan.textContent = 'Error: Missing data context.';
-        return;
-    }
-
-    button.disabled = true;
-    button.textContent = 'Generating...';
-    if (statusSpan) statusSpan.textContent = 'Fetching data...';
-
-    try {
-        if (!window.handlerTracer) { window.handlerTracer = new HandlerTracer(); }
-
-        const reportData = await window.traceReportStorage.getTraceReport(analysisKey);
-        const existingPayloads = await window.traceReportStorage.getReportPayloads(analysisKey) || [];
-
-        const relevantMessages = await window.retrieveMessagesWithFallbacks(analysisKey, originalEndpointKey);
-
-        if (!reportData) throw new Error("Could not retrieve saved report data to generate smart payloads.");
-
-        const handlerCode = reportData.analyzedHandler?.handler || reportData.analyzedHandler?.code;
-        if (!handlerCode) throw new Error("Handler code missing from report.");
-
-        const staticAnalysisData = reportData.details?.staticAnalysisRawOutput?.analysis;
-        if (!staticAnalysisData || !reportData.details?.staticAnalysisRawOutput?.success) {
-            log.warn("Static analysis data missing or indicates failure. Smart generation might be less effective or not possible.");
-            if (statusSpan) statusSpan.textContent = 'Static analysis data issue.';
-            button.disabled = false;
-            button.textContent = 'Generate Smart Payloads';
-            return;
-        }
-
-        const uniqueStructures = reportData.details?.uniqueStructures || window.handlerTracer.analyzeJsonStructures(relevantMessages);
-        const vulnerabilities = { sinks: reportData.details?.sinks || [], securityIssues: reportData.details?.securityIssues || [] };
-
-        if (statusSpan) statusSpan.textContent = 'Generating smart payloads...';
-        const generationContext = { uniqueStructures, vulnerabilities, staticAnalysisData, originalMessages: relevantMessages, dynamicAnalysisResults: null };
-
-        const smartPayloads = await window.handlerTracer.generateSmartPayloads(generationContext);
-        log.info(`[Smart Payload Gen] Generated ${smartPayloads.length} smart payloads for ${analysisKey}`);
-
-        if (statusSpan) statusSpan.textContent = 'Merging and saving payloads...';
-
-        let combinedPayloads = [...existingPayloads, ...smartPayloads];
-        const uniquePayloadsMap = new Map();
-        combinedPayloads.forEach(p => {
-            const payloadDataStr = (typeof p.payload === 'object' && p.payload !== null) ? JSON.stringify(p.payload) : String(p.payload);
-            const key = `${p.type}|${p.targetPath}|${payloadDataStr}|${p.baseSource}`;
-            if (!uniquePayloadsMap.has(key)) {
-                uniquePayloadsMap.set(key, p);
-            }
-        });
-        combinedPayloads = Array.from(uniquePayloadsMap.values());
-        if (combinedPayloads.length > window.handlerTracer.MAX_PAYLOADS_TOTAL) {
-            combinedPayloads = combinedPayloads.slice(0, window.handlerTracer.MAX_PAYLOADS_TOTAL);
-        }
-        log.info(`[Smart Payload Gen] Combined and deduplicated. Total payloads: ${combinedPayloads.length}`);
-
-        const payloadsSaved = await window.traceReportStorage.saveReportPayloads(analysisKey, combinedPayloads);
-        if (!payloadsSaved) throw new Error("Failed to save combined payloads.");
-
-        const newPayloadMode = (existingPayloads.length > 0 && smartPayloads.length > 0) ?
-            'smart_and_default' :
-            (smartPayloads.length > 0 ? 'smart' :
-                (existingPayloads.length > 0 ? 'default' : 'none'));
-
-        reportData.details.payloadMode = newPayloadMode;
-        reportData.details.payloadsGeneratedCount = combinedPayloads.length;
-        if(reportData.summary) reportData.summary.payloadsGenerated = combinedPayloads.length;
-
-        const reportMetadataSaved = await window.traceReportStorage.saveTraceReport(analysisKey, reportData);
-        if (!reportMetadataSaved) throw new Error("Failed to save updated report metadata.");
-
-        const traceInfoKey = `trace-info-${originalEndpointKey}`;
-        const traceInfoResult = await new Promise(resolve => chrome.storage.local.get(traceInfoKey, resolve));
-        const existingTraceInfo = traceInfoResult[traceInfoKey] || {};
-        await chrome.storage.local.set({
-            [traceInfoKey]: {
-                ...existingTraceInfo,
-                payloadMode: newPayloadMode,
-                payloadCount: combinedPayloads.length,
-                timestamp: Date.now()
-            }
-        });
-
-        if (statusSpan) statusSpan.textContent = 'Done!';
-        button.textContent = 'Smart Payloads Generated & Merged';
-        button.disabled = true;
-
-        const countDisplayId = `payload-count-display-${safeKeyIdPart}`;
-        const modeDisplayId = `payload-mode-display-${safeKeyIdPart}`;
-        const payloadListId = `payloads-list-${safeKeyIdPart}`;
-        const payloadSectionId = `report-payload-section-${safeKeyIdPart}`;
-
-        const countDisplay = reportPanel.querySelector(`#${countDisplayId}`);
-        const modeDisplay = reportPanel.querySelector(`#${modeDisplayId}`);
-        const payloadListElement = reportPanel.querySelector(`#${payloadListId}`);
-        const payloadSection = reportPanel.querySelector(`#${payloadSectionId}`);
-
-
-        if (countDisplay) countDisplay.textContent = combinedPayloads.length;
-        if (modeDisplay) modeDisplay.textContent = newPayloadMode.replace(/_/g, ' ');
-
-        reportPanel.querySelectorAll(`#${payloadSectionId} .load-payloads-btn`).forEach(btn => btn.remove());
-
-        if(payloadListElement) {
-            if(combinedPayloads.length > 0) {
-                payloadListElement.innerHTML = combinedPayloads.slice(0, 10).map((p, i) => renderPayloadItem(p, i)).join('');
-                if (combinedPayloads.length > 10 || (combinedPayloads.length > 0 && !payloadListElement.querySelector('.payload-item')) ) {
-                    const loadAllBtn = document.createElement('button');
-                    loadAllBtn.className = 'control-button secondary-button show-more-btn load-payloads-btn';
-                    loadAllBtn.dataset.analysisKey = analysisKey;
-                    loadAllBtn.textContent = `Load All ${combinedPayloads.length} Payloads`;
-                    if (payloadSection) payloadSection.appendChild(loadAllBtn);
-                }
-            } else {
-                payloadListElement.innerHTML = '<p>No payloads generated or available after merge.</p>';
-            }
-        }
-
-        showToastNotification('Smart payloads generated and merged successfully!', 'success');
-
-    } catch (error) {
-        log.error('Error generating/saving smart payloads:', error);
-        if (statusSpan) statusSpan.textContent = `Error: ${error.message.substring(0, 100)}`;
-        showToastNotification(`Smart payload generation failed: ${error.message}`, 'error');
-        button.disabled = false;
-        button.textContent = 'Generate Smart Payloads';
-    }
-}
+// Smart payload feature permanently removed
 
 function showFullPayloadModal(payloadItem) {
     document.querySelector('.payload-modal')?.remove(); document.querySelector('.payload-modal-backdrop')?.remove(); const modal = document.createElement('div'); modal.className = 'payload-modal'; const modalContent = document.createElement('div'); modalContent.className = 'payload-modal-content'; const closeBtn = document.createElement('span'); closeBtn.className = 'close-modal'; closeBtn.innerHTML = '&times;'; const backdrop = document.createElement('div'); backdrop.className = 'payload-modal-backdrop'; const closeModal = () => { modal.remove(); backdrop.remove(); }; closeBtn.onclick = closeModal; backdrop.onclick = closeModal; const heading = document.createElement('h4'); const targetInfo = document.createElement('p'); targetInfo.style.cssText = 'margin-bottom:15px;font-size:13px;color:#aaa;'; const payloadPre = document.createElement('pre'); payloadPre.className = 'report-code-block'; payloadPre.style.cssText = 'max-height:50vh;overflow-y:auto;'; const payloadCode = document.createElement('code'); const actualPayloadData = (payloadItem && payloadItem.payload !== undefined) ? payloadItem.payload : payloadItem; heading.textContent = `Payload Details (Type: ${escapeHTML(payloadItem?.type || 'unknown')})`; targetInfo.innerHTML = `<strong>Target/Desc:</strong> ${escapeHTML(payloadItem?.targetPath || payloadItem?.targetFlow || payloadItem?.description || 'N/A')}`; let formattedPayload = ''; try { if (typeof actualPayloadData === 'object' && actualPayloadData !== null) formattedPayload = JSON.stringify(actualPayloadData, null, 2); else formattedPayload = String(actualPayloadData); } catch { formattedPayload = String(actualPayloadData); } payloadCode.textContent = formattedPayload; payloadPre.appendChild(payloadCode); const copyBtn = document.createElement('button'); copyBtn.textContent = 'Copy Payload'; copyBtn.className = 'control-button'; copyBtn.style.marginTop = '15px'; copyBtn.onclick = () => { navigator.clipboard.writeText(formattedPayload).then(() => { copyBtn.textContent = 'Copied!'; setTimeout(() => copyBtn.textContent = 'Copy Payload', 2000); }).catch(() => { copyBtn.textContent = 'Copy Failed'; setTimeout(() => copyBtn.textContent = 'Copy Payload', 2000); }); }; modalContent.appendChild(closeBtn); modalContent.appendChild(heading); modalContent.appendChild(targetInfo); modalContent.appendChild(payloadPre); modalContent.appendChild(copyBtn); modal.appendChild(modalContent); document.body.appendChild(backdrop); document.body.appendChild(modal);
 }
 
-async function handleReportButton(endpoint) {
-    const endpointKey = getStorageKeyForUrl(endpoint); if (!endpointKey) return; let reportData = null; let reportPayloads = null; let keyUsed = endpointKey;
-    try { const traceInfoKey = `trace-info-${endpointKey}`; const traceInfoResult = await new Promise(resolve => chrome.storage.local.get(traceInfoKey, resolve)); const traceInfo = traceInfoResult[traceInfoKey]; if (traceInfo?.analysisStorageKey) keyUsed = traceInfo.analysisStorageKey; else if (traceInfo?.analyzedUrl) keyUsed = getStorageKeyForUrl(traceInfo.analyzedUrl); [reportData, reportPayloads] = await Promise.all([ window.traceReportStorage.getTraceReport(keyUsed), window.traceReportStorage.getReportPayloads(keyUsed) ]); if (!reportData && keyUsed !== endpointKey) { keyUsed = endpointKey; [reportData, reportPayloads] = await Promise.all([ window.traceReportStorage.getTraceReport(keyUsed), window.traceReportStorage.getReportPayloads(keyUsed) ]); } if (!reportData || typeof reportData !== 'object') throw new Error(`No report data found for key ${keyUsed}. Run Trace first.`); if (!reportData.details) reportData.details = {}; reportData.details.payloads = reportPayloads || []; if (!reportData.summary) reportData.summary = {}; reportData.summary.payloadsGenerated = reportPayloads?.length || 0; document.querySelector('.trace-results-panel')?.remove(); document.querySelector('.trace-panel-backdrop')?.remove(); const tracePanel = document.createElement('div'); tracePanel.className = 'trace-results-panel'; const backdrop = document.createElement('div'); backdrop.className = 'trace-panel-backdrop'; backdrop.onclick = () => { tracePanel.remove(); backdrop.remove(); }; const reportContainer = document.getElementById('reportPanelContainer') || document.body; reportContainer.appendChild(backdrop); reportContainer.appendChild(tracePanel); addTraceReportStyles(); displayReport(reportData, tracePanel); }
-    catch (error) { log.error('Error handling report button:', error); alert(`Failed to display report: ${error?.message}`); }
+async function handleReportButton(endpointKey) {
+    let reportData = null;
+    let reportPayloads = null;
+    let keyUsed = endpointKey;
+    
+    try {
+        const traceInfoKey = `trace-info-${endpointKey}`;
+        const traceInfoResult = await new Promise(resolve => chrome.storage.local.get(traceInfoKey, resolve));
+        const traceInfo = traceInfoResult[traceInfoKey];
+        
+        if (traceInfo?.analysisStorageKey) {
+            keyUsed = traceInfo.analysisStorageKey;
+        } else if (traceInfo?.analyzedUrl) {
+            keyUsed = getStorageKeyForUrl(traceInfo.analyzedUrl);
+        }
+        
+        [reportData, reportPayloads] = await Promise.all([
+            window.traceReportStorage.getTraceReport(keyUsed),
+            window.traceReportStorage.getReportPayloads(keyUsed)
+        ]);
+        
+        if (!reportData && keyUsed !== endpointKey) {
+            keyUsed = endpointKey;
+            [reportData, reportPayloads] = await Promise.all([
+                window.traceReportStorage.getTraceReport(keyUsed),
+                window.traceReportStorage.getReportPayloads(keyUsed)
+            ]);
+        }
+        
+        if (!reportData || typeof reportData !== 'object') {
+            throw new Error(`No report data found for key ${keyUsed}. Run Trace first.`);
+        }
+        
+        if (!reportData.details) reportData.details = {};
+        reportData.details.payloads = reportPayloads || [];
+        
+        if (!reportData.summary) reportData.summary = {};
+        reportData.summary.payloadsGenerated = reportPayloads?.length || 0;
+        
+        // Remove any existing panels
+        document.querySelector('.trace-results-panel')?.remove();
+        document.querySelector('.trace-panel-backdrop')?.remove();
+        
+        const tracePanel = document.createElement('div');
+        tracePanel.className = 'trace-results-panel';
+        
+        const backdrop = document.createElement('div');
+        backdrop.className = 'trace-panel-backdrop';
+        backdrop.onclick = () => {
+            tracePanel.remove();
+            backdrop.remove();
+        };
+        
+        const reportContainer = document.getElementById('reportPanelContainer') || document.body;
+        reportContainer.appendChild(backdrop);
+        reportContainer.appendChild(tracePanel);
+        
+        addTraceReportStyles();
+        await displayReport(reportData, tracePanel);
+        
+    } catch (error) {
+        log.error('Error handling report button:', error);
+        alert(`Failed to display report: ${error?.message}`);
+    }
+}
+/**
+ * On dashboard load, restore and render the last report for the current endpoint.
+ */
+async function restoreLastReport(endpointKey) {
+  try {
+    if (!endpointKey) return;
+    
+    console.log(`🔄 [Restore] Checking for saved report for ${endpointKey}`);
+    const stored = await window.traceReportStorage.getTraceReport(endpointKey);
+    const payloads = await window.traceReportStorage.getReportPayloads(endpointKey);
+    
+    if (stored && stored.details && stored.timestamp) {
+      console.log(`🎨 [Restore] Rendering saved report from ${new Date(stored.timestamp).toLocaleString()}`);
+      renderReportUI(stored, payloads || []);
+    } else {
+      console.log(`ℹ️ [Restore] No saved report found for ${endpointKey}.`);
+      const reportContent = document.getElementById('report-content');
+      if (reportContent) {
+          // Clear previous report findings if no new one is found
+          updateExistingReportWithLLM(null);
+      }
+    }
+  } catch (e) {
+    console.warn('⚠️ [Restore] Restore report failed', e);
+  }
 }
 
 async function checkAllEndpoints() {
@@ -3567,7 +4791,7 @@ async function populateInitialHandlerStates() {
     }
 }
 
-const traceReportStyles = `.trace-results-panel {} .trace-panel-backdrop {} .trace-panel-header {} .trace-panel-close {} .trace-results-content {} .report-section { margin-bottom: 30px; padding: 20px; background: #1a1d21; border-radius: 8px; box-shadow: 0 2px 5px rgba(0, 0, 0, 0.3); border: 1px solid #333; } .report-section-title { margin-top: 0; padding-bottom: 10px; border-bottom: 1px solid #444; color: #00e1ff; font-size: 1.3em; font-weight: 600; text-shadow: 0 0 5px rgba(0, 225, 255, 0.5); } .report-subsection-title { margin-top: 0; color: #a8b3cf; font-size: 1.1em; margin-bottom: 10px; } .report-summary .summary-grid { display: grid; grid-template-columns: auto 1fr; gap: 25px; align-items: center; margin-bottom: 20px; } .security-score-container { display: flex; justify-content: center; } .security-score { width: 90px; height: 90px; border-radius: 50%; display: flex; flex-direction: column; justify-content: center; align-items: center; text-align: center; color: #fff; font-weight: bold; background: conic-gradient(#e74c3c 0% 20%, #e67e22 20% 40%, #f39c12 40% 60%, #3498db 60% 80%, #2ecc71 80% 100%); position: relative; border: 3px solid #555; box-shadow: inset 0 0 10px rgba(0,0,0,0.5); } .security-score::before { content: ''; position: absolute; inset: 5px; background: #1a1d21; border-radius: 50%; z-index: 1; } .security-score div { position: relative; z-index: 2; } .security-score-value { font-size: 28px; line-height: 1; } .security-score-label { font-size: 12px; margin-top: 3px; text-transform: uppercase; letter-spacing: 0.5px; } .security-score.critical { border-color: #e74c3c; } .security-score.high { border-color: #e67e22; } .security-score.medium { border-color: #f39c12; } .security-score.low { border-color: #3498db; } .security-score.negligible { border-color: #2ecc71; } .summary-metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px 20px; } .metric { background-color: #252a30; padding: 10px; border-radius: 4px; text-align: center; border: 1px solid #3a3f44; } .metric-label { display: block; font-size: 11px; color: #a8b3cf; margin-bottom: 4px; text-transform: uppercase; } .metric-value { display: block; font-size: 18px; font-weight: bold; color: #fff; } .recommendations { margin-top: 15px; padding: 15px; background: rgba(0, 225, 255, 0.05); border-radius: 4px; border-left: 3px solid #00e1ff; } .recommendation-text { color: #d0d8e8; font-size: 13px; line-height: 1.6; margin: 0; } .report-code-block { background: #111316; border: 1px solid #333; border-radius: 4px; padding: 12px; overflow-x: auto; margin: 10px 0; max-height: 300px; } .report-code-block pre { margin: 0; } .report-code-block code { font-family: 'Courier New', Courier, monospace; font-size: 13px; color: #c4c4c4; white-space: pre; } .report-handler .handler-meta { font-size: 0.8em; color: #777; margin-left: 10px; } details.report-details { background: #22252a; border: 1px solid #3a3f44; border-radius: 4px; margin-bottom: 10px; } summary.report-summary-toggle { cursor: pointer; padding: 10px 15px; display: flex; justify-content: space-between; align-items: center; font-weight: 600; color: #d0d8e8; } summary.report-summary-toggle:focus { outline: none; box-shadow: 0 0 0 2px rgba(0, 225, 255, 0.5); } details[open] > summary.report-summary-toggle { border-bottom: 1px solid #3a3f44; } .toggle-icon { font-size: 1.2em; transition: transform 0.2s; } details[open] .toggle-icon { transform: rotate(90deg); } .report-details > div { padding: 15px; } .report-table { width: 100%; border-collapse: collapse; margin: 15px 0; background-color: #22252a; } .report-table th, .report-table td { padding: 10px 12px; text-align: left; border: 1px solid #3a3f44; font-size: 13px; color: #d0d8e8; } .report-table th { background-color: #2c313a; font-weight: bold; color: #fff; } .report-table td code { font-size: 12px; color: #a8b3cf; background-color: #111316; padding: 2px 4px; border-radius: 3px; white-space: pre-wrap; word-break: break-all; } .report-table .context-snippet { max-width: 400px; white-space: pre-wrap; word-break: break-all; display: inline-block; vertical-align: middle; } .severity-badge { display: inline-block; padding: 3px 8px; border-radius: 12px; font-size: 11px; font-weight: bold; text-transform: uppercase; } .severity-critical { background-color: #e74c3c; color: white; } .severity-high { background-color: #e67e22; color: white; } .severity-medium { background-color: #f39c12; color: #333; } .severity-low { background-color: #3498db; color: white; } .severity-row-critical td { background-color: rgba(231, 76, 60, 0.15); } .severity-row-high td { background-color: rgba(230, 126, 34, 0.15); } .severity-row-medium td { background-color: rgba(243, 156, 18, 0.1); } .severity-row-low td { background-color: rgba(52, 152, 219, 0.1); } .no-findings-text { color: #777; font-style: italic; padding: 10px 0; } .dataflow-table td:first-child code { font-weight: bold; color: #ffb86c; } .report-list { max-height: 400px; overflow-y: auto; padding-right: 10px; } .payload-item, .structure-item { background: #22252a; border: 1px solid #3a3f44; border-radius: 4px; margin-bottom: 15px; overflow: hidden; } .payload-header { padding: 8px 12px; background-color: #2c313a; color: #a8b3cf; font-size: 12px; } .payload-header strong { color: #fff; } .payload-meta { color: #8be9fd; margin: 0 5px; } .payload-item .report-code-block { margin: 0; border: none; border-top: 1px solid #3a3f44; border-radius: 0 0 4px 4px; } .structure-content { padding: 15px; } .structure-content p { margin: 0 0 10px 0; color: #d0d8e8; font-size: 13px; } .structure-content strong { color: #00e1ff; } .structure-content code { color: #a8b3cf; background-color: #111316; padding: 2px 4px; border-radius: 3px; } .show-more-btn { display: block; width: 100%; margin-top: 15px; text-align: center; background-color: #343a42; border: 1px solid #4a5058; color: #a8b3cf; } .show-more-btn:hover { background-color: #4a5058; color: #fff; } .control-button {} .secondary-button {} .error-message { color: #e74c3c; font-weight: bold; padding: 15px; background-color: rgba(231, 76, 60, 0.1); border: 1px solid #e74c3c; border-radius: 4px; } span.highlight-finding { background-color: rgba(255, 0, 0, 0.3); color: #ffdddd; font-weight: bold; padding: 1px 2px; border-radius: 2px; border: 1px solid rgba(255, 100, 100, 0.5); }`;
+const traceReportStyles = `.trace-results-panel {} .trace-panel-backdrop {} .trace-panel-header {} .trace-panel-close {} .trace-results-content {} .report-section { margin-bottom: 30px; padding: 20px; background: #1a1d21; border-radius: 8px; box-shadow: 0 2px 5px rgba(0, 0, 0, 0.3); border: 1px solid #333; } .report-section-title { margin-top: 0; padding-bottom: 10px; border-bottom: 1px solid #444; color: #00e1ff; font-size: 1.3em; font-weight: 600; text-shadow: 0 0 5px rgba(0, 225, 255, 0.5); } .report-subsection-title { margin-top: 0; color: #a8b3cf; font-size: 1.1em; margin-bottom: 10px; } .report-summary .summary-grid { display: grid; grid-template-columns: auto 1fr; gap: 0; align-items: center; margin-bottom: 20px; } .security-score-container { display: flex; justify-content: center; } .security-score { width: 90px; height: 90px; border-radius: 50%; display: flex; flex-direction: column; justify-content: center; align-items: center; text-align: center; color: #fff; font-weight: bold; background: conic-gradient(#e74c3c 0% 20%, #e67e22 20% 40%, #f39c12 40% 60%, #3498db 60% 80%, #2ecc71 80% 100%); position: relative; border: 3px solid #555; box-shadow: inset 0 0 10px rgba(0,0,0,0.5); } .security-score::before { content: ''; position: absolute; inset: 5px; background: #1a1d21; border-radius: 50%; z-index: 1; } .security-score div { position: relative; z-index: 2; } .security-score-value { font-size: 28px; line-height: 1; } .security-score-label { font-size: 12px; margin-top: 3px; text-transform: uppercase; letter-spacing: 0.5px; } .security-score.critical { border-color: #e74c3c; } .security-score.high { border-color: #e67e22; } .security-score.medium { border-color: #f39c12; } .security-score.low { border-color: #3498db; } .security-score.negligible { border-color: #2ecc71; } .summary-metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px 20px; } .metric { background-color: #252a30; padding: 10px; border-radius: 4px; text-align: center; border: 1px solid #3a3f44; } .metric-label { display: block; font-size: 11px; color: #a8b3cf; margin-bottom: 4px; text-transform: uppercase; } .metric-value { display: block; font-size: 18px; font-weight: bold; color: #fff; } .recommendations { margin-top: 15px; padding: 15px; background: rgba(0, 225, 255, 0.05); border-radius: 4px; border-left: 3px solid #00e1ff; } .recommendation-text { color: #d0d8e8; font-size: 13px; line-height: 1.6; margin: 0; } .report-code-block { background: #111316; border: 1px solid #333; border-radius: 4px; padding: 12px; overflow-x: auto; margin: 10px 0; max-height: 300px; } .report-code-block pre { margin: 0; } .report-code-block code { font-family: 'Courier New', Courier, monospace; font-size: 13px; color: #c4c4c4; white-space: pre; } .report-handler .handler-meta { font-size: 0.8em; color: #777; margin-left: 10px; } details.report-details { background: #22252a; border: 1px solid #3a3f44; border-radius: 4px; margin-bottom: 10px; } summary.report-summary-toggle { cursor: pointer; padding: 10px 15px; display: flex; justify-content: space-between; align-items: center; font-weight: 600; color: #d0d8e8; } summary.report-summary-toggle:focus { outline: none; box-shadow: 0 0 0 2px rgba(0, 225, 255, 0.5); } details[open] > summary.report-summary-toggle { border-bottom: 1px solid #3a3f44; } .toggle-icon { font-size: 1.2em; transition: transform 0.2s; } details[open] .toggle-icon { transform: rotate(90deg); } .report-details > div { padding: 15px; } .report-table { width: 100%; border-collapse: collapse; margin: 15px 0; background-color: #22252a; } .report-table th, .report-table td { padding: 10px 12px; text-align: left; border: 1px solid #3a3f44; font-size: 13px; color: #d0d8e8; } .report-table th { background-color: #2c313a; font-weight: bold; color: #fff; } .report-table td code { font-size: 12px; color: #a8b3cf; background-color: #111316; padding: 2px 4px; border-radius: 3px; white-space: pre-wrap; word-break: break-all; } .report-table .context-snippet { max-width: 400px; white-space: pre-wrap; word-break: break-all; display: inline-block; vertical-align: middle; } .severity-badge { display: inline-block; padding: 3px 8px; border-radius: 12px; font-size: 11px; font-weight: bold; text-transform: uppercase; } .severity-critical { background-color: #e74c3c; color: white; } .severity-high { background-color: #e67e22; color: white; } .severity-medium { background-color: #f39c12; color: #333; } .severity-low { background-color: #3498db; color: white; } .severity-row-critical td { background-color: rgba(231, 76, 60, 0.15); } .severity-row-high td { background-color: rgba(230, 126, 34, 0.15); } .severity-row-medium td { background-color: rgba(243, 156, 18, 0.1); } .severity-row-low td { background-color: rgba(52, 152, 219, 0.1); } .no-findings-text { color: #777; font-style: italic; padding: 10px 0; } .dataflow-table td:first-child code { font-weight: bold; color: #ffb86c; } .report-list { max-height: 400px; overflow-y: auto; padding-right: 10px; } .payload-item, .structure-item { background: #22252a; border: 1px solid #3a3f44; border-radius: 4px; margin-bottom: 15px; overflow: hidden; } .payload-header { padding: 8px 12px; background-color: #2c313a; color: #a8b3cf; font-size: 12px; } .payload-header strong { color: #fff; } .payload-meta { color: #8be9fd; margin: 0 5px; } .payload-item .report-code-block { margin: 0; border: none; border-top: 1px solid #3a3f44; border-radius: 0 0 4px 4px; } .structure-content { padding: 15px; } .structure-content p { margin: 0 0 10px 0; color: #d0d8e8; font-size: 13px; } .structure-content strong { color: #00e1ff; } .structure-content code { color: #a8b3cf; background-color: #111316; padding: 2px 4px; border-radius: 3px; } .show-more-btn { display: block; width: 100%; margin-top: 15px; text-align: center; background-color: #343a42; border: 1px solid #4a5058; color: #a8b3cf; } .show-more-btn:hover { background-color: #4a5058; color: #fff; } .control-button {} .secondary-button {} .error-message { color: #e74c3c; font-weight: bold; padding: 15px; background-color: rgba(231, 76, 60, 0.1); border: 1px solid #e74c3c; border-radius: 4px; } span.highlight-finding { background-color: rgba(255, 0, 0, 0.3); color: #ffdddd; font-weight: bold; padding: 1px 2px; border-radius: 2px; border: 1px solid rgba(255, 100, 100, 0.5); }`;
 
 const progressStyles = `.trace-progress-container { position: fixed; bottom: 20px; right: 20px; background: rgba(40, 44, 52, 0.95); padding: 15px 20px; border-radius: 8px; box-shadow: 0 4px 15px rgba(0,0,0,0.4); z-index: 1001; border: 1px solid #555; font-family: sans-serif; width: 280px; color: #d0d8e8; } .trace-progress-container h4 { margin: 0 0 12px 0; font-size: 14px; color: #00e1ff; border-bottom: 1px solid #444; padding-bottom: 8px; text-transform: uppercase; letter-spacing: 0.5px; } .phase-list { display: flex; flex-direction: column; gap: 10px; } .phase { display: flex; align-items: center; gap: 12px; padding: 8px 12px; border-radius: 4px; transition: background-color 0.3s ease, color 0.3s ease, border-color 0.3s ease; border: 1px solid #444; } .phase .emoji { font-size: 20px; line-height: 1; } .phase .label { font-size: 13px; flex-grow: 1; color: #a8b3cf; } .phase.active { background-color: rgba(0, 225, 255, 0.1); border-color: #00e1ff; animation: pulse-border 1.5s infinite; } .phase.active .label { color: #fff; font-weight: 600; } .phase.active .emoji { animation: spin 1s linear infinite; } .phase.completed { background-color: rgba(80, 250, 123, 0.1); border-color: #50fa7b; } .phase.completed .label { color: #50fa7b; } .phase.completed .emoji::before { content: '✅'; } .phase.error { background-color: rgba(255, 85, 85, 0.1); border-color: #ff5555; } .phase.error .label { color: #ff5555; font-weight: 600; } .phase.error .emoji::before { content: '❌'; } .phase[data-phase="finished"], .phase[data-phase="error"] { display: none; } .phase[data-phase="finished"].completed, .phase[data-phase="error"].error { display: flex; } @keyframes pulse-border { 0% { border-color: #00e1ff; } 50% { border-color: rgba(0, 225, 255, 0.5); } 100% { border-color: #00e1ff; } } @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`;
 
@@ -3730,9 +4954,8 @@ window.addEventListener('DOMContentLoaded', async () => {
         document.body.setAttribute('data-dashboard-listeners-attached', 'true');
         document.body.addEventListener('click', (event) => {
             if (event.target) {
-                if (event.target.matches('.generate-smart-payloads-btn')) {
-                    handleGenerateSmartPayloadsClick(event);
-                } else if (event.target.matches('.load-payloads-btn')) {
+                if (event.target.matches('.load-payloads-btn')) {
+                    console.log('Load payloads button clicked');
                     handleLoadPayloadsClick(event);
                 }
             }
@@ -3741,3 +4964,454 @@ window.addEventListener('DOMContentLoaded', async () => {
 
     requestUiUpdate();
 });
+function getFirstEndpointKey() {
+    const firstEndpoint = document.querySelector('.endpoint-host .host-row, .endpoint-host .iframe-row');
+    return firstEndpoint?.dataset.url || null;
+}
+
+
+function getCurrentEndpointKey() {
+  const selected = document.querySelector('.endpoint-item.selected');
+  return selected?.dataset.endpointKey || getFirstEndpointKey();
+}
+// Developer console function to verify LLM-generated payloads
+window.verifyLLMPayloads = async function(endpointKey = null) {
+  const targetEndpoint = endpointKey || getCurrentEndpointKey();
+  if (!targetEndpoint) {
+    console.error("❌ No endpoint selected or provided");
+    return;
+  }
+
+  console.log(`🔍 [Payload Verification] Analyzing payloads for: ${targetEndpoint}`);
+  
+  try {
+    // Get the saved report and payloads
+    const report = await window.traceReportStorage.getTraceReport(targetEndpoint);
+    const payloads = await window.traceReportStorage.getReportPayloads(targetEndpoint);
+    
+    if (!report || !payloads) {
+      console.error("❌ No report or payloads found for this endpoint");
+      return;
+    }
+
+    console.log(`📊 [Report Summary]`);
+    console.log(`   • Handler Score: ${report.details?.score || 'N/A'}/100`);
+    console.log(`   • Sinks Found: ${report.details?.sinks?.length || 0}`);
+    console.log(`   • Total Payloads: ${payloads.length}`);
+    
+    // Get intercepted messages for comparison
+    const savedMessages = await chrome.storage.local.get([`saved-messages-${targetEndpoint}`]);
+    const interceptedMessages = savedMessages[`saved-messages-${targetEndpoint}`] || [];
+    
+    console.log(`📨 [Intercepted Messages] Found ${interceptedMessages.length} messages:`);
+    interceptedMessages.slice(0, 3).forEach((msg, i) => {
+      console.log(`   ${i+1}. Type: ${typeof msg.data}, Structure:`, msg.data);
+    });
+
+    // Analyze payload types and structures
+    const payloadAnalysis = {
+      llmGenerated: [],
+      defaultFrogPost: [],
+      structureMatches: 0,
+      structureMismatches: 0
+    };
+
+    payloads.forEach((payload, i) => {
+      const isLLMGenerated = payload.type !== 'default-dumb-xss';
+      const payloadData = payload.payload || payload;
+      
+      if (isLLMGenerated) {
+        payloadAnalysis.llmGenerated.push({index: i, payload: payloadData});
+      } else {
+        payloadAnalysis.defaultFrogPost.push({index: i, payload: payloadData});
+      }
+
+      // Check if payload structure matches intercepted messages
+      const hasMatchingStructure = interceptedMessages.some(msg => {
+        const msgKeys = Object.keys(msg.data || {}).sort();
+        const payloadKeys = Object.keys(payloadData || {}).sort();
+        return JSON.stringify(msgKeys) === JSON.stringify(payloadKeys);
+      });
+
+      if (hasMatchingStructure) {
+        payloadAnalysis.structureMatches++;
+      } else {
+        payloadAnalysis.structureMismatches++;
+      }
+    });
+
+    console.log(`🎯 [Payload Analysis]`);
+    console.log(`   • LLM Generated: ${payloadAnalysis.llmGenerated.length}`);
+    console.log(`   • FrogPost Default: ${payloadAnalysis.defaultFrogPost.length}`);
+    console.log(`   • Structure Matches: ${payloadAnalysis.structureMatches}`);
+    console.log(`   • Structure Mismatches: ${payloadAnalysis.structureMismatches}`);
+
+    // Show sample LLM payloads
+    if (payloadAnalysis.llmGenerated.length > 0) {
+      console.log(`🤖 [LLM Generated Payloads] Sample (first 5):`);
+      payloadAnalysis.llmGenerated.slice(0, 5).forEach((item, i) => {
+        console.log(`   ${i+1}. Index ${item.index}:`, item.payload);
+        
+        // Validate structure
+        const interceptedExample = interceptedMessages.find(msg => msg.data && typeof msg.data === 'object');
+        if (interceptedExample) {
+          const interceptedKeys = Object.keys(interceptedExample.data).sort();
+          const payloadKeys = Object.keys(item.payload || {}).sort();
+          const structureMatch = JSON.stringify(interceptedKeys) === JSON.stringify(payloadKeys);
+          console.log(`      Structure Match: ${structureMatch ? '✅' : '❌'} (Expected: [${interceptedKeys.join(', ')}], Got: [${payloadKeys.join(', ')}])`);
+        }
+      });
+    }
+
+    // Show sample FrogPost payloads for comparison
+    if (payloadAnalysis.defaultFrogPost.length > 0) {
+      console.log(`🐸 [FrogPost Default Payloads] Sample (first 3):`);
+      payloadAnalysis.defaultFrogPost.slice(0, 3).forEach((item, i) => {
+        console.log(`   ${i+1}. Index ${item.index}:`, item.payload);
+      });
+    }
+
+    // Effectiveness analysis
+    console.log(`⚡ [Effectiveness Analysis]`);
+    const renderPayloads = payloads.filter(p => {
+      const data = p.payload || p;
+      return data.type === 'render' && data.html && data.html.includes('alert');
+    });
+    console.log(`   • Render + XSS Payloads: ${renderPayloads.length}`);
+    
+    const uniqueXSSVectors = new Set();
+    renderPayloads.forEach(p => {
+      const html = (p.payload || p).html || '';
+      if (html.includes('<img')) uniqueXSSVectors.add('img_onerror');
+      if (html.includes('<svg')) uniqueXSSVectors.add('svg_onload');
+      if (html.includes('<script')) uniqueXSSVectors.add('script_tag');
+      if (html.includes('<iframe')) uniqueXSSVectors.add('iframe_src');
+      if (html.includes('onload')) uniqueXSSVectors.add('onload_event');
+    });
+    console.log(`   • Unique XSS Vectors: ${Array.from(uniqueXSSVectors).join(', ')}`);
+
+    // Final verdict
+    const successRate = (payloadAnalysis.structureMatches / payloads.length * 100).toFixed(1);
+    console.log(`🏆 [Final Verdict]`);
+    console.log(`   • Structure Match Rate: ${successRate}%`);
+    console.log(`   • LLM Quality: ${payloadAnalysis.llmGenerated.length > 0 && successRate > 80 ? '✅ EXCELLENT' : payloadAnalysis.llmGenerated.length > 0 ? '⚠️ NEEDS IMPROVEMENT' : '❌ NO LLM PAYLOADS'}`);
+    
+    return {
+      endpoint: targetEndpoint,
+      analysis: payloadAnalysis,
+      successRate: parseFloat(successRate),
+      payloads: payloads
+    };
+
+  } catch (error) {
+    console.error("❌ Error during payload verification:", error);
+    return null;
+  }
+};
+
+async function showTraceReport(key, report) {
+    if (!report) {
+        report = await window.traceReportStorage.getTraceReport(key);
+    }
+    if (report) {
+        const payloads = await window.traceReportStorage.getReportPayloads(key);
+        await renderReportUI(report, payloads);
+    } else {
+        showToastNotification(`No report found for ${key}`, 'info');
+    }
+}
+async function renderReportUI(traceReportData, initialPayloads = null) {
+    let traceResultsPanel = document.getElementById('trace-results-panel');
+    let content = document.getElementById('trace-results-content');
+
+    // If panel doesn't exist (first open), create it with basic structure
+    if (!traceResultsPanel) {
+        traceResultsPanel = document.createElement('div');
+        traceResultsPanel.id = 'trace-results-panel';
+        traceResultsPanel.className = 'trace-results-panel';
+        traceResultsPanel.innerHTML = `<div class="trace-results-content" id="trace-results-content"></div>`;
+        document.body.appendChild(traceResultsPanel);
+        const backdrop = document.createElement('div');
+        backdrop.className = 'trace-panel-backdrop';
+        backdrop.onclick = () => { backdrop.remove(); traceResultsPanel.remove(); };
+        document.body.appendChild(backdrop);
+        content = traceResultsPanel.querySelector('#trace-results-content');
+    }
+
+    if (!traceReportData || typeof traceReportData !== 'object') {
+        content.innerHTML = '<p class="error-message">Error: Invalid or missing report data.</p>';
+        return;
+    }
+
+    try {
+        const details = traceReportData.details || {};
+        const analysisStorageKey = traceReportData.endpoint || details.endpointKey || traceReportData.summary?.endpointKey || '';
+        if (!analysisStorageKey) {
+            console.error("Could not determine endpoint key for the report. UI may be incomplete.");
+        }
+        const endpointDisplay = traceReportData.url || traceReportData.endpoint || analysisStorageKey || 'Unknown Endpoint';
+        const safeKeyIdPart = (analysisStorageKey || 'default').replace(/[^a-zA-Z0-9_-]/g, '_');
+        const originalEndpointKey = analysisStorageKey;
+        let payloadsToRender = initialPayloads;
+        if (payloadsToRender === null && analysisStorageKey) {
+            try {
+                payloadsToRender = await window.traceReportStorage.getReportPayloads(analysisStorageKey);
+            } catch (e) {
+                console.error(`Failed to load payloads for ${analysisStorageKey}:`, e);
+                payloadsToRender = [];
+            }
+        }
+        payloadsToRender = payloadsToRender || [];
+        const summary = traceReportData.summary || {};
+        const score = summary.riskScore ?? 100;
+
+        const llmAnalysisData = details.llm_analysis || null;
+        const currentPayloadCount = details.payloadsGeneratedCount ?? 0;
+        const currentPayloadMode = details.payloadMode || 'default';
+
+        const escapeHTML = window.escapeHTML || function(str) { return String(str ?? '').replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;"); };
+        const safeGetRisk = (score) => { try { return getRiskLevelAndColor(score); } catch(e){ return { riskLevel: 'Error', riskColor: 'critical' }; }};
+        const safeGetRec = (score, data) => { try { return getRecommendationText(score, data); } catch(e){ return 'Error generating recommendation.'; }};
+        const safeRenderPayload = (p, i) => { try { return renderPayloadItem(p, i); } catch(e){ return '<p class="error-message">Error rendering payload item.</p>'; }};
+        const safeRenderStructure = (s, i) => { try { return renderStructureItem(s, i); } catch(e){ return '<p class="error-message">Error rendering structure item.</p>'; }};
+
+        const uniqueVulns = details.sinks || details.dom_xss_sinks || [];
+        const uniqueIssues = details.securityIssues || [];
+        const riskLevel = safeGetRisk(score);
+        const riskColor = riskLevel.riskColor;
+
+        const summarySection = document.createElement('div');
+        summarySection.className = 'report-section report-summary';
+        summarySection.innerHTML = `
+            <h4 class="report-section-title">Analysis Summary - <span class="report-endpoint-title">${escapeHTML(endpointDisplay)}</span></h4>
+            <div class="summary-grid compact">
+                <div class="summary-metrics" id="summary-metrics">
+                    <div class="metric" data-metric="handler">
+                        <div class="metric-header"><span class="metric-label">Handler Security Score</span></div>
+                        <span class="metric-value ${getHandlerScoreClass(Math.max(1, Math.min(10, Math.round((10 * (reportData.securityScore ?? summary.securityScore ?? 100) / 100)))))}">${Math.max(1, Math.min(10, Math.round((10 * (reportData.securityScore ?? summary.securityScore ?? 100) / 100))))}/10</span>
+                        <div class="handler-severity"></div>
+                    </div>
+                    <div class="metric" data-metric="msgs">
+                        <div class="metric-header"><span class="metric-label">Msgs</span></div>
+                        <span class="metric-value">${uiMessageCount}</span>
+                    </div>
+                    <div class="metric" data-metric="structs">
+                        <div class="metric-header"><span class="metric-label">Structs</span></div>
+                        <span class="metric-value">${structures?.length ?? 0}</span>
+                    </div>
+                    <div class="metric" data-metric="sinks">
+                        <div class="metric-header"><span class="metric-label">Sinks</span></div>
+                        <span class="metric-value">${uniqueVulns?.length ?? 0}</span>
+                    </div>
+                    <div class="metric" data-metric="payloads" id="report-payload-count-metric-${safeKeyIdPart}">
+                        <div class="metric-header"><span class="metric-label">Payloads (<span id="payload-mode-display-${safeKeyIdPart}">${currentPayloadMode.replace(/_/g, ' ')}</span>)</span></div>
+                        <span class="metric-value" id="payload-count-display-${safeKeyIdPart}">${currentPayloadCount}</span>
+                    </div>
+                </div>
+            </div>`;
+
+        content.appendChild(summarySection);
+
+        // Simplified: no risk overview/details population
+
+        const bestHandlerCode = details.bestHandler?.handler || details.analyzedHandler?.handler || details.analyzedHandler?.code;
+        if (bestHandlerCode) {
+            const handlerSection = document.createElement('div');
+            handlerSection.className = 'report-section report-handler';
+
+            const llmAnalysis = details.llmAnalysis || {};
+            const handlerScore = llmAnalysis.handler_score;
+            const handlerAssessment = llmAnalysis.handler_assessment;
+
+            let handlerHTML = `<details class="report-details" open>
+                     <summary class="report-summary-toggle"><strong>Analyzed Handler</strong><span class="handler-meta">(Cat: ${escapeHTML(details.bestHandler?.category || 'N/A')} | Score: ${details.bestHandler?.score?.toFixed(1) || 'N/A'})</span><span class="toggle-icon">▼</span></summary>
+                <div class="report-code-block handler-code"><pre><code>${escapeHTML(bestHandlerCode)}</code></pre></div>`;
+
+            if (handlerScore !== undefined || handlerAssessment) {
+                const score = handlerScore || 0;
+                const scoreColor = score >= 80 ? '#4CAF50' : score >= 60 ? '#FF9800' : score >= 40 ? '#FF5722' : '#f44336';
+                const scoreDescription = score >= 80 ? 'Excellent handler detection' :
+                                      score >= 60 ? 'Good handler detection' :
+                                      score >= 40 ? 'Partial handler detection' : 'Poor/incomplete handler';
+
+                handlerHTML += `
+                    <div class="llm-handler-validation" style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; padding: 12px; margin-top: 12px;">
+                        <div style="display: flex; align-items: center; margin-bottom: 8px;">
+                            <span style="font-size: 14px; margin-right: 6px;">🤖</span>
+                            <strong style="color: #2d3748; font-size: 13px;">AI Handler Validation</strong>
+                        </div>
+                        ${handlerAssessment ? `<div style="font-size: 12px; line-height: 1.4; color: #4a5568; margin-bottom: 8px;">${escapeHTML(handlerAssessment)}</div>` : ''}
+                        ${handlerScore !== undefined ? `
+                            <div style="margin-top: 8px;">
+                                <div style="font-size: 11px; color: #718096; margin-bottom: 3px;">Accuracy Score:</div>
+                                <div style="background-color: #e2e8f0; border-radius: 8px; height: 18px; width: 200px; position: relative; overflow: hidden;">
+                                    <div style="background: ${scoreColor}; height: 100%; width: ${Math.min(100, Math.max(0, score))}%; transition: width 0.5s ease;"></div>
+                                    <div style="position: absolute; top: 0; left: 0; right: 0; text-align: center; line-height: 18px; font-weight: bold; color: #2d3748; font-size: 10px;">${score}/100</div>
+                                </div>
+                                <div style="margin-top: 3px; font-size: 10px; color: #718096; font-style: italic;">${scoreDescription}</div>
+                            </div>
+                        ` : ''}
+                    </div>`;
+            }
+
+            handlerHTML += `</details>`;
+            handlerSection.innerHTML = handlerHTML;
+            content.appendChild(handlerSection);
+        }
+
+        // Add LLM Analysis Section after handler
+        const llmSection = createLLMAnalysisSection(analysisStorageKey, endpointDisplay);
+        content.appendChild(llmSection);
+        
+        // Setup LLM event listeners after DOM is updated
+        setupLLMEventListeners(analysisStorageKey);
+
+        const findingsSection = document.createElement('div');
+        findingsSection.className = 'report-section report-findings';
+        let findingsHTML = '<h4 class="report-section-title">Findings</h4>';
+        let findingsExist = false;
+
+        if (details.originValidationChecks?.length > 0) {
+            findingsExist = true;
+            findingsHTML += `<div class="subsection"><h5 class="report-subsection-title">Origin Validation (${details.originValidationChecks.length})</h5><table class="report-table"><thead><tr><th>Check Type</th><th>Strength</th><th>Compared Value</th><th>Snippet</th></tr></thead><tbody>`;
+            details.originValidationChecks.forEach(check => {
+                const type = check?.type || '?'; const strength = check?.strength || 'N/A'; const value = check?.comparedValue !== null && check?.comparedValue !== undefined ? String(check.comparedValue).substring(0, 100) : 'N/A'; const snippetHTML = check?.rawSnippet ? `<code class="context-snippet">${escapeHTML(check.rawSnippet)}</code>` : 'N/A';
+                let strengthClass = strength.toLowerCase(); if(strength === 'Missing') strengthClass = 'critical'; else if(strength === 'Weak') strengthClass = 'high'; else if(strength === 'Medium') strengthClass = 'medium'; else if(strength === 'Strong') strengthClass = 'negligible'; else strengthClass='low';
+                findingsHTML += `<tr class="severity-row-${strengthClass}"><td>${escapeHTML(type)}</td><td><code>${escapeHTML(value)}</code></td><td>${snippetHTML}</td></tr>`;
+            });
+            findingsHTML += `</tbody></table></div>`;
+        }
+
+        if (uniqueVulns.length > 0) {
+            findingsExist = true;
+            findingsHTML += `<div class="subsection"><h5 class="report-subsection-title">Potential Sinks Reached (${uniqueVulns.length})</h5><table class="report-table"><thead><tr><th>Sink</th><th>Data Path</th><th>Conditions</th><th>Context Snippet</th></tr></thead><tbody>`;
+            uniqueVulns.forEach(vuln => {
+                const type = vuln?.name || vuln?.type || '?'; const severity = vuln?.severity || 'N/A'; const contextHTML = vuln?.context || ''; const sourcePath = vuln?.sourcePath || '(unknown)'; const conditions = vuln?.conditions || [];
+                let conditionsHtml = 'None'; if (conditions.length > 0) { conditionsHtml = conditions.map(c => { let valStr = escapeHTML(String(c.value)); if (typeof c.value === 'string') valStr = `'${valStr}'`; return `<code>${escapeHTML(c.path)} ${escapeHTML(c.op)} ${valStr}</code>`; }).join('<br>'); }
+                findingsHTML += `<tr class="severity-row-${severity.toLowerCase()}"><td>${escapeHTML(type)}</td><td><code>${escapeHTML(sourcePath)}</code></td><td>${conditionsHtml}</td><td class="context-snippet-cell">${contextHTML}</td></tr>`;
+            });
+            findingsHTML += `</tbody></table></div>`;
+        }
+
+        if (uniqueIssues.length > 0) {
+            findingsExist = true;
+            findingsHTML += `<div class="subsection"><h5 class="report-subsection-title">Other Security Issues (${uniqueIssues.length})</h5><table class="report-table"><thead><tr><th>Issue</th><th>Context Snippet</th></tr></thead><tbody>`;
+            uniqueIssues.forEach(issue => {
+                const type = issue?.type || '?'; const severity = issue?.severity || 'N/A'; const contextHTML = issue?.context || '';
+                findingsHTML += `<tr class="severity-row-${severity.toLowerCase()}"><td>${escapeHTML(type)}</td><td class="context-snippet-cell">${contextHTML}</td></tr>`;
+            });
+            findingsHTML += `</tbody></table></div>`;
+        }
+
+        if (!findingsExist) { findingsHTML += '<p class="no-findings-text">No significant findings detected.</p>'; }
+        findingsSection.innerHTML = findingsHTML;
+        content.appendChild(findingsSection);
+
+        if (details.dataFlows?.length > 0) {
+            const flowSection = document.createElement('div');
+            flowSection.className = 'report-section report-dataflow';
+            flowSection.innerHTML = ` <h4 class="report-section-title">Data Flow</h4> <table class="report-table dataflow-table"> <thead> <tr> <th>Source Property</th> <th>Sink / Target</th> <th>Conditions</th> <th>Code Snippet</th> </tr> </thead> <tbody> </tbody> </table>`;
+            const tbody = flowSection.querySelector('tbody');
+            if (tbody) { details.dataFlows.forEach(flow => { const prop = flow?.sourcePath || '?'; const sink = flow?.destinationContext || '?'; const context = flow?.fullCodeSnippet || flow?.taintedNodeSnippet || ''; const displayProp = prop === '(root)' ? '(root data)' : `event.data.${escapeHTML(prop)}`; const conditions = flow?.requiredConditionsForFlow || flow?.conditions || []; let conditionsHtml = 'None'; if (conditions.length > 0) { conditionsHtml = conditions.map(c => { let valStr = escapeHTML(String(c.value)); if (typeof c.value === 'string') valStr = `'${valStr}'`; return `<code>${escapeHTML(c.path)} ${escapeHTML(c.op)} ${valStr}</code>`; }).join('<br>'); } const rowHtml = ` <tr> <td><code>${displayProp}</code></td> <td>${escapeHTML(sink)}</td> <td>${conditionsHtml}</td> <td><code class="context-snippet">${escapeHTML(context)}</code></td> </tr>`; tbody.insertAdjacentHTML('beforeend', rowHtml); }); }
+            else { flowSection.innerHTML += '<p class="error-message">Error rendering data flow table body.</p>'; }
+            content.appendChild(flowSection);
+        }
+
+        const payloadSection = document.createElement('div');
+        payloadSection.className = 'report-section report-payloads';
+        payloadSection.id = 'report-payload-section-' + safeKeyIdPart;
+
+        let payloadsHTML = `<h4 class="report-section-title">Generated Payloads (<span id="payload-count-display-${safeKeyIdPart}">${payloadsToRender.length}</span> - <span id="payload-mode-display-${safeKeyIdPart}">${currentPayloadMode.replace(/_/g, ' ')}</span>)</h4>`;
+        payloadsHTML += `<div id="payloads-list-${safeKeyIdPart}" class="payloads-list report-list">`;
+        if (payloadsToRender.length > 0) {
+            payloadsHTML += payloadsToRender.map((p, i) => safeRenderPayload(p, i)).join('');
+        } else {
+            payloadsHTML += `<p>No payloads generated yet for mode: ${currentPayloadMode.replace(/_/g, ' ')}.</p>`;
+        }
+        payloadsHTML += `</div>`;
+        if (payloadsToRender.length < (details.payloadsGeneratedCount || 0)) {
+            const buttonText = `Load All ${details.payloadsGeneratedCount || 0} Payloads`;
+            payloadsHTML += `<button class="control-button secondary-button show-more-btn load-payloads-btn" data-analysis-key="${escapeHTML(analysisStorageKey)}">${buttonText}</button>`;
+        }
+        payloadSection.innerHTML = payloadsHTML;
+        content.appendChild(payloadSection);
+
+        if (structures?.length > 0) {
+            const structureSection = document.createElement('div');
+            structureSection.className = 'report-section report-structures';
+            let structuresHTML = `<h4 class="report-section-title">Unique Msg Structures (${structures.length})</h4><div class="structures-list report-list">`;
+            structures.slice(0, 3).forEach((s, i) => { structuresHTML += safeRenderStructure(s, i); }); structuresHTML += `</div>`;
+            if (structures.length > 3) { structuresHTML += `<button id="showAllStructuresBtn" class="control-button secondary-button show-more-btn">Show All ${structures.length}</button>`; }
+            structureSection.innerHTML = structuresHTML;
+            content.appendChild(structureSection);
+        }
+
+        const bottomButtonContainer = document.createElement('div'); bottomButtonContainer.style.cssText = 'margin-top:20px; display: flex; justify-content: center; gap: 15px;'; const exportJsonBtn = document.createElement('button'); exportJsonBtn.textContent = 'Export JSON'; exportJsonBtn.className = 'control-button secondary-button'; exportJsonBtn.addEventListener('click', (e) => { e.stopPropagation(); try { const jsonData = JSON.stringify(reportData, null, 2); const blob = new Blob([jsonData], { type: 'application/json' }); const url = URL.createObjectURL(blob); const a = document.createElement('a'); const safeFilename = (analysisStorageKey || 'frogpost_report').replace(/[^a-z0-9_\-.]/gi, '_'); a.href = url; a.download = `${safeFilename}.json`; document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url); } catch (exportError) { alert("Failed to export report as JSON."); } }); const closeBtnInside = document.createElement('button'); closeBtnInside.textContent = 'Close Report'; closeBtnInside.className = 'control-button secondary-button'; closeBtnInside.onclick = () => { document.querySelector('.trace-panel-backdrop')?.remove(); panel.remove(); }; bottomButtonContainer.appendChild(exportJsonBtn); bottomButtonContainer.appendChild(closeBtnInside); content.appendChild(bottomButtonContainer);
+        attachReportEventListeners(panel, reportData);
+
+    } catch (renderError) {
+        content.innerHTML = `<p class="error-message">Error rendering report details: ${renderError.message}</p>`;
+        console.error("Error rendering report:", renderError);
+    }
+}
+
+async function handleLoadPayloadsClick(event) {
+    const button = event.target;
+    const analysisKey = button.dataset.analysisKey;
+    const reportPanel = button.closest('.trace-results-panel');
+    const safeKeyIdPart = analysisKey?.replace(/[^a-zA-Z0-9_-]/g, '_');
+    const payloadListElement = reportPanel?.querySelector(`#payloads-list-${safeKeyIdPart}`);
+
+    if (!analysisKey || !payloadListElement) {
+        log.error("Cannot load payloads: missing analysis key or list element.", { key: analysisKey, listFound: !!payloadListElement });
+        showToastNotification("Error: Could not find elements to load payloads.", "error");
+        button.textContent = `Load Payloads`;
+        button.disabled = false;
+        return;
+    }
+
+    button.textContent = 'Loading...';
+    button.disabled = true;
+
+    try {
+        const payloads = await window.traceReportStorage.getReportPayloads(analysisKey);
+        if (payloads && payloads.length > 0) {
+            const newPayloadsHtml = payloads.map((p, i) => renderPayloadItem(p, i)).join('');
+            if (payloadListElement.innerHTML.includes('Click button below to load payloads')) {
+                payloadListElement.innerHTML = newPayloadsHtml;
+            } else {
+                payloadListElement.insertAdjacentHTML('beforeend', newPayloadsHtml);
+            }
+            const countDisplay = reportPanel.querySelector(`#payload-count-display-${safeKeyIdPart}`);
+            if(countDisplay) countDisplay.textContent = payloads.length;
+
+        } else {
+            payloadListElement.innerHTML = `<p>No payloads found in storage for this report.</p>`;
+        }
+        button.remove();
+    } catch (error) {
+        log.error(`Error loading payloads:`, error);
+        payloadListElement.innerHTML = `<p class="error-message">Error loading payloads.</p>`;
+        button.textContent = `Retry Load Payloads`;
+        button.disabled = false;
+    }
+}
+async function handleGenerateSmartPayloadsClick(event) {
+    const button = event.target;
+    const controlsDiv = button.closest('.smart-payload-controls');
+    if (!controlsDiv) {
+        log.error("Cannot find smart payload controls container.");
+        return;
+    }
+
+    const statusSpan = controlsDiv.querySelector('.smart-payload-status');
+    const analysisKey = controlsDiv.dataset.analysisKey;
+    const originalEndpointKey = controlsDiv.dataset.endpointKey;
+    const reportPanel = button.closest('.trace-results-panel');
+    const safeKeyIdPart = analysisKey?.replace(/[^a-zA-Z0-9_-]/g, '_');
+    if (!analysisKey || !originalEndpointKey || !reportPanel) {
+        log.error("Missing analysis key, original endpoint key, or report panel for generating smart payloads.");
+        if (statusSpan) statusSpan.textContent = 'Error: Missing data context.';
+        return;
+    }
+}
