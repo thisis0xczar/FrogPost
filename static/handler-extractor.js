@@ -1,7 +1,7 @@
 /**
  * FrogPost Extension
  * Originally Created by thisis0xczar/Lidor 
- * Refined on: 2025-09-04
+ * Refined on: 2025-09-16
  */
 
 class HandlerExtractor {
@@ -803,10 +803,17 @@ class HandlerExtractor {
 
         try {
             if(typeof log !== 'undefined') log.debug('[Debugger Tab] Creating temporary background tab for:', targetUrl);
-            const tab = await chrome.tabs.create({ url: targetUrl, active: false });
+            
+            // Create tab with special parameter to mark it as handler extraction
+            const analysisUrl = targetUrl + (targetUrl.includes('?') ? '&' : '?') + 'frogpost_handler_extraction=true';
+            const tab = await chrome.tabs.create({ url: analysisUrl, active: false });
             tabId = tab.id;
             if (!tabId) throw new Error("Failed to create target tab.");
             if(typeof log !== 'undefined') log.debug(`[Debugger Tab] Created target tab ID: ${tabId}`);
+            
+            // Mark this tab as a handler extraction tab
+            await chrome.storage.local.set({ [`handler-extraction-tab-${tabId}`]: true });
+            
             await new Promise(res => setTimeout(res, 1500));
 
             await chrome.debugger.attach({ tabId }, "1.3");
@@ -879,7 +886,13 @@ class HandlerExtractor {
 
             if (tabId) {
                 if(typeof log !== 'undefined') log.debug(`[Debugger Tab] Attempting to remove temporary tab: ${tabId}`);
-                try { await chrome.tabs.remove(tabId); if(typeof log !== 'undefined') log.debug(`[Debugger Tab] Removed temporary tab: ${tabId}`); }
+                try { 
+                    // Clean up the handler extraction flag
+                    await chrome.storage.local.remove(`handler-extraction-tab-${tabId}`);
+                    
+                    await chrome.tabs.remove(tabId); 
+                    if(typeof log !== 'undefined') log.debug(`[Debugger Tab] Removed temporary tab: ${tabId}`); 
+                }
                 catch (removeError) { if(typeof log !== 'undefined') log.error(`[Debugger Tab] Error removing temporary tab ${tabId}:`, removeError); }
             }
         }
@@ -927,9 +940,13 @@ class HandlerExtractor {
 
         try {
             if(typeof log !== 'undefined') log.debug(`[Breakpoint Exec] Creating temp tab for: ${targetUrl}`);
-            const tab = await chrome.tabs.create({ url: targetUrl, active: false });
+            // Create the temporary tab with a special marker so the extension ignores it
+            const analysisUrl = targetUrl + (targetUrl.includes('?') ? '&' : '?') + 'frogpost_handler_extraction=true';
+            const tab = await chrome.tabs.create({ url: analysisUrl, active: false });
             tabId = tab.id;
             if (!tabId) throw new Error("Failed to create target tab.");
+            // Mark this tab in storage as a handler-extraction tab for extra safety
+            try { await chrome.storage.local.set({ [`handler-extraction-tab-${tabId}`]: true }); } catch {}
             await new Promise(resolve => setTimeout(resolve, 2000));
 
             targetOrigin = new URL(targetUrl).origin;
@@ -996,11 +1013,21 @@ class HandlerExtractor {
                 throw new Error("Could not set any breakpoints for potential handlers.");
             }
 
-            if(typeof log !== 'undefined') log.debug(`[Breakpoint Exec] Injecting postMessage with targetOrigin: ${targetOrigin}`);
-            const messageDataStr = JSON.stringify(testMessageData);
-            const expression = `window.postMessage(${messageDataStr}, '${targetOrigin}');`;
-            await chrome.debugger.sendCommand({ tabId }, "Runtime.evaluate", { expression: expression });
-            if(typeof log !== 'undefined') log.debug(`[Breakpoint Exec] postMessage injected.`);
+            if(typeof log !== 'undefined') log.debug(`[Breakpoint Exec] Injecting postMessage probes with targetOrigin: ${targetOrigin}`);
+            // 1) JSON probe
+            const jsonProbe = JSON.stringify(testMessageData || { "FrogPost": "BreakpointTest" });
+            const exprJson = `window.postMessage(${jsonProbe}, '${targetOrigin}');`;
+            await chrome.debugger.sendCommand({ tabId }, "Runtime.evaluate", { expression: exprJson });
+            if(typeof log !== 'undefined') log.debug(`[Breakpoint Exec] JSON probe sent.`);
+
+            // Small delay to allow first probe to process
+            await new Promise(res => setTimeout(res, 500));
+
+            // 2) String probe (distinct marker so UI can ignore)
+            const strProbe = 'FrogPost::BreakpointTest';
+            const exprStr = `window.postMessage('${strProbe}', '${targetOrigin}');`;
+            await chrome.debugger.sendCommand({ tabId }, "Runtime.evaluate", { expression: exprStr });
+            if(typeof log !== 'undefined') log.debug(`[Breakpoint Exec] String probe sent.`);
 
             await new Promise(resolve => setTimeout(resolve, 7000));
 
@@ -1027,7 +1054,11 @@ class HandlerExtractor {
                 }
             }
             if (tabId) {
-                try { await chrome.tabs.remove(tabId); }
+                try {
+                    // Clean up the handler-extraction flag then remove the tab
+                    try { await chrome.storage.local.remove(`handler-extraction-tab-${tabId}`); } catch {}
+                    await chrome.tabs.remove(tabId);
+                }
                 catch (removeError) { if(typeof log !== 'undefined') log.error(`[Breakpoint Exec] Error removing temp tab ${tabId}:`, removeError); }
             }
         }

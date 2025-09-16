@@ -1,7 +1,7 @@
 /**
  * FrogPost Extension
  * Originally Created by thisis0xczar/Lidor 
- * Refined on: 2025-09-04
+ * Refined on: 2025-09-16
  */
 const DATA_PROP = 'data';
 
@@ -80,7 +80,86 @@ class HandlerTracer {
     }
 
     isPlainObject(obj) { if (typeof obj !== 'object' || obj === null) return false; let proto = Object.getPrototypeOf(obj); if (proto === null) return true; let baseProto = proto; while (Object.getPrototypeOf(baseProto) !== null) { baseProto = Object.getPrototypeOf(baseProto); } return proto === baseProto; }
-    analyzeJsonStructures(messages) { const structureMap = new Map(); if (!messages || messages.length === 0) return []; for (const message of messages) { if (!message) continue; try { let data = message.data; let dataType = typeof data; if (dataType === 'string') { if ((data.startsWith('{') && data.endsWith('}')) || (data.startsWith('[') && data.endsWith(']'))) { try { data = JSON.parse(data); dataType = typeof data; } catch {} } } if (this.isPlainObject(data)) { const structure = this.getJsonStructure(data); const hash = this.hashJsonStructure(structure); if (!structureMap.has(hash)) { const paths = this.identifyPathsToFuzz(structure); structureMap.set(hash, { structure: structure, examples: [message], pathsToFuzz: paths, source: message.source || 'unknown_message_source' }); } else { const entry = structureMap.get(hash); if (entry.examples.length < 3) { entry.examples.push(message); } } } } catch {} } return Array.from(structureMap.values()); }
+    analyzeJsonStructures(messages) { 
+        const structureMap = new Map(); 
+        if (!messages || messages.length === 0) return []; 
+        
+        for (const message of messages) { 
+            if (!message) continue; 
+            try { 
+                let data = message.data; 
+                let dataType = typeof data; 
+                
+                // Handle string messages that might be JSON
+                if (dataType === 'string') { 
+                    if ((data.startsWith('{') && data.endsWith('}')) || (data.startsWith('[') && data.endsWith(']'))) { 
+                        try { 
+                            data = JSON.parse(data); 
+                            dataType = typeof data; 
+                        } catch {} 
+                    } 
+                } 
+                
+                // Process object messages
+                if (this.isPlainObject(data)) { 
+                    const structure = this.getJsonStructure(data); 
+                    const hash = this.hashJsonStructure(structure); 
+                    if (!structureMap.has(hash)) { 
+                        const paths = this.identifyPathsToFuzz(structure); 
+                        structureMap.set(hash, { 
+                            structure: structure, 
+                            examples: [message], 
+                            pathsToFuzz: paths, 
+                            source: message.source || 'unknown_message_source',
+                            type: 'object'
+                        }); 
+                    } else { 
+                        const entry = structureMap.get(hash); 
+                        if (entry.examples.length < 3) { 
+                            entry.examples.push(message); 
+                        } 
+                    } 
+                } 
+                // Process string messages
+                else if (dataType === 'string') {
+                    const stringHash = `string:${data}`;
+                    if (!structureMap.has(stringHash)) {
+                        structureMap.set(stringHash, {
+                            structure: { type: 'string', value: data },
+                            examples: [message],
+                            pathsToFuzz: ['(root)'],
+                            source: message.source || 'unknown_message_source',
+                            type: 'string'
+                        });
+                    } else {
+                        const entry = structureMap.get(stringHash);
+                        if (entry.examples.length < 3) {
+                            entry.examples.push(message);
+                        }
+                    }
+                }
+                // Process array messages
+                else if (Array.isArray(data)) {
+                    const arrayHash = `array:${JSON.stringify(data)}`;
+                    if (!structureMap.has(arrayHash)) {
+                        structureMap.set(arrayHash, {
+                            structure: { type: 'array', value: data },
+                            examples: [message],
+                            pathsToFuzz: ['(root)'],
+                            source: message.source || 'unknown_message_source',
+                            type: 'array'
+                        });
+                    } else {
+                        const entry = structureMap.get(arrayHash);
+                        if (entry.examples.length < 3) {
+                            entry.examples.push(message);
+                        }
+                    }
+                }
+            } catch {} 
+        } 
+        return Array.from(structureMap.values()); 
+    }
     getJsonStructure(obj, path = '') { if (obj === null || obj === undefined) return { type: 'null', path }; const type = typeof obj; if (type !== 'object') return { type: type, path }; if (Array.isArray(obj)) { const itemStructure = obj.length > 0 ? this.getJsonStructure(obj[0], `${path}[0]`) : { type: 'empty', path: `${path}[0]` }; return { type: 'array', path, items: itemStructure }; } const structure = { type: 'object', path, properties: {} }; const keys = Object.keys(obj).sort(); for (const key of keys) { const newPath = path ? `${path}.${key}` : key; structure.properties[key] = this.getJsonStructure(obj[key], newPath); } return structure; }
     hashJsonStructure(structure) { if (!structure || !structure.type) return 'invalid'; if (structure.type === 'array') return `array[${this.hashJsonStructure(structure.items)}]`; if (structure.type !== 'object') return structure.type; const keys = Object.keys(structure.properties || {}).sort(); return keys.map(k => `${k}:${this.hashJsonStructure(structure.properties[k])}`).join(','); }
     identifyPathsToFuzz(structure, currentPath = '', paths = []) { if (!structure) return paths; const nodePath = structure.path || currentPath; if (structure.type !== 'object' && structure.type !== 'array') { if (nodePath) paths.push({ path: nodePath, type: structure.type }); return paths; } if (structure.type === 'array' && structure.items) { this.identifyPathsToFuzz(structure.items, '', paths); } else if (structure.type === 'object' && structure.properties) { for (const key of Object.keys(structure.properties)) { this.identifyPathsToFuzz(structure.properties[key], '', paths); } } const uniquePaths = []; const seenPaths = new Set(); for (const p of paths) { if (p.path && !seenPaths.has(p.path)) { seenPaths.add(p.path); uniquePaths.push(p); } } return uniquePaths; }
@@ -487,13 +566,36 @@ class HandlerTracer {
 
                 try { getAllPaths(baseObject, ''); } catch(e) { log.error(`Error extracting paths from base object for ${sourceName}`, e); continue; }
                 const uniquePaths = [...new Set(pathsToFuzz)];
+                // Prioritize paths that are more likely to flow into dangerous sinks
+                const weightPath = (p) => {
+                    try {
+                        const lastTokenMatch = p.match(/([^[.\]]+)(?:\[[^\]]+\])?$/);
+                        const last = (lastTokenMatch?.[1] || p).toLowerCase();
+                        if (last === 'html' || last === 'srcdoc' || last === 'innerhtml') return 30;
+                        if (last === 'href' || last === 'src' || last === 'content' || last === 'value' || last === 'text') return 20;
+                        if (last === 'raw') return 10;
+                        if (last === 'type' || last === 'action' || last === 'kind' || last === 'msgtype') return -100;
+                        return 0;
+                    } catch { return 0; }
+                };
+                uniquePaths.sort((a, b) => weightPath(b) - weightPath(a));
 
                 if (uniquePaths.length === 0) { log.warn(`[Payload Gen - Default] No paths found to fuzz for structure from ${sourceName}`); continue; }
                 log.debug(`[Payload Gen - Default] Fuzzing ${uniquePaths.length} unique paths for structure from ${sourceName}`);
 
                 for (const targetPath of uniquePaths) {
                     if (generatedPayloads.length >= this.MAX_PAYLOADS_TOTAL) break;
-                    for (const payload of limitedDefaultPayloads) {
+                    // Skip control keys commonly used for routing/guards (handles nested paths)
+                    try {
+                        const lastTokenMatch = targetPath.match(/([^[.\]]+)(?:\[[^\]]+\])?$/);
+                        const last = (lastTokenMatch?.[1] || '').toLowerCase();
+                        if (last === 'type' || last === 'action' || last === 'kind' || last === 'msgtype') {
+                            continue;
+                        }
+                    } catch {}
+                    // Prioritize sink-related keys like 'html' for innerHTML sinks
+                    const prioritizedPayloads = limitedDefaultPayloads;
+                    for (const payload of prioritizedPayloads) {
                         if (generatedPayloads.length >= this.MAX_PAYLOADS_TOTAL) break;
                         try {
                             const finalMessage = this._deepCopy(baseObject);
@@ -504,13 +606,12 @@ class HandlerTracer {
                             const isCallback = allCallbackPayloads.includes(payload);
                             const isEncoding = (window.FuzzingPayloads?.ENCODING || []).includes(payload);
                             const isTypeFuzz = typeFuzzPayloads.includes(payload);
-                            let pType = customPayloadsActive ? 'custom-default-dumb' : 'default-dumb';
+                            let pType = customPayloadsActive ? 'custom-FrogPost' : 'FrogPost';
                             if (isCallback) pType += '-callback'; else if(isEncoding) pType += '-encoding'; else if(isTypeFuzz) pType += '-type'; else pType += '-xss';
 
                             generatedPayloads.push({
                                 type: pType, payload: finalMessage, targetPath: targetPath, sinkType: 'N/A (Default Fuzz)', sinkSeverity: 'Low',
-                                description: `Default ${isCallback ? 'Callback' : (isEncoding ? 'Encoding' : (isTypeFuzz ? `Type (${typeof payload})` : 'XSS'))} for field ${targetPath}`,
-                                baseSource: sourceName
+                                baseSource: 'FrogPost'
                             });
                             handledPathValuePairs.add(payloadKey);
                         } catch (e) { log.error(`Error setting value for default path ${targetPath}`, e); }
@@ -532,21 +633,21 @@ class HandlerTracer {
                 for (const payload of limitedPayloads) {
                     if (generatedPayloads.length >= this.MAX_PAYLOADS_TOTAL) break;
                     const isCallback = allCallbackPayloads.includes(payload); const isTypeFuzz = typeFuzzPayloads.includes(payload); const isEncoding = (window.FuzzingPayloads?.ENCODING || []).includes(payload);
-                    let pTypeBase = customPayloadsActive ? 'custom-default-raw' : 'default-raw';
+                    let pTypeBase = customPayloadsActive ? 'custom-FrogPost-raw' : 'FrogPost-raw';
                     if (isCallback) pTypeBase += '-callback'; else if (isTypeFuzz) pTypeBase += '-type'; else if (isEncoding) pTypeBase += '-encoding'; else pTypeBase += '-xss';
 
-                    const replacePayload = { type: `${pTypeBase}-replace`, payload: payload, targetPath: 'raw', sinkType: 'unknown', description: `Default Raw Replace (${typeof payload})`, baseSource: sourceName, original: originalString };
+                    const replacePayload = { type: `${pTypeBase}-replace`, payload: payload, targetPath: 'raw', sinkType: 'unknown', baseSource: 'FrogPost', original: originalString };
                     let replaceKey; try {replaceKey = JSON.stringify(replacePayload.payload);} catch{replaceKey = String(replacePayload.payload);}
                     if (!handledPathValuePairs.has(replaceKey + '-replace')) { generatedPayloads.push(replacePayload); handledPathValuePairs.add(replaceKey + '-replace');}
                     if (generatedPayloads.length >= this.MAX_PAYLOADS_TOTAL) break;
 
                     if(typeof payload === 'string' && originalString.length > 0) {
-                        const appendPayload = { type: `${pTypeBase}-append`, payload: originalString + payload, targetPath: 'raw', sinkType: 'unknown', description: `Default Raw Append`, baseSource: sourceName, original: originalString };
+                        const appendPayload = { type: `${pTypeBase}-append`, payload: originalString + payload, targetPath: 'raw', sinkType: 'unknown', baseSource: 'FrogPost', original: originalString };
                         let appendKey; try {appendKey = JSON.stringify(appendPayload.payload);} catch{appendKey = String(appendPayload.payload);}
                         if (!handledPathValuePairs.has(appendKey + '-append')) { generatedPayloads.push(appendPayload); handledPathValuePairs.add(appendKey + '-append');}
                         if (generatedPayloads.length >= this.MAX_PAYLOADS_TOTAL) break;
 
-                        const prependPayload = { type: `${pTypeBase}-prepend`, payload: payload + originalString, targetPath: 'raw', sinkType: 'unknown', description: `Default Raw Prepend`, baseSource: sourceName, original: originalString };
+                        const prependPayload = { type: `${pTypeBase}-prepend`, payload: payload + originalString, targetPath: 'raw', sinkType: 'unknown', baseSource: 'FrogPost', original: originalString };
                         let prependKey; try {prependKey = JSON.stringify(prependPayload.payload);} catch{prependKey = String(prependPayload.payload);}
                         if (!handledPathValuePairs.has(prependKey + '-prepend')) { generatedPayloads.push(prependPayload); handledPathValuePairs.add(prependKey + '-prepend'); }
                         if (generatedPayloads.length >= this.MAX_PAYLOADS_TOTAL) break;
@@ -562,9 +663,9 @@ class HandlerTracer {
                 limitedFallbackPayloads.forEach(p => {
                     if (generatedPayloads.length < this.MAX_PAYLOADS_TOTAL) {
                         const isCallback = allCallbackPayloads.includes(p); const isTypeFuzz = typeFuzzPayloads.includes(p); const isEncoding = (window.FuzzingPayloads?.ENCODING || []).includes(p);
-                        let pTypeBase = customPayloadsActive ? 'custom-raw-fallback' : 'raw-fallback';
+                        let pTypeBase = customPayloadsActive ? 'custom-FrogPost-raw-fallback' : 'FrogPost-raw-fallback';
                         if (isCallback) pTypeBase += '-callback'; else if (isTypeFuzz) pTypeBase += '-type'; else if (isEncoding) pTypeBase += '-encoding'; else pTypeBase += '-xss';
-                        const fallbackPayload = { type: pTypeBase, payload: p, targetPath: 'raw', sinkType: 'unknown', description: `Raw Fallback Payload (${typeof p})`, baseSource: 'fallback' };
+                        const fallbackPayload = { type: pTypeBase, payload: p, targetPath: 'raw', sinkType: 'unknown', baseSource: 'FrogPost' };
                         let fbKey; try { fbKey = JSON.stringify(fallbackPayload.payload); } catch { fbKey = String(fallbackPayload.payload); }
                         if (!handledPathValuePairs.has(fbKey + '-fallback')) { generatedPayloads.push(fallbackPayload); handledPathValuePairs.add(fbKey + '-fallback');}
                     }
@@ -585,234 +686,7 @@ class HandlerTracer {
         return sanitizedPayloads.slice(0, this.MAX_PAYLOADS_TOTAL);
     }
 
-    async generateSmartPayloads(context) {
-        const { uniqueStructures = [], vulnerabilities = { sinks: [], securityIssues: [] }, staticAnalysisData = null, originalMessages = [], dynamicAnalysisResults = null } = context;
-        const safeStaticData = staticAnalysisData || {};
-        const potentialSinks = safeStaticData.potentialSinks || [];
-        const requiredConditions = safeStaticData.requiredConditions || {};
-        const analysisSucceeded = !!staticAnalysisData;
-
-        const generatedPayloads = [];
-        const handledSmartPayloadKeys = new Set();
-        const shuffleArray = arr => [...arr].sort(() => 0.5 - Math.random());
-        const { sinkCategoryToPayloadMap, customPayloadsActive, allCallbackPayloads, typeFuzzPayloads } = await this._getPayloadLists();
-
-        let synthesizedBaseStructure = null;
-        if (analysisSucceeded && staticAnalysisData) {
-            try {
-                synthesizedBaseStructure = this.createStructureFromStaticAnalysis(staticAnalysisData);
-                log.debug("[Payload Gen - Smart] Synthesized base structure example:", synthesizedBaseStructure ? JSON.stringify(synthesizedBaseStructure.example) : "null");
-            } catch(e) {
-                log.error("[Payload Gen - Smart] Error creating synthesized base structure:", e);
-                synthesizedBaseStructure = null;
-            }
-        }
-
-        const objectStructuresFromMessages = uniqueStructures
-            .filter(s => s.structure.type === 'object' && s.examples && s.examples.length > 0 && typeof s.examples[0].data === 'object' && s.examples[0].data !== null)
-            .map(s => ({
-                base: s.examples[0].data,
-                sourceName: s.examples?.[0]?.source || s.source || 'message_observed',
-                id: (s.examples?.[0]?.source || s.source || 'message_observed') + '|' + (s.structure?.keySignature || s.hash || 'no-sig')
-            }));
-
-        const rawStringExamples = uniqueStructures
-            .filter(s => s.structure.type !== 'object' && s.examples && s.examples.length > 0 && typeof s.examples[0].data === 'string')
-            .map(s => ({
-                base: s.examples[0].data,
-                sourceName: s.examples?.[0]?.source || s.source || 'raw_string_observed',
-                id: (s.examples?.[0]?.source || s.source || 'raw_string_observed') + '|' + (s.hash || 'no-sig')
-            }));
-
-        if (originalMessages && originalMessages.length > 0) {
-            originalMessages.forEach(msg => {
-                const msgData = msg?.data;
-                const msgSource = msg?.source || 'original_message';
-                if (typeof msgData === 'string') {
-                    if (!rawStringExamples.some(rs => rs.base === msgData && rs.sourceName === msgSource )) {
-                        let isPotentialJson = false; try { if ((msgData.startsWith('{') && msgData.endsWith('}')) || (msgData.startsWith('[') && msgData.endsWith(']'))) { JSON.parse(msgData); isPotentialJson = true; } } catch {}
-                        if (!isPotentialJson) { rawStringExamples.push({ base: msgData, sourceName: msgSource, id: `${msgSource}|${msgData.substring(0,50)}`}); }
-                    }
-                } else if (typeof msgData === 'object' && msgData !== null) {
-                    if (!objectStructuresFromMessages.some(os => os.sourceName === msgSource && JSON.stringify(os.base) === JSON.stringify(msgData))) {
-                        objectStructuresFromMessages.push({ base: msgData, sourceName: msgSource, id: `${msgSource}|object`});
-                    }
-                }
-            });
-        }
-
-
-        if (!analysisSucceeded || potentialSinks.length === 0) {
-            log.warn("[Payload Gen - Smart] No sinks identified by static analysis or analysis failed. Cannot generate smart payloads based on sinks.");
-            return [];
-        }
-
-        log.debug("[Payload Gen - Smart] Full Potential Sinks from Static Analysis for Smart Gen:", JSON.stringify(potentialSinks));
-
-        const sinkPathsToFuzz = potentialSinks
-            .filter(sink => sink.sourcePath && sink.sourcePath !== '(Tainted non-data property)' && sink.sourcePath !== '(root)' && sink.sourcePath !== '(parsed_root)')
-            .sort((a, b) => (this.severityOrder[b.severity?.toLowerCase()] || 0) - (this.severityOrder[a.severity?.toLowerCase()] || 0));
-
-        let baseStructuresForFuzzing = [];
-        if (objectStructuresFromMessages.length > 0) {
-            baseStructuresForFuzzing.push(...objectStructuresFromMessages);
-            log.info(`[Payload Gen - Smart] Prioritizing ${objectStructuresFromMessages.length} observed object structures for smart fuzzing.`);
-        } else if (synthesizedBaseStructure && synthesizedBaseStructure.example && Object.keys(synthesizedBaseStructure.example).length > 0) {
-            log.info("[Payload Gen - Smart] No observed object messages, using synthesized structure as base.");
-            baseStructuresForFuzzing.push({
-                base: synthesizedBaseStructure.example,
-                sourceName: 'synthesized',
-                id: 'synthesized|' + (synthesizedBaseStructure.keySignature || 'synthesized:object:')
-            });
-        } else {
-            log.warn("[Payload Gen - Smart] No suitable object base (observed or synthesized with content) for smart fuzzing of specific paths.");
-        }
-
-
-        if (sinkPathsToFuzz.length > 0 && baseStructuresForFuzzing.length > 0) {
-            log.info(`[Payload Gen - Smart] Processing ${sinkPathsToFuzz.length} specific sink paths against ${baseStructuresForFuzzing.length} base object structures.`);
-            for (const baseStruct of baseStructuresForFuzzing) {
-                if (generatedPayloads.length >= this.MAX_PAYLOADS_TOTAL) break;
-
-                const baseObject = baseStruct.base;
-                const sourceName = baseStruct.sourceName;
-
-                for (const sink of sinkPathsToFuzz) {
-                    if (generatedPayloads.length >= this.MAX_PAYLOADS_TOTAL) break;
-                    const targetPath = sink.sourcePath;
-                    if (!targetPath) continue;
-
-                    const conditions = sink.conditions || requiredConditions[targetPath]?.conditions || [];
-                    log.debug(`[Payload Gen - Smart] For sink ${sink.name} (targetPath: ${targetPath}), base obj BEFORE conditions:`, JSON.stringify(baseObject));
-                    log.debug(`[Payload Gen - Smart] Conditions to satisfy for ${targetPath}:`, JSON.stringify(conditions));
-
-                    const sinkCategory = sink.category || 'generic';
-                    const sinkSeverity = sink.severity || 'Low';
-                    const payloadList = sinkCategoryToPayloadMap[sinkCategory] || sinkCategoryToPayloadMap['default'];
-                    const limitedPayloads = shuffleArray(payloadList).slice(0, this.MAX_PAYLOADS_PER_SINK_PATH);
-
-                    let baseForPath;
-                    try {
-                        baseForPath = this._deepCopy(baseObject);
-                        if (baseForPath === undefined && baseObject !== undefined) {
-                            log.warn(`[Payload Gen - Smart] _deepCopy resulted in undefined. Base:`, baseObject);
-                            baseForPath = {};
-                        } else if (baseForPath === undefined && baseObject === undefined) {
-                            log.warn(`[Payload Gen - Smart] Base object was undefined for path ${targetPath} from ${sourceName}.`);
-                            baseForPath = {};
-                        }
-                        if (conditions && conditions.length > 0) {
-                            baseForPath = this._satisfyConditions(baseForPath, conditions);
-                        }
-                        log.debug(`[Payload Gen - Smart] Base obj AFTER conditions for ${targetPath} (Sink: ${sink.name}):`, JSON.stringify(baseForPath));
-                    } catch (e) { log.error(`[Payload Gen - Smart] Error preparing base for path ${targetPath} from ${sourceName}`, e); baseForPath = {}; }
-
-                    log.debug(`[Payload Gen - Smart] Generating ${limitedPayloads.length} payloads for sink path: ${targetPath} (Sink: ${sink.name}) using base from ${sourceName} (after conditions)`);
-
-                    for (const pValue of limitedPayloads) {
-                        if (generatedPayloads.length >= this.MAX_PAYLOADS_TOTAL) break;
-                        try {
-                            let finalMessage = this._deepCopy(baseForPath);
-                            if (typeof finalMessage !== 'object' || finalMessage === null) {
-                                log.warn(`[Payload Gen - Smart] Base for path ${targetPath} is not an object after copy/conditions. Forcing to empty object. Original baseForPath:`, baseForPath);
-                                finalMessage = {};
-                            }
-                            this.setNestedValue(finalMessage, targetPath, pValue);
-
-                            const payloadKey = `${targetPath}|${JSON.stringify(finalMessage)}|${sourceName}`;
-                            if (handledSmartPayloadKeys.has(payloadKey)) continue;
-
-                            const isCallback = allCallbackPayloads.includes(pValue);
-                            const isEncoding = (window.FuzzingPayloads?.ENCODING || []).includes(pValue);
-                            const payloadBaseType = 'smart-sink';
-                            let pType = customPayloadsActive ? `custom-${payloadBaseType}` : payloadBaseType;
-                            if (isCallback) pType += '-callback'; else if (isEncoding) pType += '-encoding'; else pType += '-xss';
-
-                            generatedPayloads.push({
-                                type: pType,
-                                payload: finalMessage,
-                                targetPath: targetPath,
-                                sinkType: sink.name || 'N/A (Flow Target)',
-                                sinkSeverity: sinkSeverity,
-                                description: `Targeted ${isCallback ? 'Callback' : (isEncoding ? 'Encoding/Bypass' : 'XSS')} for ${targetPath} -> ${sink.name || 'Flow'}`,
-                                baseSource: sourceName
-                            });
-                            handledSmartPayloadKeys.add(payloadKey);
-                        } catch (e) { log.error(`Error setting value for smart path ${targetPath} with payload ${pValue}`, e); }
-                    }
-                }
-                if (generatedPayloads.length >= this.MAX_PAYLOADS_TOTAL) break;
-            }
-        }
-
-        const rootSinks = potentialSinks.filter(sink => sink.sourcePath && (sink.sourcePath === '(root)' || sink.sourcePath === '(root_data)' || sink.sourcePath === '(parsed_root)'));
-        const endpointExpectsObjectSmart = (uniqueStructures || []).some(s => s.structure?.type === 'object');
-        if (!endpointExpectsObjectSmart && rootSinks.length > 0 && rawStringExamples.length > 0) {
-            log.info(`[Payload Gen - Smart] Processing ${rootSinks.length} root sinks for ${rawStringExamples.length} raw string examples.`);
-            for (const rawExample of rawStringExamples) {
-                if (generatedPayloads.length >= this.MAX_PAYLOADS_TOTAL) break;
-                const baseString = String(rawExample.base);
-                const sourceName = rawExample.sourceName;
-
-                for (const sink of rootSinks) {
-                    if (generatedPayloads.length >= this.MAX_PAYLOADS_TOTAL) break;
-                    const sinkCategory = sink.category || 'generic';
-                    const sinkSeverity = sink.severity || 'Low';
-                    const payloadList = sinkCategoryToPayloadMap[sinkCategory] || sinkCategoryToPayloadMap['default'];
-                    const limitedPayloads = shuffleArray(payloadList).slice(0, this.MAX_PAYLOADS_PER_SINK_PATH);
-
-                    log.debug(`[Payload Gen - Smart] Generating ${limitedPayloads.length} targeted raw string payloads for root sink ${sink.name} using base: "${baseString.substring(0,30)}..." from ${sourceName}`);
-                    for (const pValue of limitedPayloads) {
-                        if (generatedPayloads.length >= this.MAX_PAYLOADS_TOTAL) break;
-                        if (typeof pValue !== 'string' && pValue !== null && typeof pValue !== 'boolean' && typeof pValue !== 'number') continue;
-
-                        const payloadKey = `raw_root|${String(pValue)}|${sink.name}|${sourceName}`;
-                        if (handledSmartPayloadKeys.has(payloadKey)) continue;
-
-                        const isCallback = allCallbackPayloads.includes(pValue);
-                        const isEncoding = (window.FuzzingPayloads?.ENCODING || []).includes(pValue);
-                        let pType = customPayloadsActive ? 'custom-smart-string-root' : 'smart-string-root';
-                        if(isCallback) pType += '-callback'; else if(isEncoding) pType += '-encoding'; else pType += '-xss';
-
-                        generatedPayloads.push({
-                            type: pType,
-                            payload: pValue,
-                            targetPath: 'raw',
-                            sinkType: sink.name,
-                            sinkSeverity: sinkSeverity,
-                            description: `Smart string (root) for sink ${sink.name}`,
-                            baseSource: sourceName,
-                            original: baseString
-                        });
-                        handledSmartPayloadKeys.add(payloadKey);
-                    }
-                }
-            }
-        }
-
-
-        const uniquePayloads = [];
-        const seenPayloadContent = new Set();
-        for(const p of generatedPayloads) {
-            let key;
-            try { key = typeof p.payload === 'object' && p.payload !== null ? JSON.stringify(p.payload) : String(p.payload); } catch { key = String(p.payload); }
-            if(!seenPayloadContent.has(key)){
-                uniquePayloads.push(p);
-                seenPayloadContent.add(key);
-            }
-        }
-        log.info(`[Payload Gen - Smart] Final unique payload count: ${uniquePayloads.length} (Total generated before dedupe: ${generatedPayloads.length})`);
-        
-        const sanitizedPayloads = uniquePayloads.map(p => {
-            if (p && p.payload) {
-                return { ...p, payload: sanitizeJwts(p.payload) };
-            }
-            return p;
-        });
-        console.log(`🔐 [JWT Sanitization] Sanitized ${sanitizedPayloads.length} smart payloads`);
-        
-        return sanitizedPayloads.slice(0, this.MAX_PAYLOADS_TOTAL);
-    }
+    async generateSmartPayloads(context) { return []; }
 
 }
 
@@ -936,15 +810,54 @@ async function handleTraceButton(endpoint, traceButton) {
 
         updatePhase('structure');
         await new Promise(r => setTimeout(r, 50));
-        if (messagesAvailable) { uniqueStructures = window.handlerTracer.analyzeJsonStructures(relevantMessages); }
+        if (messagesAvailable) {
+            // Filter out extension-generated messages before structure analysis
+            try {
+                const filtered = (relevantMessages || []).filter(m => {
+                    if (typeof m?.data === 'string' && m.data === 'FrogPost::BreakpointTest') return false;
+                    if (typeof m?.data === 'object' && m?.data !== null && m.data.FrogPost === 'BreakpointTest') return false;
+                    const t = m?.data?.type;
+                    return !(typeof t === 'string' && (t.startsWith('frogPost') || t.startsWith('FROGPOST_') || t === 'realTimeDetectorReady' || t === 'realTimeHandlerDetected' || t === 'realTimeMessageSent'));
+                });
+                uniqueStructures = window.handlerTracer.analyzeJsonStructures(filtered);
+            } catch {
+                uniqueStructures = window.handlerTracer.analyzeJsonStructures(relevantMessages);
+            }
+        }
         log.debug(`[Trace Button] Unique structures identified from messages: ${uniqueStructures.length}`);
 
         updatePhase('generation');
         await new Promise(r => setTimeout(r, 50));
         const isStaticAnalysisAvailable = !!(staticAnalysisResult?.success && staticAnalysisData);
 
-        const defaultContext = { uniqueStructures, originalMessages: relevantMessages, staticAnalysisData };
+        // If we have no real observed structures (or only our breakpoint test), seed both JSON and String base payloads
+        const filteredMessages = (relevantMessages || []).filter(m => { 
+            if (typeof m?.data === 'string' && m.data === 'FrogPost::BreakpointTest') return false; 
+            if (typeof m?.data === 'object' && m?.data !== null && m.data.FrogPost === 'BreakpointTest') return false;
+            const t = m?.data?.type; 
+            return !(typeof t === 'string' && (t.startsWith('frogPost') || t.startsWith('FROGPOST_') || t === 'realTimeDetectorReady' || t === 'realTimeHandlerDetected' || t === 'realTimeMessageSent')); 
+        });
+        const onlyBreakpointTest = filteredMessages.length <= 1 && filteredMessages.every(m => {
+            try { return typeof m.data === 'object' && m.data && m.data.FrogPost === 'BreakpointTest'; } catch { return false; }
+        });
+
+        const defaultContext = { uniqueStructures, originalMessages: filteredMessages, staticAnalysisData };
         payloads = await window.handlerTracer.generateDefaultPayloads(defaultContext);
+
+        if (onlyBreakpointTest) {
+            const seedStrings = [
+                "<img src=x onerror=alert('XSS_1')>",
+                'javascript:alert(1)',
+                "'\"/><svg/onload=alert(1)>"
+            ];
+            const seedObjects = [
+                { type: 'ping' },
+                { action: 'open', url: "https://example.com" },
+                { msgType: 'test', payload: '<img src=x onerror=alert(1)>' }
+            ];
+            seedStrings.forEach(s => payloads.push({ type: 'zombie-seed-string', payload: s, targetPath: 'raw', sinkType: 'unknown', description: 'Zombie seed string' }));
+            seedObjects.forEach(o => payloads.push({ type: 'zombie-seed-json', payload: o, targetPath: 'raw', sinkType: 'unknown', description: 'Zombie seed json' }));
+        }
         log.info(`[Trace Button] Default (initial) payload generation completed. Count: ${payloads.length}`);
 
         const payloadMode = payloads.length > 0 ? 'default' : 'none';

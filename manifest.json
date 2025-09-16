@@ -27,8 +27,8 @@
     {
       "matches": ["<all_urls>"],
       "js": [
-        "content_forwarder.js",
-        "content_monitor.js"
+        "dom_injection_agent.js",
+        "content_scripts.js"
       ],
       "run_at": "document_start",
       "all_frames": true,

@@ -1,7 +1,7 @@
 /**
  * FrogPost Extension
  * Originally Created by thisis0xczar/Lidor 
- * Refined on: 2025-09-04
+ * Refined on: 2025-09-16
  */
 
 try {
@@ -15,9 +15,49 @@ try {
 }
 
 const log = { debug: (...args) => console.debug("BG:", ...args), info: (...args) => console.info("BG:", ...args), warn: (...args) => console.warn("BG:", ...args), error: (...args) => console.error("BG:", ...args), handler: (...args) => console.log("BG HANDLER:", ...args), scan: (...args) => console.log("BG SCAN:", ...args), };
-let frameConnections = new Map();
+
+/**
+ * BoundedMap - Prevents memory leaks by limiting Map size
+ * Automatically removes oldest entries when limit is reached
+ */
+class BoundedMap extends Map {
+    constructor(maxSize = 100) {
+        super();
+        this.maxSize = maxSize;
+    }
+    
+    set(key, value) {
+        // If we're at capacity, remove the oldest entry
+        if (this.size >= this.maxSize && !this.has(key)) {
+            const firstKey = this.keys().next().value;
+            this.delete(firstKey);
+        }
+        return super.set(key, value);
+    }
+}
+
+/**
+ * BoundedSet - Prevents memory leaks by limiting Set size
+ */
+class BoundedSet extends Set {
+    constructor(maxSize = 100) {
+        super();
+        this.maxSize = maxSize;
+    }
+    
+    add(value) {
+        // If we're at capacity, remove the first entry
+        if (this.size >= this.maxSize && !this.has(value)) {
+            const firstValue = this.values().next().value;
+            this.delete(firstValue);
+        }
+        return super.add(value);
+    }
+}
+
+let frameConnections = new BoundedMap(50); // Limit to 50 frame connections
 let messageBuffer;
-const injectedFramesAgents = new Map();
+const injectedFramesAgents = new BoundedMap(20); // Limit to 20 injected agents
 
 // Server management
 let serverCheckInterval = null;
@@ -81,13 +121,13 @@ function startServerMonitoring() {
     }, 30000); // Check every 30 seconds
 }
 const HANDLER_ENDPOINT_KEYS_STORAGE_KEY = 'handler_endpoint_keys';
-let endpointsWithDetectedHandlers = new Set();
+let endpointsWithDetectedHandlers = new BoundedSet(30); // Limit to 30 endpoints
 let nativePort = null;
 const NATIVE_HOST_NAME = "com.nodeserver.starter";
 let consoleSuccessIndices = [];
-let activeDebugSessions = new Map();
-const autoAttachInProgress = new Set();
-const processedUrlsInSession = new Set();
+let activeDebugSessions = new BoundedMap(10); // Limit to 10 debug sessions
+const autoAttachInProgress = new BoundedSet(5); // Limit to 5 concurrent attachments
+const processedUrlsInSession = new BoundedSet(100); // Limit to 100 processed URLs
 let isDebuggerApiModeGloballyEnabled = false;
 const DEBUGGER_MODE_STORAGE_KEY = 'debuggerApiModeEnabled';
 
@@ -103,18 +143,42 @@ const DEBUGGER_MODE_STORAGE_KEY = 'debuggerApiModeEnabled';
 
 
 class CircularMessageBuffer {
-    constructor(maxSize = 1000) { this.maxSize = maxSize; this.buffer = new Array(this.maxSize); this.head = 0; this.size = 0; }
+    constructor(maxSize = 100) { this.maxSize = maxSize; this.buffer = new Array(this.maxSize); this.head = 0; this.size = 0; }
     push(message) { message.messageId = message.messageId || `${message.timestamp || Date.now()}-${Math.random().toString(16).slice(2)}`; const existingIndex = this.findIndex(m => m.messageId === message.messageId); if (existingIndex !== -1) { this.buffer[existingIndex] = message; } else { this.buffer[this.head] = message; this.head = (this.head + 1) % this.maxSize; if (this.size < this.maxSize) { this.size++; } } }
     findIndex(predicate) { for (let i = 0; i < this.size; i++) { const index = (this.head - this.size + i + this.maxSize) % this.maxSize; if (this.buffer[index] !== undefined && predicate(this.buffer[index])) { return index; } } return -1; }
     getMessages() { const messages = []; for (let i = 0; i < this.size; i++) { const index = (this.head - this.size + i + this.maxSize) % this.maxSize; if (this.buffer[index] !== undefined) { messages.push(this.buffer[index]); } } return messages; }
     clear() { this.buffer = new Array(this.maxSize); this.head = 0; this.size = 0; }
 }
-messageBuffer = new CircularMessageBuffer(1000);
+messageBuffer = new CircularMessageBuffer(100);
 
 function normalizeEndpointUrl(url) { try { if (!url || typeof url !== 'string' || ['access-denied-or-invalid', 'unknown-origin', 'null'].includes(url)) { return { normalized: url, components: null }; } let absoluteUrlStr = url; if (!url.includes('://') && !url.startsWith('//')) { absoluteUrlStr = 'https:' + url; } else if (url.startsWith('//')) { absoluteUrlStr = 'https:' + url; } const urlObj = new URL(absoluteUrlStr); if (['about:', 'chrome:', 'moz-extension:', 'chrome-extension:', 'blob:', 'data:'].includes(urlObj.protocol)) { const normalized = url; return { normalized: normalized, components: { origin: urlObj.origin, path: urlObj.pathname, query: urlObj.search, hash: urlObj.hash } }; } const normalized = urlObj.origin + urlObj.pathname + urlObj.search; return { normalized: normalized, components: { origin: urlObj.origin, path: urlObj.pathname, query: urlObj.search, hash: urlObj.hash } }; } catch (e) { return { normalized: url, components: null }; } }
 function addFrameConnection(origin, destinationUrl) { let addedNew = false; try { const normalizedOrigin = normalizeEndpointUrl(origin)?.normalized; const normalizedDestination = normalizeEndpointUrl(destinationUrl)?.normalized; if (!normalizedOrigin || !normalizedDestination || normalizedOrigin === 'null' || normalizedDestination === 'null' || normalizedOrigin === 'access-denied-or-invalid' || normalizedDestination === 'access-denied-or-invalid' || normalizedOrigin === normalizedDestination ) { return false; } if (!frameConnections.has(normalizedOrigin)) { frameConnections.set(normalizedOrigin, new Set()); addedNew = true; } const destSet = frameConnections.get(normalizedOrigin); if (!destSet.has(normalizedDestination)) { destSet.add(normalizedDestination); addedNew = true; } } catch (e) {} return addedNew; }
 async function isDashboardOpen() { try { const dashboardUrl = chrome.runtime.getURL("dashboard/dashboard.html"); const tabs = await chrome.tabs.query({ url: dashboardUrl }); return tabs.length > 0; } catch (e) { return false; } }
 async function notifyDashboard(type, payload) { if (!(await isDashboardOpen())) return; try { let serializablePayload; try { JSON.stringify(payload); serializablePayload = payload; } catch (e) { if (payload instanceof Map) serializablePayload = Object.fromEntries(payload); else if (payload instanceof Set) serializablePayload = Array.from(payload); else serializablePayload = { error: "Payload not serializable", type: payload?.constructor?.name }; } if (chrome?.runtime?.id) { await chrome.runtime.sendMessage({ type: type, payload: serializablePayload }); } } catch (error) { if (!error.message?.includes("Receiving end does not exist") && !error.message?.includes("Could not establish connection")) {} } }
+/**
+ * Inject DOM agent using Posta-style approach
+ */
+async function injectDOMAgent(tabId, frameId = 0) {
+    try {
+        const results = await chrome.scripting.executeScript({
+            target: { tabId: tabId, frameIds: [frameId] },
+            files: ['dom_injection_agent.js'],
+            world: 'MAIN'
+        });
+        
+        if (results?.[0]?.error) {
+            log.error(`[DOM Agent] Injection failed:`, results[0].error);
+            return false;
+        }
+        
+        log.info(`[DOM Agent] Successfully injected into tab ${tabId}, frame ${frameId}`);
+        return true;
+    } catch (error) {
+        log.error(`[DOM Agent] Injection error:`, error);
+        return false;
+    }
+}
+
 function agentFunctionToInject() { const AGENT_VERSION = 'v11_postMsg_inline'; const agentFlag = `__frogPostAgentInjected_${AGENT_VERSION}`; if (window[agentFlag]) return { success: true, alreadyInjected: true, message: `Agent ${AGENT_VERSION} already present.` }; window[agentFlag] = true; let errors = []; const MAX_LISTENER_CODE_LENGTH = 15000; const originalWindowAddEventListener = window.addEventListener; const capturedListenerSources = new Set(); const safeToString = (func) => { try { return func.toString(); } catch (e) { return `[Error converting function: ${e?.message}]`; } }; const sendListenerToForwarder = (listenerCode, contextInfo, destinationUrl) => { try { const codeStr = typeof listenerCode === 'string' ? listenerCode : safeToString(listenerCode); if (!codeStr || codeStr.includes('[native code]') || codeStr.length < 25) { return; } const fingerprint = codeStr.replace(/\s+/g, '').substring(0, 250); if (capturedListenerSources.has(fingerprint)) { return; } capturedListenerSources.add(fingerprint); let stack = ''; try { throw new Error('CaptureStack'); } catch (e) { stack = e.stack || ''; } const payload = { listenerCode: codeStr.substring(0, MAX_LISTENER_CODE_LENGTH), stackTrace: stack, destinationUrl: destinationUrl || window.location.href, context: contextInfo }; window.postMessage({ type: 'frogPostAgent->ForwardToBackground', payload: payload }, window.location.origin || '*'); } catch (e) { errors.push(`sendListener Error (${contextInfo}): ${e.message}`); } }; try { window.addEventListener = function (type, listener, options) { if (type === 'message' && typeof listener === 'function') { sendListenerToForwarder(listener, 'window.addEventListener', window.location.href); } return originalWindowAddEventListener.apply(this, arguments); }; } catch (e) { errors.push(`addEventListener hook failed: ${e.message}`); window.addEventListener = originalWindowAddEventListener; } try { if (window.EventTarget && window.EventTarget.prototype) { const originalProtoAddEventListener = window.EventTarget.prototype.addEventListener; window.EventTarget.prototype.addEventListener = function(type, listener, options) { try { const isWindowLike = this === window || this === self || (typeof Window !== 'undefined' && this instanceof Window); const isMessagePort = typeof MessagePort !== 'undefined' && this instanceof MessagePort; if ((isWindowLike || isMessagePort) && type === 'message' && typeof listener === 'function') { sendListenerToForwarder(listener, isMessagePort ? 'EventTarget(MessagePort).addEventListener' : 'EventTarget(Window).addEventListener', window.location.href); } } catch(e) { errors.push(`EventTarget.prototype.addEventListener hook inner failed: ${e.message}`); } return originalProtoAddEventListener.apply(this, arguments); }; } } catch(e) { errors.push(`EventTarget.prototype.addEventListener hook failed: ${e.message}`); }
  let _currentWindowOnmessage = window.onmessage; try { Object.defineProperty(window, 'onmessage', { set: function (listener) { _currentWindowOnmessage = listener; if (typeof listener === 'function') { sendListenerToForwarder(listener, 'window.onmessage_set', window.location.href); } }, get: function () { return _currentWindowOnmessage; }, configurable: true, enumerable: true }); if (typeof _currentWindowOnmessage === 'function') { sendListenerToForwarder(_currentWindowOnmessage, 'window.onmessage_initial', window.location.href); } } catch (e) { errors.push(`onmessage hook failed: ${e.message}`); } try { const originalPortAddEventListener = MessagePort.prototype.addEventListener; MessagePort.prototype.addEventListener = function (type, listener, options) { try { if (type === 'message' && typeof listener === 'function') { sendListenerToForwarder(listener, 'port.addEventListener', window.location.href); } } catch(e) { errors.push(`port.addEventListener inner: ${e.message}`); } return originalPortAddEventListener.apply(this, arguments); }; const portOnMessageDescriptor = Object.getOwnPropertyDescriptor(MessagePort.prototype, 'onmessage'); const originalPortSetter = portOnMessageDescriptor?.set; const originalPortGetter = portOnMessageDescriptor?.get; const portOnmessageTracker = new WeakMap(); Object.defineProperty(MessagePort.prototype, 'onmessage', { set: function(listener) { try { portOnmessageTracker.set(this, listener); if (typeof listener === 'function') { sendListenerToForwarder(listener, 'port.onmessage_set', window.location.href); } if (originalPortSetter) originalPortSetter.call(this, listener); } catch(e) { errors.push(`port.onmessage set inner: ${e.message}`); } }, get: function() { try { let value = portOnmessageTracker.get(this); if (value === undefined && originalPortGetter) value = originalPortGetter.call(this); return value; } catch(e) { errors.push(`port.onmessage get inner: ${e.message}`); return undefined; } }, configurable: true, enumerable: true }); } catch (e) { errors.push(`MessagePort hook failed: ${e.message}`); } return { success: errors.length === 0, alreadyInjected: false, errors: errors, logsAdded: true }; }
 async function loadHandlerEndpoints() { try { const result = await chrome.storage.session.get([HANDLER_ENDPOINT_KEYS_STORAGE_KEY]); if (result[HANDLER_ENDPOINT_KEYS_STORAGE_KEY]) { endpointsWithDetectedHandlers = new Set(result[HANDLER_ENDPOINT_KEYS_STORAGE_KEY]); } else { endpointsWithDetectedHandlers = new Set(); } } catch (e) { endpointsWithDetectedHandlers = new Set(); } }
@@ -129,6 +193,27 @@ async function handleExtensionPageLoad(tabId, targetUrl) {
     log.debug(`[AutoAttach] Checking extension page: ${targetUrl}`);
     if (processedUrlsInSession.has(targetUrl)) { log.debug(`[AutoAttach] URL ${targetUrl} already processed in this session.`); return; }
     if (autoAttachInProgress.has(tabId)) { log.debug(`[AutoAttach] Debugger attach already in progress for tab ${tabId}, skipping.`); return; }
+    
+    // Check if real-time detection is active - if so, delay debugger attachment
+    try {
+        const results = await chrome.scripting.executeScript({
+            target: { tabId: tabId },
+            func: () => window.__frogPostRealTimeDetector_v1 ? true : false
+        });
+        if (results?.[0]?.result) {
+            log.info(`[AutoAttach] Real-time detection active for ${targetUrl}, delaying debugger attachment`);
+            // Delay debugger attachment by 2 seconds to let real-time detection work first
+            setTimeout(() => {
+                if (!autoAttachInProgress.has(tabId)) {
+                    handleExtensionPageLoad(tabId, targetUrl);
+                }
+            }, 2000);
+            return;
+        }
+    } catch (error) {
+        log.debug("Could not check real-time detection status:", error.message);
+    }
+    
     autoAttachInProgress.add(tabId);
     processedUrlsInSession.add(targetUrl);
     let attached = false; let extractor = null; let analysisTimeout = null;
@@ -171,6 +256,18 @@ async function handleExtensionPageLoad(tabId, targetUrl) {
 }
 
 async function handleWebPageLoadForDebug(tabId, targetUrl) {
+    // Skip handler extraction tabs (check both URL parameter and storage flag)
+    if (targetUrl.includes('frogpost_handler_extraction=true')) {
+        log.debug(`[Debug Mode] Skipping handler extraction tab: ${targetUrl} (Tab ID: ${tabId})`);
+        return;
+    }
+    
+    const isHandlerExtractionTab = await chrome.storage.local.get(`handler-extraction-tab-${tabId}`);
+    if (isHandlerExtractionTab[`handler-extraction-tab-${tabId}`]) {
+        log.debug(`[Debug Mode] Skipping handler extraction tab: ${targetUrl} (Tab ID: ${tabId})`);
+        return;
+    }
+    
     log.debug(`[Debug Mode] Checking web page: ${targetUrl} (Tab ID: ${tabId})`);
     if (autoAttachInProgress.has(tabId)) { log.debug(`[Debug Mode] Debugger attach already in progress for tab ${tabId}, skipping web page check.`); return; }
     autoAttachInProgress.add(tabId);
@@ -278,7 +375,7 @@ async function handleWebPageLoadForDebug(tabId, targetUrl) {
 
 async function fetchLatestReleaseInfo(repoOwner, repoName) {
     const releasesUrl = `https://github.com/${repoOwner}/${repoName}/releases/`;
-    if(typeof log !== 'undefined') log.debug(`BG: Fetching releases page HTML from: ${releasesUrl}`);
+    if(typeof log !== 'undefined') 
 
     try {
         const response = await fetch(releasesUrl, {
@@ -303,7 +400,7 @@ async function fetchLatestReleaseInfo(repoOwner, repoName) {
             try {
                 releaseUrl = new URL(match[0].match(/href=["'](.*?)["']/i)[1], releasesUrl).href;
             } catch {} // Ignore URL construction errors
-            if(typeof log !== 'undefined') log.debug(`BG: Latest release tag parsed from HTML via regex: ${tagNameFromHtml}`);
+            if(typeof log !== 'undefined') log.debug("BG: Found latest release tag:", tagNameFromHtml);
         } else {
             if(typeof log !== 'undefined') log.error("BG: Could not find the latest release tag link using regex on the releases page.");
             throw new Error("Could not parse latest release tag from GitHub page HTML using regex.");
@@ -325,7 +422,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message.type === "checkVersion") { // Use a more specific message type
         const repoOwner = "thisis0xczar";
         const repoName = "FrogPost";
-        if(typeof log !== 'undefined') log.debug(`BG: Received version check request for ${repoOwner}/${repoName}`);
+        if(typeof log !== 'undefined') 
 
         fetchLatestReleaseInfo(repoOwner, repoName)
             .then(releaseInfo => {
@@ -341,7 +438,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
 });
 
-chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+    if (changeInfo.status === 'complete' && tab?.url) {
+        handleTabUpdated(tabId, changeInfo, tab);
+    }
+});
+
+async function handleTabUpdated(tabId, changeInfo, tab) {
     if (changeInfo.status === 'complete' && tab?.url) {
         try {
             const result = await chrome.storage.local.get([DEBUGGER_MODE_STORAGE_KEY]);
@@ -350,18 +453,109 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
             if (!debuggerModeEnabled) {
                 return;
             }
-            if (tab.url.startsWith('chrome-extension://') && tab.url !== chrome.runtime.getURL("dashboard/dashboard.html")) { handleExtensionPageLoad(tabId, tab.url); }
-            else if (tab.url.startsWith('http:') || tab.url.startsWith('https://')) { handleWebPageLoadForDebug(tabId, tab.url); }
-        } catch (error) { log.error(`[onUpdated] Error checking debugger mode or processing tab ${tabId}:`, error); }
-    }
-    else if (changeInfo.status === 'loading' && tabId) {
+            if (tab.url.startsWith('chrome-extension://') && tab.url !== chrome.runtime.getURL("dashboard/dashboard.html")) { 
+                handleExtensionPageLoad(tabId, tab.url); 
+            } else if (tab.url.startsWith('http:') || tab.url.startsWith('https://')) { 
+                handleWebPageLoadForDebug(tabId, tab.url); 
+            }
+        } catch (error) { 
+            log.error(`[onUpdated] Error checking debugger mode or processing tab ${tabId}:`, error); 
+        }
+    } else if (changeInfo.status === 'loading' && tabId) {
         injectedFramesAgents.delete(tabId);
         detachDebugger({ tabId: tabId }).catch(()=>{});
     }
-});
+}
 
 chrome.tabs.onRemoved.addListener(tabId => { injectedFramesAgents.delete(tabId); detachDebugger({ tabId: tabId }).catch(()=>{}); });
-chrome.webNavigation.onCommitted.addListener(async (details) => { if (!details.url || details.transitionType === 'server_redirect') { return; } const tabFrames = injectedFramesAgents.get(details.tabId); if (tabFrames?.has(details.frameId)) { return; } try { const results = await chrome.scripting.executeScript({ target: { tabId: details.tabId, frameIds: [details.frameId] }, func: agentFunctionToInject, injectImmediately: true, world: 'MAIN' }); let injectionStatus = { success: false, alreadyInjected: false, errors: ["No result from executeScript"] }; if (results?.[0]?.result) { injectionStatus = results[0].result; } else if (results?.[0]?.error) { injectionStatus.errors = [`executeScript framework error: ${results[0].error.message || results[0].error}`]; } if (injectionStatus.success || injectionStatus.alreadyInjected) { if (!injectedFramesAgents.has(details.tabId)) { injectedFramesAgents.set(details.tabId, new Set()); } injectedFramesAgents.get(details.tabId).add(details.frameId); } } catch (error) { if (!error.message?.includes("Cannot access") && !error.message?.includes("No frame with id") && !error.message?.includes("target frame detached") && !error.message?.includes("The frame was removed") && !error.message?.includes("Could not establish connection") && !error.message?.includes("No tab with id")) {} const tf = injectedFramesAgents.get(details.tabId); if (tf) { tf.delete(details.frameId); } } });
+// Also inject when tab becomes active (user switches tabs)
+chrome.tabs.onActivated.addListener(async (activeInfo) => {
+    try {
+        const tab = await chrome.tabs.get(activeInfo.tabId);
+        if (!tab?.url) return;
+        if (!tab.url.startsWith('http') && !tab.url.startsWith('https')) return;
+        
+        // Skip handler extraction tabs (check both URL parameter and storage flag)
+        if (tab.url.includes('frogpost_handler_extraction=true')) {
+            log.debug(`[Tab Activation] Skipping handler extraction tab: ${tab.url}`);
+            return;
+        }
+        
+        const isHandlerExtractionTab = await chrome.storage.local.get(`handler-extraction-tab-${activeInfo.tabId}`);
+        if (isHandlerExtractionTab[`handler-extraction-tab-${activeInfo.tabId}`]) {
+            log.debug(`[Tab Activation] Skipping handler extraction tab: ${tab.url}`);
+            return;
+        }
+        
+        await injectDOMAgent(activeInfo.tabId, 0);
+    } catch {}
+});
+chrome.webNavigation.onCommitted.addListener((details) => {
+    if (!details.url || details.transitionType === 'server_redirect') { return; }
+    handleWebNavigationCommitted(details);
+});
+
+async function handleWebNavigationCommitted(details) {
+    // Only inject into http/https pages
+    const urlStr = details?.url || '';
+    if (!/^https?:\/\//i.test(urlStr)) {
+        return;
+    }
+    
+    // Skip handler extraction tabs (check both URL parameter and storage flag)
+    if (urlStr.includes('frogpost_handler_extraction=true')) {
+        log.debug(`[Navigation] Skipping handler extraction tab: ${urlStr}`);
+        return;
+    }
+    
+    const isHandlerExtractionTab = await chrome.storage.local.get(`handler-extraction-tab-${details.tabId}`);
+    if (isHandlerExtractionTab[`handler-extraction-tab-${details.tabId}`]) {
+        log.debug(`[Navigation] Skipping handler extraction tab: ${urlStr}`);
+        return;
+    }
+    const tabFrames = injectedFramesAgents.get(details.tabId);
+    if (tabFrames?.has(details.frameId)) { return; }
+    
+    // Try DOM agent injection first (Posta-style approach)
+    const domAgentSuccess = await injectDOMAgent(details.tabId, details.frameId);
+    
+    if (domAgentSuccess) {
+        if (!injectedFramesAgents.has(details.tabId)) { 
+            injectedFramesAgents.set(details.tabId, new Set()); 
+        } 
+        injectedFramesAgents.get(details.tabId).add(details.frameId);
+        return;
+    }
+    
+    // Fallback to original agent injection
+    try {
+        const results = await chrome.scripting.executeScript({ target: { tabId: details.tabId, frameIds: [details.frameId] }, func: agentFunctionToInject, injectImmediately: true, world: 'MAIN' });
+        let injectionStatus = { success: false, alreadyInjected: false, errors: ["No result from executeScript"] };
+        if (results?.[0]?.result) { injectionStatus = results[0].result; } else if (results?.[0]?.error) { injectionStatus.errors = [`executeScript framework error: ${results[0].error.message || results[0].error}`]; }
+        if (injectionStatus.success || injectionStatus.alreadyInjected) { if (!injectedFramesAgents.has(details.tabId)) { injectedFramesAgents.set(details.tabId, new Set()); } injectedFramesAgents.get(details.tabId).add(details.frameId); }
+    } catch (error) {
+        if (!error.message?.includes("Cannot access") && !error.message?.includes("No frame with id") && !error.message?.includes("target frame detached") && !error.message?.includes("The frame was removed") && !error.message?.includes("Could not establish connection") && !error.message?.includes("No tab with id")) {}
+        const tf = injectedFramesAgents.get(details.tabId);
+        if (tf) { tf.delete(details.frameId); }
+    }
+}
+
+async function storeRealTimeHandler(payload) {
+    const storageKey = `real-time-handlers-${payload.location}`;
+    const existingResult = await chrome.storage.local.get(storageKey);
+    const existingHandlers = existingResult[storageKey] || [];
+    
+    // Add new handler if not already present
+    const handlerExists = existingHandlers.some(h => h.id === payload.id);
+    if (!handlerExists) {
+        existingHandlers.push(payload);
+        // Keep only last 10 handlers per URL
+        if (existingHandlers.length > 10) {
+            existingHandlers.splice(0, existingHandlers.length - 10);
+        }
+        await chrome.storage.local.set({ [storageKey]: existingHandlers });
+    }
+}
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     let isAsync = false; let responseFunction = sendResponse;
@@ -381,7 +575,58 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             return true;
         }
         switch (messageType) {
-            case "runtimeListenerCaptured": if (payload) { const { listenerCode, stackTrace, destinationUrl, context } = payload; const normalizedInfo = normalizeEndpointUrl(destinationUrl); const storageIdentifier = normalizedInfo?.normalized; if (listenerCode && storageIdentifier && typeof storageIdentifier === 'string') { const storageKey = `runtime-listeners-${storageIdentifier}`; const isValidListenerCode = code => code && typeof code === 'string' && !code.includes('[native code]') && code.length > 25; isAsync = true; (async () => { let responseSent = false; let response = { success: false, error: "Storage operation did not complete" }; try { const result = await chrome.storage.local.get([storageKey]); let listeners = result[storageKey] || []; const existingIndex = listeners.findIndex(l => l.code === listenerCode); const newListenerData = { code: listenerCode, stack: stackTrace, timestamp: Date.now(), context: context }; let needsEndpointNotification = false; let needsHandlerUpdateNotification = false; if (existingIndex === -1) { listeners.push(newListenerData); if (listeners.length > 30) listeners = listeners.slice(-30); await chrome.storage.local.set({ [storageKey]: listeners }); response = { success: true, action: "saved" }; if (isValidListenerCode(listenerCode)) { needsHandlerUpdateNotification = true; } } else { response = { success: true, action: "duplicate" }; if (isValidListenerCode(listenerCode)) { needsHandlerUpdateNotification = true; } } if (isValidListenerCode(listenerCode)) { if (!endpointsWithDetectedHandlers.has(storageIdentifier)) { endpointsWithDetectedHandlers.add(storageIdentifier); await saveHandlerEndpoints(); needsEndpointNotification = true; } } if (needsEndpointNotification) { notifyDashboard("handlerEndpointDetected", { endpointKey: storageIdentifier }); } if (needsHandlerUpdateNotification) { notifyDashboard("handlerCapturedForEndpoint", { endpointKey: storageIdentifier }); } } catch (error) { response = { success: false, error: error.message }; } finally { if (responseFunction && !responseSent) { try { responseFunction(response); responseSent = true; } catch (e) {} } } })(); return true; } else { if (responseFunction) responseFunction({ success: false, error: "Missing listenerCode or invalid destinationUrl" }); return false; } } break;
+            case "runtimeListenerCaptured":
+                if (payload) {
+                    const { listenerCode, stackTrace, destinationUrl, context } = payload;
+                    const normalizedInfo = normalizeEndpointUrl(destinationUrl);
+                    const storageIdentifier = normalizedInfo?.normalized;
+                    // Drop our own agent-captured meta messages
+                    if (context && typeof context === 'string' && context.startsWith('frogPost')) {
+                        if (responseFunction) responseFunction({ success: true, action: "ignored-extension-context" });
+                        return true;
+                    }
+                    if (listenerCode && storageIdentifier && typeof storageIdentifier === 'string') {
+                        const storageKey = `runtime-listeners-${storageIdentifier}`;
+                        const isValidListenerCode = code => code && typeof code === 'string' && !code.includes('[native code]') && code.length > 25;
+                        isAsync = true;
+                        (async () => {
+                            let responseSent = false;
+                            let response = { success: false, error: "Storage operation did not complete" };
+                            try {
+                                const result = await chrome.storage.local.get([storageKey]);
+                                let listeners = result[storageKey] || [];
+                                const existingIndex = listeners.findIndex(l => l.code === listenerCode);
+                                const newListenerData = { code: listenerCode, stack: stackTrace, timestamp: Date.now(), context: context };
+                                let needsEndpointNotification = false;
+                                let needsHandlerUpdateNotification = false;
+                                if (existingIndex === -1) {
+                                    listeners.push(newListenerData);
+                                    if (listeners.length > 30) listeners = listeners.slice(-30);
+                                    await chrome.storage.local.set({ [storageKey]: listeners });
+                                    response = { success: true, action: "saved" };
+                                    if (isValidListenerCode(listenerCode)) { needsHandlerUpdateNotification = true; }
+                                } else {
+                                    response = { success: true, action: "duplicate" };
+                                    if (isValidListenerCode(listenerCode)) { needsHandlerUpdateNotification = true; }
+                                }
+                                if (isValidListenerCode(listenerCode)) {
+                                    if (!endpointsWithDetectedHandlers.has(storageIdentifier)) { endpointsWithDetectedHandlers.add(storageIdentifier); await saveHandlerEndpoints(); needsEndpointNotification = true; }
+                                }
+                                if (needsEndpointNotification) { notifyDashboard("handlerEndpointDetected", { endpointKey: storageIdentifier }); }
+                                if (needsHandlerUpdateNotification) { notifyDashboard("handlerCapturedForEndpoint", { endpointKey: storageIdentifier }); }
+                            } catch (error) {
+                                response = { success: false, error: error.message };
+                            } finally {
+                                if (responseFunction && !responseSent) { try { responseFunction(response); responseSent = true; } catch (e) {} }
+                            }
+                        })();
+                        return true;
+                    } else {
+                        if (responseFunction) responseFunction({ success: false, error: "Missing listenerCode or invalid destinationUrl" });
+                        return false;
+                    }
+                }
+                break;
             case "postMessageCaptured":
                 if (payload) {
                     const { origin, destinationUrl, data, timestamp } = payload;
@@ -428,8 +673,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                         topLevelUrl: topLevelUrlRaw
                     };
 
-                    messageBuffer.push(messageData);
-                    notifyDashboard('newPostMessage', messageData);
+                    // Filter out extension-generated messages so analysis relies on site messages only
+                    const dataType = typeof processedData === 'object' && processedData ? processedData.type : null;
+                    const isExtensionMsg = (typeof processedData === 'string' && processedData === 'FrogPost::BreakpointTest') || (typeof dataType === 'string' && (
+                        dataType.startsWith('frogPost') ||
+                        dataType.startsWith('FROGPOST_') ||
+                        dataType === 'realTimeDetectorReady' ||
+                        dataType === 'realTimeHandlerDetected' ||
+                        dataType === 'realTimeMessageSent'));
+                    
+                    if (!isExtensionMsg) {
+                        messageBuffer.push(messageData);
+                        notifyDashboard('newPostMessage', messageData);
+                    }
 
                     const newConnection = addFrameConnection(messageData.origin, messageData.destinationUrl);
                     if (newConnection) {
@@ -453,6 +709,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 try {
                     const tabId = sender?.tab?.id;
                     const frameId = sender?.frameId ?? 0;
+                    const tabUrl = sender?.tab?.url;
+                    
+                    // Skip handler extraction tabs
+                    if (tabUrl && tabUrl.includes('frogpost_handler_extraction=true')) {
+                        log.debug(`[Content Script Ready] Skipping handler extraction tab: ${tabUrl}`);
+                        break;
+                    }
+                    
                     if (tabId != null) {
                         const already = injectedFramesAgents.get(tabId)?.has(frameId);
                         if (!already) {
@@ -467,7 +731,106 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                         }
                     }
                 } catch(e) {}
-                break; default: break;
+                break;
+            case "realTimeDetectorReady":
+                // Skip handler extraction tabs
+                if (payload?.location && payload.location.includes('frogpost_handler_extraction=true')) {
+                    log.debug(`[Real-time Detector Ready] Skipping handler extraction tab: ${payload.location}`);
+                    break;
+                }
+                log.info("Real-time detector ready on:", payload?.location);
+                notifyDashboard('realTimeDetectorReady', payload);
+                break;
+        case "realTimeHandlerDetected":
+            // Skip handler extraction tabs
+            if (payload?.location && payload.location.includes('frogpost_handler_extraction=true')) {
+                log.debug(`[Real-time Handler Detected] Skipping handler extraction tab: ${payload.location}`);
+                break;
+            }
+            log.handler("Real-time handler detected:", payload);
+            notifyDashboard('realTimeHandlerDetected', payload);
+
+            // Store real-time handler for Play button to use
+            storeRealTimeHandler(payload).catch(error => {
+                log.error("Error storing real-time handler:", error);
+            });
+            break;
+
+        case "frogPostDOMAgentHandler":
+            // Skip handler extraction tabs
+            if (payload?.location && payload.location.includes('frogpost_handler_extraction=true')) {
+                log.debug(`[DOM Agent Handler] Skipping handler extraction tab: ${payload.location}`);
+                break;
+            }
+            log.handler("DOM Agent handler detected:", payload);
+            notifyDashboard('realTimeHandlerDetected', payload);
+
+            // Store DOM agent handler for Play button to use
+            storeRealTimeHandler(payload).catch(error => {
+                log.error("Error storing DOM agent handler:", error);
+            });
+            break;
+
+        case "frogPostDOMAgentMessage":
+            try {
+                const d = payload?.data;
+                // Drop our breakpoint probes entirely
+                if ((typeof d === 'string' && d === 'FrogPost::BreakpointTest') ||
+                    (d && typeof d === 'object' && d.FrogPost === 'BreakpointTest')) {
+                    break;
+                }
+                
+                // Filter out DOM agent internal messages - these should not be displayed to user
+                if (payload?.id && payload.id.startsWith('dom_agent_')) {
+                    log.debug("DOM Agent internal message filtered out:", payload.id);
+                    break;
+                }
+            } catch {}
+            log.info("DOM Agent message detected:", payload);
+            notifyDashboard('realTimeMessageSent', payload);
+            break;
+
+        case "frogPostDOMAgentReady":
+            // Skip handler extraction tabs
+            if (payload?.location && payload.location.includes('frogpost_handler_extraction=true')) {
+                log.debug(`[DOM Agent Ready] Skipping handler extraction tab: ${payload.location}`);
+                break;
+            }
+            log.info("DOM Agent ready on:", payload.location);
+            notifyDashboard('realTimeDetectorReady', payload);
+            break;
+            case "realTimeMessageSent":
+                log.debug("Real-time message sent:", payload);
+                notifyDashboard('realTimeMessageSent', payload);
+                break;
+            case "getRealTimeHandlersForUrl":
+                (async () => {
+                    try {
+                        const url = payload?.url;
+                        if (!url) { sendResponse({ success: false, error: 'Missing url' }); return; }
+                        const storageKey = `real-time-handlers-${url}`;
+                        const result = await chrome.storage.local.get(storageKey);
+                        const handlers = result[storageKey] || [];
+                        sendResponse({ success: true, handlers });
+                    } catch (e) {
+                        sendResponse({ success: false, error: e?.message || 'Unknown error' });
+                    }
+                })();
+                isAsync = true;
+                break;
+            case "realTimeExistingListeners":
+                log.info("Real-time existing listeners found on:", payload?.location);
+                notifyDashboard('realTimeExistingListeners', payload);
+                break;
+            case "realTimeCrossOriginIframe":
+                log.info("Real-time cross-origin iframe detected:", payload?.src);
+                notifyDashboard('realTimeCrossOriginIframe', payload);
+                break;
+            case "realTimeIframeHandler":
+                log.handler("Real-time iframe handler detected:", payload);
+                notifyDashboard('realTimeIframeHandler', payload);
+                break;
+            default: break;
         }
     } catch (error) { log.error("Top-level error processing message:", error, message); if (responseFunction) try { responseFunction({ success: false, error: "Handler error" }); } catch (e) {} }
     return isAsync;
@@ -479,13 +842,36 @@ chrome.runtime.onInstalled.addListener(details => {
         chrome.storage.session.remove(HANDLER_ENDPOINT_KEYS_STORAGE_KEY); 
         chrome.storage.local.remove('debuggerApiModeEnabled'); 
     } 
-    messageBuffer = new CircularMessageBuffer(1000); 
-    loadHandlerEndpoints(); 
-    
+    messageBuffer = new CircularMessageBuffer(100); 
     // Start server monitoring for LLM features
     startServerMonitoring();
     log.info("Extension initialized - server monitoring started");
 });
-loadHandlerEndpoints();
-if (!messageBuffer) { messageBuffer = new CircularMessageBuffer(1000); }
-setInterval(() => { chrome.runtime.getPlatformInfo().then(info => {}); }, 25000);
+loadHandlerEndpoints().catch(error => {
+    log.error("Error loading handler endpoints:", error);
+});
+if (!messageBuffer) { messageBuffer = new CircularMessageBuffer(100); }
+// Periodic cleanup to prevent memory accumulation
+function performPeriodicCleanup() {
+    try {
+        // Clear old processed URLs (keep only recent ones)
+        if (processedUrlsInSession.size > 50) {
+            const urls = Array.from(processedUrlsInSession);
+            processedUrlsInSession.clear();
+            // Keep only the most recent 25 URLs
+            urls.slice(-25).forEach(url => processedUrlsInSession.add(url));
+        }
+        
+        // Clear old console success indices
+        if (consoleSuccessIndices.length > 20) {
+            consoleSuccessIndices = consoleSuccessIndices.slice(-10);
+        }
+        
+        log.debug("Periodic cleanup completed");
+    } catch (error) {
+        log.error("Error during periodic cleanup:", error);
+    }
+}
+
+// Run cleanup every 5 minutes
+setInterval(performPeriodicCleanup, 300000);
