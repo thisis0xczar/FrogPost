@@ -1,7 +1,7 @@
 /**
- * FrogPost DOM Injection Agent
- * Injected directly into the MAIN world like Posta extension
- * This runs in the same context as the page's JavaScript
+ * FrogPost Extension
+ * Originally Created by thisis0xczar/Lidor 
+ * Refined on: 2025-09-17
  */
 
 (function() {

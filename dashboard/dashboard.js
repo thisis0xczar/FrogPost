@@ -1,23 +1,15 @@
 /**
  * FrogPost Extension
  * Originally Created by thisis0xczar/Lidor 
- * Refined on: 2025-09-16
+ * Refined on: 2025-09-17
  */
 
-
-/**
- * Sensitive Data Detection & Sanitization Engine for FrogPost
- * Protects users by identifying and sanitizing sensitive data before LLM analysis
- */
 class SensitiveDataDetector {
     constructor() {
         this.patterns = this.initializePatterns();
         this.sanitizedReplacements = this.initializeSafeReplacements();
     }
 
-    /**
-     * Initialize comprehensive sensitive data patterns (Top 50+ patterns)
-     */
     initializePatterns() {
         return {
             jwt: /eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]*\.[A-Za-z0-9_-]*/g,
@@ -97,13 +89,10 @@ class SensitiveDataDetector {
             doctorId: /(?:doctor[_-]?id|physician[_-]?id)["\s:=]+[A-Za-z0-9]{6,}/gi,
             hospitalId: /(?:hospital[_-]?id|facility[_-]?id)["\s:=]+[A-Za-z0-9]{6,}/gi,
             
-            custom: [] // Populated from user settings
+            custom: []
         };
     }
 
-    /**
-     * Initialize safe replacement values
-     */
     initializeSafeReplacements() {
         return {
             jwt: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkRlbW8gVXNlciIsImFkbWluIjpmYWxzZX0.DEMO_SIGNATURE',
@@ -130,9 +119,6 @@ class SensitiveDataDetector {
         };
     }
 
-    /**
-     * Detect sensitive data in a message or object
-     */
     detectSensitiveData(data) {
         const results = {
             hasSensitiveData: false,
@@ -160,9 +146,6 @@ class SensitiveDataDetector {
         return results;
     }
 
-    /**
-     * Sanitize data by replacing sensitive patterns with safe alternatives
-     */
     sanitizeData(data) {
         if (!data) return data;
         
@@ -195,9 +178,6 @@ class SensitiveDataDetector {
         return sanitized;
     }
 
-    /**
-     * Analyze messages specifically for LLM safety
-     */
     analyzeLLMSafety(messages) {
         const analysis = {
             totalMessages: messages.length,
@@ -320,19 +300,12 @@ class SensitiveDataDetector {
         try { return JSON.parse(sanitizedString); } catch { return sanitizedString; }
     }
 }
-/**
- * LLM Cost Protection System for FrogPost
- * Prevents expensive API calls and provides cost estimates
- */
 class LLMCostProtector {
     constructor() {
         this.limits = this.initializeLimits();
         this.rateLimiter = new Map();
     }
 
-    /**
-     * Initialize cost protection limits
-     */
     initializeLimits() {
         return {
             maxMessagesPerAnalysis: 10,
@@ -344,30 +317,30 @@ class LLMCostProtector {
             costWarningThreshold: 0.10,
             PRICES_PER_1K: {
                 openai: {
-                    "gpt-4o": { in: 0.0025, out: 0.0100, cachedIn: 0.00125 }, // $2.50/$10 per 1M, cached $1.25
-                    "gpt-4o-mini": { in: 0.0006, out: 0.0024, cachedIn: 0.0003 }, // $0.60/$2.40 per 1M, cached $0.30
-                    "gpt-4-turbo": { in: 0.0100, out: 0.0300 }, // Legacy pricing
-                    "gpt-3.5-turbo": { in: 0.0005, out: 0.0015 }, // Legacy pricing
-                    "o1-mini": { in: 0.0030, out: 0.0150 }, // $3/$15 per 1M
-                    "o1-preview": { in: 0.0150, out: 0.0600 } // $15/$60 per 1M
+                    "gpt-4o": { in: 0.0025, out: 0.0100, cachedIn: 0.00125 },
+                    "gpt-4o-mini": { in: 0.0006, out: 0.0024, cachedIn: 0.0003 },
+                    "gpt-4-turbo": { in: 0.0100, out: 0.0300 },
+                    "gpt-3.5-turbo": { in: 0.0005, out: 0.0015 },
+                    "o1-mini": { in: 0.0030, out: 0.0150 },
+                    "o1-preview": { in: 0.0150, out: 0.0600 }
                 },
                 anthropic: {
-                    "claude-3-5-sonnet-20241022": { in: 0.0030, out: 0.0150 }, // $3/$15 per 1M
-                    "claude-3-5-haiku-20241022": { in: 0.0008, out: 0.0040 }, // $0.80/$4 per 1M
-                    "claude-3-haiku-20240307": { in: 0.00025, out: 0.00125 }, // $0.25/$1.25 per 1M
-                    "claude-3-opus-20240229": { in: 0.0150, out: 0.0750 } // $15/$75 per 1M
+                    "claude-3-5-sonnet-20241022": { in: 0.0030, out: 0.0150 },
+                    "claude-3-5-haiku-20241022": { in: 0.0008, out: 0.0040 },
+                    "claude-3-haiku-20240307": { in: 0.00025, out: 0.00125 },
+                    "claude-3-opus-20240229": { in: 0.0150, out: 0.0750 }
                 },
                 groq: {
-                    "llama-3.1-70b-versatile": { in: 0.00059, out: 0.00079 }, // $0.59/$0.79 per 1M
-                    "llama-3.1-8b-instant": { in: 0.00005, out: 0.00008 }, // $0.05/$0.08 per 1M
-                    "mixtral-8x7b-32768": { in: 0.00027, out: 0.00027 }, // $0.27/$0.27 per 1M
-                    "gemma-7b-it": { in: 0.00007, out: 0.00007 } // $0.07/$0.07 per 1M
+                    "llama-3.1-70b-versatile": { in: 0.00059, out: 0.00079 },
+                    "llama-3.1-8b-instant": { in: 0.00005, out: 0.00008 },
+                    "mixtral-8x7b-32768": { in: 0.00027, out: 0.00027 },
+                    "gemma-7b-it": { in: 0.00007, out: 0.00007 }
                 },
                 mistral: {
-                    "mistral-large-latest": { in: 0.0020, out: 0.0060 }, // $2/$6 per 1M (estimated)
-                    "mistral-medium-latest": { in: 0.0004, out: 0.0020 }, // $0.40/$2 per 1M (estimated)
-                    "open-mixtral-8x7b": { in: 0.0007, out: 0.0007 }, // $0.70/$0.70 per 1M (estimated)
-                    "mistral-small-latest": { in: 0.0002, out: 0.0006 } // $0.20/$0.60 per 1M (estimated)
+                    "mistral-large-latest": { in: 0.0020, out: 0.0060 },
+                    "mistral-medium-latest": { in: 0.0004, out: 0.0020 },
+                    "open-mixtral-8x7b": { in: 0.0007, out: 0.0007 },
+                    "mistral-small-latest": { in: 0.0002, out: 0.0006 }
                 }
             },
             providerLimits: {
@@ -379,9 +352,6 @@ class LLMCostProtector {
         };
     }
 
-    /**
-     * Analyze request for cost and safety before sending to LLM
-     */
     analyzeRequest(analysisRequest, provider = 'openai') {
         const analysis = {
             approved: false,
@@ -434,9 +404,6 @@ class LLMCostProtector {
         return analysis;
     }
 
-    /**
-     * Optimize analysis request to reduce costs
-     */
     optimizeRequest(request) {
         const optimized = JSON.parse(JSON.stringify(request));
 
@@ -561,10 +528,6 @@ class LLMCostProtector {
         }
     }
 
-    /**
-     * Estimate tokens using provider-specific tokenizers
-     * Falls back to improved heuristic if tokenizer unavailable
-     */
     estimateTokens(payload, provider = 'openai', model = 'gpt-4o') {
         try {
             const text = JSON.stringify(payload);
@@ -586,33 +549,24 @@ class LLMCostProtector {
         }
     }
 
-    /**
-     * OpenAI token estimation with model-specific encodings
-     */
     estimateOpenAITokens(text, model) {
         const ratios = {
-            'gpt-4o': 3.2,        // o200k encoding
-            'gpt-4o-mini': 3.2,   // o200k encoding  
-            'gpt-4-turbo': 3.5,   // cl100k_base encoding
-            'gpt-3.5-turbo': 3.8, // cl100k_base encoding
-            'o1-mini': 3.2,       // o200k encoding
-            'o1-preview': 3.2     // o200k encoding
+            'gpt-4o': 3.2,
+            'gpt-4o-mini': 3.2,
+            'gpt-4-turbo': 3.5,
+            'gpt-3.5-turbo': 3.8,
+            'o1-mini': 3.2,
+            'o1-preview': 3.2
         };
         
         const ratio = ratios[model] || 3.5;
         return Math.ceil(text.length / ratio);
     }
 
-    /**
-     * Anthropic token estimation
-     */
     estimateAnthropicTokens(text) {
         return Math.ceil(text.length / 3.0);
     }
 
-    /**
-     * Groq token estimation (Llama tokenizer)
-     */
     estimateGroqTokens(text, model) {
         const ratios = {
             'llama-3.1-70b-versatile': 3.1,
@@ -625,34 +579,25 @@ class LLMCostProtector {
         return Math.ceil(text.length / ratio);
     }
 
-    /**
-     * Mistral token estimation
-     */
     estimateMistralTokens(text) {
         return Math.ceil(text.length / 3.1);
     }
 
-    /**
-     * Improved heuristic fallback
-     */
     estimateTokensHeuristic(text) {
         let tokenCount = 0;
         for (let i = 0; i < text.length; i++) {
             const char = text[i];
             if (char === ' ' || char === '\n' || char === '\t') {
-                tokenCount += 0.25; // Whitespace is often tokenized separately
+                tokenCount += 0.25;
             } else if (/[a-zA-Z0-9]/.test(char)) {
-                tokenCount += 0.3; // Alphanumeric characters
+                tokenCount += 0.3;
             } else {
-                tokenCount += 1; // Special characters, punctuation
+                tokenCount += 1;
             }
         }
         return Math.ceil(tokenCount);
     }
 
-    /**
-     * Calculate accurate cost using per-model input/output pricing
-     */
     calculateCost(provider, model, inputTokens, outputTokens = 0, cachedInputTokens = 0, useBatch = false) {
         const prices = this.limits.PRICES_PER_1K[provider.toLowerCase()];
         if (!prices || !prices[model]) {
@@ -661,7 +606,7 @@ class LLMCostProtector {
             const legacyCost = totalTokens * legacyInfo.costPerToken;
             console.warn('⚠️ [Cost Calculation] Using legacy pricing fallback:', { provider, model, totalTokens, legacyCost });
             return {
-                inputCost: legacyCost * 0.7, // Rough split
+                inputCost: legacyCost * 0.7,
                 cachedCost: 0,
                 outputCost: legacyCost * 0.3,
                 total: legacyCost,
@@ -678,7 +623,7 @@ class LLMCostProtector {
         }
 
         const modelPricing = prices[model];
-        const inRate = modelPricing.in / 1000;  // Convert per-1K to per-token
+        const inRate = modelPricing.in / 1000;
         const outRate = modelPricing.out / 1000;
         const cachedRate = (modelPricing.cachedIn || modelPricing.in * 0.5) / 1000;
 
@@ -688,7 +633,7 @@ class LLMCostProtector {
         let total = inputCost + cachedCost + outputCost;
 
         if (useBatch && (provider === 'anthropic' || provider === 'openai')) {
-            total *= 0.5; // 50% discount for batch APIs
+            total *= 0.5;
         }
 
         return {
@@ -708,9 +653,6 @@ class LLMCostProtector {
         };
     }
 
-    /**
-     * Get default model for provider
-     */
     getDefaultModel(provider) {
         const defaults = {
             'openai': 'gpt-4o-mini',
@@ -721,9 +663,6 @@ class LLMCostProtector {
         return defaults[provider.toLowerCase()] || 'gpt-4o-mini';
     }
 
-    /**
-     * Estimate expected output tokens based on request complexity
-     */
     estimateExpectedOutputTokens(analysisRequest) {
         let baseTokens = 200;
         
@@ -755,9 +694,6 @@ class LLMCostProtector {
         return true;
     }
 
-    /**
-     * Calculate actual cost from API usage data
-     */
     calculateActualCost(provider, model, usage) {
         const promptTokens = usage.prompt_tokens || 0;
         const completionTokens = usage.completion_tokens || 0;
@@ -867,7 +803,7 @@ async function checkLatestVersion() {
 
     try {
         const releaseInfo = await new Promise((resolve, reject) => {
-            chrome.runtime.sendMessage({ type: "checkVersion" }, (response) => { // Use new message type
+            chrome.runtime.sendMessage({ type: "checkVersion" }, (response) => {
                 if (chrome.runtime.lastError) {
                     reject(new Error(chrome.runtime.lastError.message || "Communication error"));
                 } else if (response?.success) {
@@ -957,7 +893,6 @@ function sanitizeString(str) {
     return str;
 }
 
-// Treat localhost and 127.0.0.1 as non-targets for dashboard endpoint listing
 function isLocalDevUrl(urlString) {
     if (!urlString) return false;
     try {
@@ -1008,7 +943,7 @@ function normalizeEndpointUrl(url) {
         }
 
         if (!url.includes('://') && !url.startsWith('//')) {
-            absUrl = 'https://' + url; // Default to https if no protocol
+            absUrl = 'https://' + url;
         } else if (url.startsWith('//')) {
             absUrl = 'https:' + url;
         }
@@ -1194,12 +1129,10 @@ async function sendMessageTo(targetKey, button) {
     let iframe = null;
     
     try {
-        // Validate inputs
         if (!targetKey || !button) {
             throw new Error("Missing required parameters");
         }
         
-        // Get message data first
         const messageItem = button.closest('.message-item');
         if (!messageItem) {
             throw new Error("Message item not found");
@@ -1218,9 +1151,7 @@ async function sendMessageTo(targetKey, button) {
             data = messageContent;
         }
         
-        // First, try to send message to the actual webpage's iframe via content script
         try {
-            // Find the webpage tab, not the extension popup
             const targetUrl = new URL(targetKey);
             const domainPattern = `*://${targetUrl.hostname}/*`;
             const tabs = await chrome.tabs.query({ url: domainPattern });
@@ -1250,19 +1181,16 @@ async function sendMessageTo(targetKey, button) {
             console.log('Failed to send via content script in sendMessageTo, falling back to iframe method:', error);
         }
         
-        // Fallback: Find existing iframe first - try both full URL and relative path
         iframe = document.querySelector(`iframe[src*="${targetKey}"]`) || 
                  document.querySelector(`iframe[src*="${new URL(targetKey).pathname}"]`) ||
                  document.querySelector('iframe');
         
-        // Create iframe only if none exists
         if (!iframe) {
             iframe = document.createElement('iframe');
             iframe.style.display = 'none';
             iframe.src = targetKey;
             document.body.appendChild(iframe);
             
-            // Wait for iframe to load
             await new Promise((resolve, reject) => {
                 const timer = setTimeout(() => {
                     reject(new Error("Iframe load timeout"));
@@ -1280,10 +1208,7 @@ async function sendMessageTo(targetKey, button) {
             });
         }
         
-        // Send message with proper origin
         if (iframe.contentWindow) {
-            // For iframes loaded in extension context, always use '*'
-            // This is necessary because the iframe origin will be the extension origin
             const targetOrigin = '*';
             
             console.log('Sending message to:', targetKey, 'Origin:', targetOrigin);
@@ -1300,11 +1225,9 @@ async function sendMessageTo(targetKey, button) {
         console.error("Error in sendMessageTo:", error);
         success = false;
     } finally {
-        // Update button state
         button.classList.toggle('success', success);
         button.classList.toggle('error', !success);
         
-        // Cleanup after delay (only if we created the iframe)
         const existingIframe = document.querySelector(`iframe[src*="${targetKey}"]`) || 
                               document.querySelector(`iframe[src*="${new URL(targetKey).pathname}"]`) ||
                               document.querySelector('iframe');
@@ -1313,10 +1236,9 @@ async function sendMessageTo(targetKey, button) {
                 if (document.body.contains(iframe)) {
                     document.body.removeChild(iframe);
                 }
-            }, 2000); // Increased timeout
+            }, 2000);
         }
         
-        // Reset button state
         setTimeout(() => {
             button.classList.remove('success', 'error');
         }, 1000);
@@ -1338,7 +1260,6 @@ async function sendMessageFromModal(targetKey, editedDataString, buttonElement, 
         dataToSend = editedDataString;
     }
     
-    // Update button state
     buttonElement.textContent = 'Sending...';
     buttonElement.disabled = true;
     buttonElement.classList.remove('success', 'error');
@@ -1346,9 +1267,7 @@ async function sendMessageFromModal(targetKey, editedDataString, buttonElement, 
     let iframe = null;
     
     try {
-        // First, try to send message to the actual webpage's iframe via content script
         try {
-            // Find the webpage tab, not the extension popup
             const targetUrl = new URL(targetKey);
             const domainPattern = `*://${targetUrl.hostname}/*`;
             const tabs = await chrome.tabs.query({ url: domainPattern });
@@ -1382,19 +1301,16 @@ async function sendMessageFromModal(targetKey, editedDataString, buttonElement, 
             console.log('Failed to send via content script, falling back to iframe method:', error);
         }
         
-        // Fallback: Find existing iframe first - try both full URL and relative path
         iframe = document.querySelector(`iframe[src*="${targetKey}"]`) || 
                  document.querySelector(`iframe[src*="${new URL(targetKey).pathname}"]`) ||
                  document.querySelector('iframe');
         
-        // Create iframe only if none exists
         if (!iframe) {
             iframe = document.createElement('iframe');
             iframe.style.display = 'none';
             iframe.src = targetKey;
             document.body.appendChild(iframe);
             
-            // Wait for iframe to load
             await new Promise((resolve, reject) => {
                 const timeoutId = setTimeout(() => {
                     reject(new Error("Iframe load timeout"));
@@ -1412,10 +1328,7 @@ async function sendMessageFromModal(targetKey, editedDataString, buttonElement, 
             });
         }
         
-        // Send message with proper origin
         if (iframe.contentWindow) {
-            // For iframes loaded in extension context, always use '*'
-            // This is necessary because the iframe origin will be the extension origin
             const targetOrigin = '*';
             
             console.log('Sending message from modal to:', targetKey, 'Origin:', targetOrigin);
@@ -1442,7 +1355,6 @@ async function sendMessageFromModal(targetKey, editedDataString, buttonElement, 
         return false;
         
     } finally {
-        // Cleanup only if we created the iframe
         const existingIframe = document.querySelector(`iframe[src*="${targetKey}"]`) || 
                               document.querySelector(`iframe[src*="${new URL(targetKey).pathname}"]`) ||
                               document.querySelector('iframe');
@@ -1452,7 +1364,6 @@ async function sendMessageFromModal(targetKey, editedDataString, buttonElement, 
             }
         }
         
-        // Reset button state
         if (buttonElement && !buttonElement.classList.contains('success')) {
             buttonElement.disabled = false;
             buttonElement.textContent = originalButtonText;
@@ -1667,7 +1578,6 @@ function updateMessageListForUrl(url) {
             if (messageElement) messageList.appendChild(messageElement);
         });
     }
-    // Restore the report *after* the message list for the active URL is rendered
     restoreLastReport(url);
 }
 
@@ -1678,7 +1588,6 @@ function setActiveUrl(url) {
         requestUiUpdate();
     }
 }
-
 function createActionButtonContainer(endpointKey) {
     const buttonContainer = document.createElement("div");
     buttonContainer.className = "button-container";
@@ -1741,9 +1650,8 @@ async function analyzeWithLLM(endpointKey, buttonEl) {
   try {
     if (buttonEl) { buttonEl.classList.add('checking'); buttonEl.disabled = true; }
     
-    console.log(`🚀 [LLM Pipeline] Starting STRICT 3-call analysis for: ${endpointKey}`);
+    console.log(`🚀 [Unified LLM] Starting unified analysis for: ${endpointKey}`);
     
-    // Get LLM settings
     const settings = await chrome.storage.sync.get(['llm_provider','llm_model']);
     const sess = await chrome.storage.session.get(['llm_api_key']);
     const provider = settings.llm_provider || 'none';
@@ -1755,7 +1663,6 @@ async function analyzeWithLLM(endpointKey, buttonEl) {
       return;
     }
 
-    // Get handler and messages
     const bestKey = `best-handler-${endpointKey}`;
     const saved = await chrome.storage.local.get([bestKey]);
     const handlerInfo = saved[bestKey] || {};
@@ -1764,9 +1671,8 @@ async function analyzeWithLLM(endpointKey, buttonEl) {
     const savedMessages = await chrome.storage.local.get([`saved-messages-${endpointKey}`]);
     const capturedMessages = savedMessages[`saved-messages-${endpointKey}`] || [];
     
-    console.log(`📊 [Pipeline] Handler: ${handlerCode.length} chars, Messages: ${capturedMessages.length} total`);
+    console.log(`📊 [Unified] Handler: ${handlerCode.length} chars, Messages: ${capturedMessages.length} total`);
 
-    // Safety analysis and consent (using actual message count)
     const sensitiveDetector = new SensitiveDataDetector();
     const costProtector = new LLMCostProtector();
     
@@ -1792,106 +1698,67 @@ async function analyzeWithLLM(endpointKey, buttonEl) {
     
     costProtector.recordAPICall();
 
-    // STEP 1: Handler Analysis (handler code ONLY)
-    console.log(`🔥 [Step 1/3] Handler analysis - sending ${handlerCode.length} chars of handler code`);
+    console.log(`🔥 [Unified Analysis] Sending ${handlerCode.length} chars of handler code + ${capturedMessages.length} messages`);
     
-    const step1Res = await fetch('http://127.0.0.1:1337/llm/analyze-handler', { 
+    const unifiedRes = await fetch('http://127.0.0.1:1337/llm/unified-analyze', { 
       method: 'POST', 
       headers: {'Content-Type':'application/json'}, 
       body: JSON.stringify({
         provider, model, apiKey,
-        context: { handlerCode }
+        context: { 
+          handlerCode,
+          observedMessages: capturedMessages
+        }
       })
     });
     
-    if (!step1Res.ok) {
-      throw new Error(`Step 1 failed: ${step1Res.status}`);
+    if (!unifiedRes.ok) {
+      throw new Error(`Unified analysis failed: ${unifiedRes.status}`);
     }
     
-    const step1Data = await step1Res.json();
-    const handlerOk = !!step1Data?.ok;
-    const detectedSinks = Array.isArray(step1Data?.dom_xss_sinks) ? step1Data.dom_xss_sinks : [];
+    const unifiedData = await unifiedRes.json();
+    const analysisOk = !!unifiedData?.ok;
     
-    console.log(`✅ [Step 1] Handler analysis complete. Sinks detected: ${detectedSinks.length}`);
-    console.log(`🔍 [Step 1] Detected sinks:`, detectedSinks);
+    const detectedSinks = Array.isArray(unifiedData?.dom_xss_sinks) ? unifiedData.dom_xss_sinks : [];
+    const prototypePollutionIndicators = Array.isArray(unifiedData?.prototype_pollution_indicators) ? unifiedData.prototype_pollution_indicators : [];
+    const handlerMatch = unifiedData?.handler_match || 50;
+    
+    console.log(`✅ [Unified Analysis] Complete. DOM XSS sinks: ${detectedSinks.length}, Prototype pollution indicators: ${prototypePollutionIndicators.length}, Handler match: ${handlerMatch}/100`);
+    console.log(`🔍 [Unified Analysis] Generated payloads: ${unifiedData?.newPayloadsCount || 0}`);
+    console.log(`🔍 [Unified Analysis] Payload array length: ${Array.isArray(unifiedData?.new_payloads) ? unifiedData.new_payloads.length : 'not array'}`);
 
-    // STEP 2: Message Analysis (≤3 shapes ONLY)
-    console.log(`🔥 [Step 2/3] Message analysis - sending ${capturedMessages.length} raw messages (server will shape to ≤3)`);
-    const step2Res = await fetch('http://127.0.0.1:1337/llm/analyze-messages', { 
-      method: 'POST', 
-      headers: {'Content-Type':'application/json'}, 
-      body: JSON.stringify({
-        provider, model, apiKey,
-        context: { observedMessages: capturedMessages }
-      })
-    });
-    
-    if (!step2Res.ok) {
-      throw new Error(`Step 2 failed: ${step2Res.status}`);
-    }
-    
-    const step2Data = await step2Res.json();
-    const messagesOk = !!step2Data?.ok;
-    
-    console.log(`✅ [Step 2] Message analysis complete`);
+    const handlerOk = analysisOk;
+    const messagesOk = analysisOk;  
+    const payloadsOk = analysisOk;
+    const payloadData = unifiedData;
+    const sinksFound = detectedSinks.length > 0 || prototypePollutionIndicators.length > 0;
 
-    // STEP 3: Payload Generation (ONLY if sinks detected)
-    let payloadsOk = false;
-    let payloadData = { newPayloads: [], payload_class: 'none' };
-    const sinksFound = detectedSinks.length > 0;
-    
-    if (sinksFound) {
-      console.log(`🔥 [Step 3/3] Payload generation - ${detectedSinks.length} sinks detected, generating payloads`);
-      const step3Res = await fetch('http://127.0.0.1:1337/llm/analyze', { 
-        method: 'POST', 
-        headers: {'Content-Type':'application/json'}, 
-        body: JSON.stringify({
-          provider, model, apiKey,
-          context: {
-            handlerCode,
-            observedMessages: capturedMessages,
-            sinks: detectedSinks
-          }
-        })
-      });
-      
-      if (!step3Res.ok) {
-        throw new Error(`Step 3 failed: ${step3Res.status}`);
-      }
-      
-      payloadData = await step3Res.json();
-      payloadsOk = !!payloadData?.ok;
-      
-      console.log(`✅ [Step 3] Payload generation complete. Generated: ${payloadData?.newPayloads?.length || 0} payloads`);
-    } else {
-      console.log(`⏭️ [Step 3/3] Skipped - no sinks detected`);
-      payloadsOk = true; // No sinks = successful "no-op"
-    }
-
-    // Calculate final score
     const finalScore = computePipelineScoreClient({ handlerOk, messagesOk, payloadsOk, sinksFound });
     
     console.log(`🏆 [Pipeline Complete] Final Score: ${finalScore}/100`);
     console.log(`📊 [Pipeline Summary] Handler: ${handlerOk ? '✅' : '❌'}, Messages: ${messagesOk ? '✅' : '❌'}, Payloads: ${payloadsOk ? '✅' : '❌'}, Sinks: ${sinksFound ? detectedSinks.length : 0}`);
 
-    // Build and save report (merge with existing trace report metadata)
     const existingReport = await window.traceReportStorage.getTraceReport(endpointKey);
     const reportToSave = {
       endpoint: endpointKey,
       timestamp: Date.now(),
       details: {
-        handlerAssessment: step1Data?.handler_assessment || '',
-        risks: Array.isArray(step1Data?.risks) ? step1Data.risks : [],
-        messageFindings: Array.isArray(step2Data?.message_risks) ? step2Data.message_risks : [],
+        handlerAssessment: unifiedData?.handler_assessment || '',
+        risks: Array.isArray(unifiedData?.risks) ? unifiedData.risks : [],
+        messageFindings: [], // Not separately analyzed in unified approach
         sinks: detectedSinks,
+        prototypePollutionIndicators,
         sinksFound,
+        handlerMatch,
         llmProvider: provider,
         model,
-        score: finalScore
+        score: finalScore,
+        dataType: unifiedData?.data_type || 'JSON'
       },
       summary: { 
         totalPayloads: payloadData?.newPayloads?.length || 0,
-        pipelineSteps: { handlerOk, messagesOk, payloadsOk }
+        pipelineSteps: { handlerOk, messagesOk, payloadsOk },
+        unifiedAnalysis: true
       }
     };
 
@@ -1901,14 +1768,12 @@ async function analyzeWithLLM(endpointKey, buttonEl) {
         reportToSave = JSON.parse(JSON.stringify(existingReport)); // Deep clone to avoid mutation
         reportToSave.details = { ...(existingReport.details || {}), ...llmGeneratedDetails };
         
-        // Preserve best/analyzed handler if present in existing report
         if (!reportToSave.details.analyzedHandler && existingReport.details?.analyzedHandler) {
           reportToSave.details.analyzedHandler = existingReport.details.analyzedHandler;
         }
         if (!reportToSave.details.bestHandler && existingReport.details?.bestHandler) {
           reportToSave.details.bestHandler = existingReport.details.bestHandler;
         }
-        // Keep structures and static analysis outputs if available
         if (!reportToSave.details.uniqueStructures && existingReport.details?.uniqueStructures) {
           reportToSave.details.uniqueStructures = existingReport.details.uniqueStructures;
         }
@@ -1918,9 +1783,11 @@ async function analyzeWithLLM(endpointKey, buttonEl) {
       } catch {}
     }
 
-    // Merge LLM payloads with existing FrogPost payloads instead of overwriting
     const existingPayloads = await window.traceReportStorage.getReportPayloads(endpointKey);
-    const incoming = Array.isArray(payloadData?.newPayloads) ? payloadData.newPayloads : [];
+    const incoming = Array.isArray(payloadData?.new_payloads) ? payloadData.new_payloads : [];
+    
+    console.log(`🎯 [Payload Merge] Existing payloads: ${existingPayloads?.length || 0}, Incoming: ${incoming.length}`);
+    
     const combined = (() => {
       const all = [...(existingPayloads || []), ...incoming];
       const uniq = new Map();
@@ -1938,21 +1805,60 @@ async function analyzeWithLLM(endpointKey, buttonEl) {
     await window.traceReportStorage.saveTraceReport(endpointKey, reportToSave);
     await window.traceReportStorage.saveReportPayloads(endpointKey, combined);
 
-    console.log('💾 [Report] Saved complete pipeline results to IndexedDB');
+    console.log(`💾 [Report] Saved complete pipeline results to IndexedDB: ${combined.length} total payloads`);
 
-    // Patch the currently open report UI instead of full re-render
     try {
-        const llmSummary = {
-            handler_assessment: step1Data?.handler_assessment || '',
-            handler_score: step1Data?.handler_score || 0,
-            risks: step1Data?.risks || [],
-            notes: step1Data?.notes || '',
-            newPayloadsCount: payloadData?.newPayloads?.length || 0,
-            payload_class: payloadData?.payload_class || 'none',
-            sinks_detected: detectedSinks || [],
-            samplePayloads: payloadData?.newPayloads?.slice(0, 2) || []
+        const handlerAnalysis = {
+            handler_assessment: unifiedData?.handler_assessment || '',
+            handler_score: unifiedData?.handler_score || 0,
+            handler_match: handlerMatch,
+            risks: unifiedData?.risks || [],
+            notes: unifiedData?.notes || '',
+            dom_xss_sinks: detectedSinks || [],
+            prototype_pollution_indicators: prototypePollutionIndicators || [],
+            data_type: unifiedData?.data_type || 'JSON'
         };
-        updateExistingReportWithLLM(llmSummary);
+        updateHandlerWithLLMAnalysis(handlerAnalysis);
+        
+        const newPayloadCount = incoming.length;
+        if (newPayloadCount > 0) {
+            const payloadCountElement = document.querySelector(`[id*="payload-count-display"]`);
+            if (payloadCountElement) {
+                const currentCount = parseInt(payloadCountElement.textContent) || 0;
+                const newCount = currentCount + newPayloadCount;
+                payloadCountElement.textContent = newCount;
+                
+                const payloadSection = payloadCountElement.closest('.metric');
+                if (payloadSection) {
+                    const existingIndicator = payloadSection.querySelector('.llm-payload-indicator');
+                    if (!existingIndicator) {
+                        const indicator = document.createElement('div');
+                        indicator.className = 'llm-payload-indicator';
+                        indicator.style.cssText = 'font-size: 10px; color: var(--accent-primary); margin-top: 2px;';
+                        indicator.textContent = `+${newPayloadCount} Added by LLM!`;
+                        payloadCountElement.parentNode.appendChild(indicator);
+                    }
+                }
+            }
+            console.log(`✅ [UI Update] Updated payload count display: +${newPayloadCount} LLM payloads`);
+            
+            const reportContent = document.getElementById('report-content');
+            if (reportContent && reportContent.style.display !== 'none') {
+                try {
+                    console.log('🔄 [UI Refresh] Refreshing payload display with updated data');
+                    const updatedPayloads = await window.traceReportStorage.getReportPayloads(endpointKey);
+                    const updatedReport = await window.traceReportStorage.getTraceReport(endpointKey);
+                    if (updatedReport && updatedPayloads) {
+                        await renderReportUI(updatedReport, updatedPayloads);
+                        console.log(`🔄 [UI Refresh] Successfully refreshed report with ${updatedPayloads.length} payloads`);
+                    }
+                } catch (e) {
+                    console.error('🔄 [UI Refresh] Failed to refresh report UI:', e);
+                }
+            }
+        }
+        
+        console.log('✅ [UI Update] Successfully updated UI with unified LLM results');
     } catch(e){ console.error('[LLM UI Patch] Failed:',e);}
 
     showToastNotification(`🎯 Pipeline Complete! Score: ${finalScore}/100, Payloads: +${incoming.length} added (total ${combined.length})`, 'success');
@@ -2290,26 +2196,22 @@ function updateDashboardUI() {
     const groupsByTopLevel = new Map();
     const allKnownKeys = new Set();
 
-    // Create a Set to track unique endpoints to prevent duplicates
     const processedEndpoints = new Set();
 
     window.frogPostState.messages.forEach(msg => {
-        // Filter out FrogPost fuzzer URLs completely
         if (msg.origin && msg.origin.startsWith('http://127.0.0.1:1337/')) return;
         if (msg.destinationUrl && msg.destinationUrl.startsWith('http://127.0.0.1:1337/')) return;
         if (msg.topLevelUrl && msg.topLevelUrl.startsWith('http://127.0.0.1:1337/')) return;
         if (msg.topLevelUrl && msg.topLevelUrl.startsWith('chrome-extension://')) return;
-        // Filter out generic localhost/127.0.0.1 traffic from dashboard
         if (isLocalDevUrl(msg.origin)) return;
         if (isLocalDevUrl(msg.destinationUrl)) return;
         if (isLocalDevUrl(msg.topLevelUrl)) return;
         
-        // Filter out messages from handler extraction tabs
         if (msg.origin && msg.origin.includes('frogpost_handler_extraction=true')) return;
         if (msg.destinationUrl && msg.destinationUrl.includes('frogpost_handler_extraction=true')) return;
         if (msg.topLevelUrl && msg.topLevelUrl.includes('frogpost_handler_extraction=true')) return;
         
-        if (!msg.topLevelUrl) { // Can't group without top-level context
+        if (!msg.topLevelUrl) {
             if(msg.origin) allKnownKeys.add(getStorageKeyForUrl(msg.origin));
             if(msg.destinationUrl) allKnownKeys.add(getStorageKeyForUrl(msg.destinationUrl));
             return;
@@ -2338,7 +2240,6 @@ function updateDashboardUI() {
         }
     });
 
-    // Include non-local endpoints we already know about
     knownHandlerEndpoints.forEach(key => { if (!isLocalDevUrl(key)) allKnownKeys.add(key); });
     window.frogPostState.loadedData.urls.forEach(url => {
         const key = getStorageKeyForUrl(url);
@@ -2538,7 +2439,6 @@ function setupUIControls() {
     document.getElementById("clearMessages")?.addEventListener("click", async () => { 
         log.info("Clearing ALL extension data..."); 
         
-        // Clear dashboard state
         window.frogPostState.messages.length = 0; 
         window.frogPostState.activeUrl = null; 
         buttonStates.clear(); 
@@ -2548,7 +2448,6 @@ function setupUIControls() {
         knownHandlerEndpoints.clear(); 
         launchInProgressEndpoints.clear(); 
         
-        // Clear Chrome storage
         await new Promise(resolve => {
             chrome.storage.local.clear(() => {
                 log.info("Chrome local storage cleared.");
@@ -2563,7 +2462,6 @@ function setupUIControls() {
             });
         });
         
-        // Clear IndexedDB (TraceReportStorage)
         try {
             if (window.traceReportStorage) {
                 await window.traceReportStorage.clearAllData();
@@ -2573,7 +2471,6 @@ function setupUIControls() {
             log.warn("Error clearing IndexedDB:", e);
         }
         
-        // Clear localStorage
         try {
             localStorage.clear();
             log.info("localStorage cleared.");
@@ -2581,7 +2478,6 @@ function setupUIControls() {
             log.warn("Error clearing localStorage:", e);
         }
         
-        // Clear sessionStorage
         try {
             sessionStorage.clear();
             log.info("sessionStorage cleared.");
@@ -2589,12 +2485,10 @@ function setupUIControls() {
             log.warn("Error clearing sessionStorage:", e);
         }
         
-        // Reset background state
         chrome.runtime.sendMessage({ type: "resetState" }, (response) => {
             log.info("Background state reset.");
         });
         
-        // Reset custom payloads
         if (window.FuzzingPayloads && window.FuzzingPayloads._originalXSS) {
             window.FuzzingPayloads.XSS = [...window.FuzzingPayloads._originalXSS];
         }
@@ -2788,7 +2682,6 @@ window.retrieveMessagesWithFallbacks = retrieveMessagesWithFallbacks;
 async function showUrlModificationModal(originalUrl, failureReason) {
     return new Promise((resolve) => { const modalContainer = document.getElementById('urlModificationModalContainer'); if (!modalContainer) { resolve({ action: 'cancel', modifiedUrl: null }); return; } modalContainer.innerHTML = ''; const backdrop = document.createElement('div'); backdrop.className = 'modal-backdrop'; const modal = document.createElement('div'); modal.className = 'url-modification-modal'; let currentUrl = new URL(originalUrl); const params = new URLSearchParams(currentUrl.search); let paramInputs = {}; let paramsHTML = ''; if (Array.from(params.keys()).length > 0) { params.forEach((value, key) => { const inputId = `param-input-${key}`; paramsHTML += `<div class="url-param-row"><label for="${inputId}" class="url-param-label">${escapeHTML(key)}:</label><input type="text" id="${inputId}" class="url-param-input" value="${escapeHTML(value)}"></div>`; paramInputs[key] = inputId; }); } else paramsHTML = '<p class="url-modal-no-params">No query parameters found.</p>'; modal.innerHTML = `<div class="url-modal-header"><h4>Embedding Check Failed - Modify URL?</h4><button class="close-modal-btn">&times;</button></div><div class="url-modal-body"><p class="url-modal-reason"><strong>Reason:</strong> ${escapeHTML(failureReason)}</p><p class="url-modal-original"><strong>Original URL:</strong> <span class="url-display">${escapeHTML(originalUrl)}</span></p><hr><h5 class="url-modal-params-title">Edit Query Parameters:</h5><div class="url-params-editor">${paramsHTML}</div></div><div class="url-modal-footer"><button id="urlCancelBtn" class="control-button secondary-button">Cancel Analysis</button><button id="urlContinueBtn" class="control-button secondary-button orange-button">Analyze Original Anyway</button><button id="urlRetryBtn" class="control-button primary-button">Modify & Retry Analysis</button></div>`; modalContainer.appendChild(backdrop); modalContainer.appendChild(modal); const closeModal = (result) => { modalContainer.innerHTML = ''; resolve(result); }; modal.querySelector('.close-modal-btn').addEventListener('click', () => closeModal({ action: 'cancel', modifiedUrl: null })); backdrop.addEventListener('click', () => closeModal({ action: 'cancel', modifiedUrl: null })); modal.querySelector('#urlCancelBtn').addEventListener('click', () => closeModal({ action: 'cancel', modifiedUrl: null })); modal.querySelector('#urlContinueBtn').addEventListener('click', () => closeModal({ action: 'continue', modifiedUrl: originalUrl })); modal.querySelector('#urlRetryBtn').addEventListener('click', () => { const newParams = new URLSearchParams(); let changed = false; params.forEach((originalValue, key) => { const inputElement = document.getElementById(paramInputs[key]); const newValue = inputElement ? inputElement.value : originalValue; newParams.set(key, newValue); if (newValue !== originalValue) changed = true; }); if (!changed) { showToastNotification("No parameters were changed.", "info", 3000); return; } currentUrl.search = newParams.toString(); const modifiedUrlString = currentUrl.toString(); if (!isValidUrl(modifiedUrlString)) { showToastNotification("Modified URL is invalid.", "error", 4000); return; } closeModal({ action: 'retry', modifiedUrl: modifiedUrlString }); }); });
 }
-
 async function handlePlayButton(endpoint, button, skipCheck = false) {
     const originalFullEndpoint = endpoint;
     const endpointKey = button.getAttribute('data-endpoint');
@@ -3167,13 +3060,11 @@ async function handlePlayButton(endpoint, button, skipCheck = false) {
 }
 
 function getRiskLevelAndColor(score) {
-  // Lower score => higher risk. Collapse to three bands.
   if (score <= 40) return { riskLevel: 'High', riskColor: 'high' };
   if (score <= 70) return { riskLevel: 'Medium', riskColor: 'medium' };
   return { riskLevel: 'Low', riskColor: 'low' };
 }
 
-// Map handler 1-10 score to a display color class for the metric value
 function getHandlerScoreClass(score10) {
   const n = Number(score10 || 0);
   if (n >= 10) return 'score-safe';      // explicitly "Safe"
@@ -3182,39 +3073,29 @@ function getHandlerScoreClass(score10) {
   return 'score-risk-high';              // 1-3 high risk
 }
 
-// ===== LLM Analysis System =====
 function sanitizeMessagesForLLM(messages) {
     if (!Array.isArray(messages)) return [];
     
     const commonSecretPatterns = [
-        // JWT tokens
         { pattern: /eyJ[A-Za-z0-9_-]*\.eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]*/g, replacement: '[JWT_TOKEN]' },
-        // API keys
         { pattern: /sk-[A-Za-z0-9]{20,}/g, replacement: '[API_KEY]' },
         { pattern: /pk_[A-Za-z0-9]{20,}/g, replacement: '[API_KEY]' },
-        // Bearer tokens
         { pattern: /Bearer\s+[A-Za-z0-9_-]{20,}/g, replacement: 'Bearer [TOKEN]' },
-        // AWS keys
         { pattern: /AKIA[0-9A-Z]{16}/g, replacement: '[AWS_ACCESS_KEY]' },
         { pattern: /[A-Za-z0-9/+=]{40}/g, replacement: '[AWS_SECRET_KEY]' },
-        // Database URLs
         { pattern: /mongodb:\/\/[^@]+@[^/]+\/[^\s]*/g, replacement: 'mongodb://[USER]:[PASSWORD]@[HOST]/[DB]' },
         { pattern: /postgres:\/\/[^@]+@[^/]+\/[^\s]*/g, replacement: 'postgres://[USER]:[PASSWORD]@[HOST]/[DB]' },
-        // Credit card numbers
         { pattern: /\b\d{4}[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}\b/g, replacement: '[CREDIT_CARD]' },
-        // Email addresses
         { pattern: /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b/g, replacement: '[EMAIL]' }
     ];
     
     return messages.map(msg => {
         const sanitized = JSON.parse(JSON.stringify(msg)); // Deep clone
         
-        // Sanitize the data field
         if (sanitized.data && typeof sanitized.data === 'object') {
             const dataStr = JSON.stringify(sanitized.data);
             let sanitizedDataStr = dataStr;
             
-            // Apply all sanitization patterns
             commonSecretPatterns.forEach(({ pattern, replacement }) => {
                 sanitizedDataStr = sanitizedDataStr.replace(pattern, replacement);
             });
@@ -3222,12 +3103,10 @@ function sanitizeMessagesForLLM(messages) {
             try {
                 sanitized.data = JSON.parse(sanitizedDataStr);
             } catch (e) {
-                // If parsing fails, keep original data
                 console.warn('Failed to parse sanitized data, keeping original');
             }
         }
         
-        // Sanitize other string fields
         Object.keys(sanitized).forEach(key => {
             if (typeof sanitized[key] === 'string') {
                 let sanitizedStr = sanitized[key];
@@ -3243,8 +3122,6 @@ function sanitizeMessagesForLLM(messages) {
 }
 
 function estimateTokenCount(text) {
-    // Rough estimation: 1 token ≈ 4 characters for English text
-    // This is a conservative estimate
     if (typeof text === 'string') {
         return Math.ceil(text.length / 4);
     }
@@ -3280,7 +3157,6 @@ function analyzeSensitiveDataInMessages(messages) {
     
     return { hasSensitiveData, detectedTypes };
 }
-
 function generateSanitizationSummary(originalMessages, sanitizedMessages) {
     const changes = [];
     
@@ -3308,7 +3184,6 @@ function showLLMConsentPopup(handlerCode, messages, onConfirm, onCancel) {
     const messagesTokens = estimateTokenCount(sanitizedMessages);
     const totalTokens = handlerTokens + messagesTokens;
     
-    // Analyze sensitive data detection
     const sensitiveDataAnalysis = analyzeSensitiveDataInMessages(messages);
     const hasSensitiveData = sensitiveDataAnalysis.hasSensitiveData;
     const detectedTypes = Array.from(sensitiveDataAnalysis.detectedTypes);
@@ -3320,7 +3195,6 @@ function showLLMConsentPopup(handlerCode, messages, onConfirm, onCancel) {
         sanitizationSummary
     });
     
-    // Create popup HTML
     const popupHTML = `
         <div id="llm-consent-overlay" style="
             position: fixed;
@@ -3480,10 +3354,8 @@ function showLLMConsentPopup(handlerCode, messages, onConfirm, onCancel) {
         </div>
     `;
     
-    // Add popup to DOM
     document.body.insertAdjacentHTML('beforeend', popupHTML);
     
-    // Add event listeners
     document.getElementById('llm-consent-cancel').addEventListener('click', () => {
         document.getElementById('llm-consent-overlay').remove();
         onCancel();
@@ -3494,7 +3366,6 @@ function showLLMConsentPopup(handlerCode, messages, onConfirm, onCancel) {
         onConfirm();
     });
     
-    // Close on overlay click
     document.getElementById('llm-consent-overlay').addEventListener('click', (e) => {
         if (e.target.id === 'llm-consent-overlay') {
             document.getElementById('llm-consent-overlay').remove();
@@ -3505,7 +3376,6 @@ function showLLMConsentPopup(handlerCode, messages, onConfirm, onCancel) {
 
 function parseLLMResponse(response) {
     try {
-        // Remove markdown code blocks if present
         let cleanResponse = response.trim();
         if (cleanResponse.startsWith('```json')) {
             cleanResponse = cleanResponse.replace(/^```json\s*/, '').replace(/\s*```$/, '');
@@ -3518,7 +3388,6 @@ function parseLLMResponse(response) {
         console.error('Failed to parse LLM response as JSON:', error);
         console.log('Raw response:', response);
         
-        // Return a fallback structure if JSON parsing fails
         return {
             error: 'Failed to parse LLM response',
             rawResponse: response,
@@ -3624,7 +3493,7 @@ class LLMAnalyzer {
                 models: [
                     'meta-llama/Llama-2-70b-chat-hf', 'meta-llama/Llama-2-13b-chat-hf',
                     'meta-llama/Llama-2-7b-chat-hf', 'mistralai/Mistral-7B-Instruct-v0.1',
-                    'mistralai/Mixtral-8x7B-Instruct-v0.1', 'codellama/CodeLlama-34b-Instruct-hf',
+                    'mistralai/Mixtral-8x7b-Instruct-v0.1', 'codellama/CodeLlama-34b-Instruct-hf',
                     'WizardLM/WizardCoder-15B-V1.0', 'NousResearch/Nous-Hermes-2-Mixtral-8x7B-DPO'
                 ],
                 baseUrl: 'https://api.together.xyz/v1/chat/completions',
@@ -3734,151 +3603,11 @@ class LLMAnalyzer {
         };
     }
 
-    async analyzeHandler(provider, model, apiKey, handlerCode) {
+    async unifiedAnalyze(provider, model, apiKey, handlerCode, observedMessages) {
         try {
-            const response = await fetch('http://localhost:1337/llm/analyze-handler', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                    provider,
-                    model,
-                    apiKey,
-                    context: {
-                        handlerCode
-                    }
-                })
-            });
-
-            if (!response.ok) {
-                throw new Error(`Server request failed: ${response.status} ${response.statusText}`);
-            }
-
-            const result = await response.json();
-            if (!result.ok) {
-                throw new Error(result.error || 'Server returned error');
-            }
-
-            // Return the analysis data as JSON string
-            return JSON.stringify({
-                handler_assessment: result.handler_assessment || result.analysis || 'No analysis provided',
-                security_assessment: result.handler_assessment || result.analysis || 'No analysis provided',
-                handler_score: result.handler_score || result.accuracy_score || 0,
-                risk_score: result.handler_score || result.accuracy_score || 0,
-                dom_xss_sinks: result.dom_xss_sinks || [],
-                prototype_pollution: (result.prototype_pollution_sinks || []).length > 0,
-                risks: result.risks || [],
-                recommendations: result.recommendations || []
-            });
-        } catch (error) {
-            console.error('Handler analysis error:', error);
-            throw error;
-        }
-    }
-
-    async analyzeMessages(provider, model, apiKey, messages) {
-        try {
-            const response = await fetch('http://localhost:1337/llm/analyze-messages', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                    provider,
-                    model,
-                    apiKey,
-                    context: {
-                        observedMessages: messages
-                    }
-                })
-            });
-
-            if (!response.ok) {
-                throw new Error(`Server request failed: ${response.status} ${response.statusText}`);
-            }
-
-            const result = await response.json();
-            if (!result.ok) {
-                throw new Error(result.error || 'Server returned error');
-            }
-
-            // Return the analysis data as JSON string
-            return JSON.stringify({
-                message_analysis: result.analysis || 'No analysis provided',
-                suspicious_patterns: result.suspicious_patterns || [],
-                security_concerns: result.security_concerns || [],
-                risk_level: result.risk_level || 'low'
-            });
-        } catch (error) {
-            console.error('Message analysis error:', error);
-            throw error;
-        }
-    }
-
-    async generatePayloads(provider, model, apiKey, handlerCode, messages, handlerAnalysis = null) {
-        try {
-            let sinks = [];
+            console.log('🔍 [Unified Analysis] Starting combined analysis');
             
-            console.log('🔍 [Debug] generatePayloads called with handlerAnalysis:', handlerAnalysis);
-            if (handlerAnalysis && handlerAnalysis.dom_xss_sinks) {
-                // Use the already analyzed handler data
-                sinks = handlerAnalysis.dom_xss_sinks;
-                console.log('🎯 [Payload Generation] Using existing handler analysis, sinks:', sinks);
-            } else {
-                // Fallback: get handler analysis if not provided
-                console.log('🎯 [Payload Generation] Getting fresh handler analysis...');
-                const handlerResponse = await fetch('http://localhost:1337/llm/analyze-handler', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                    },
-                    body: JSON.stringify({
-                        provider,
-                        model,
-                        apiKey,
-                        context: {
-                            handlerCode
-                        }
-                    })
-                });
-
-                if (!handlerResponse.ok) {
-                    throw new Error(`Handler analysis failed: ${handlerResponse.status} ${handlerResponse.statusText}`);
-                }
-
-                const handlerResult = await handlerResponse.json();
-                if (!handlerResult.ok) {
-                    throw new Error(handlerResult.error || 'Handler analysis returned error');
-                }
-
-                sinks = handlerResult.dom_xss_sinks || [];
-            }
-            
-            if (sinks.length === 0) {
-                // No sinks found, return empty payloads
-                console.log('🎯 [Payload Generation] No sinks found, returning empty payloads');
-                return JSON.stringify({
-                    payloads_generated: false,
-                    xss_payloads: [],
-                    prototype_pollution_payloads: [],
-                    explanation: "No DOM XSS sinks or prototype pollution vulnerabilities found in the handler code."
-                });
-            }
-
-            // Generate payloads using the server endpoint
-            console.log('🎯 [Payload Generation] Sending request with:', {
-                provider,
-                model,
-                context: {
-                    handlerCode: handlerCode.substring(0, 100) + '...',
-                    observedMessages: messages.length,
-                    sinks: sinks.length
-                }
-            });
-            
-            console.log('🔍 [Debug] About to make fetch request to /llm/analyze');
-            const response = await fetch('http://localhost:1337/llm/analyze', {
+            const response = await fetch('http://localhost:1337/llm/unified-analyze', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -3889,8 +3618,7 @@ class LLMAnalyzer {
                     apiKey,
                     context: {
                         handlerCode,
-                        observedMessages: messages,
-                        sinks: sinks
+                        observedMessages
                     }
                 })
             });
@@ -3904,15 +3632,20 @@ class LLMAnalyzer {
                 throw new Error(result.error || 'Server returned error');
             }
 
-            // Return the payload data as JSON string
             return JSON.stringify({
-                payloads_generated: result.newPayloadsCount > 0,
-                xss_payloads: result.newPayloads || [],
-                prototype_pollution_payloads: [], // Server doesn't distinguish between types
-                explanation: result.explanation || 'Payloads generated based on detected sinks'
+                handler_assessment: result.handler_assessment || 'No analysis provided',
+                handler_score: result.handler_score || 0,
+                handler_match: result.handler_match || 50,
+                risks: result.risks || [],
+                dom_xss_sinks: result.dom_xss_sinks || [],
+                prototype_pollution_indicators: result.prototype_pollution_indicators || [],
+                data_type: result.data_type || 'JSON',
+                new_payloads: result.new_payloads || [],
+                payload_class: result.payload_class || 'none',
+                notes: result.notes || 'Unified analysis completed'
             });
         } catch (error) {
-            console.error('Payload generation error:', error);
+            console.error('Unified analysis error:', error);
             throw error;
         }
     }
@@ -3922,7 +3655,6 @@ class LLMAnalyzer {
         let requestBody;
         let responseUrl = config.baseUrl;
 
-        // Handle different API formats
         if (config.name === 'Anthropic') {
             requestBody = {
                 model: model,
@@ -3991,7 +3723,6 @@ class LLMAnalyzer {
                 temperature: 0.1
             };
         } else {
-            // OpenAI-compatible format (OpenAI, Groq, Mistral, Perplexity, Together, DeepSeek, Moonshot, Local)
             requestBody = {
                 model: model,
                 messages: [{ role: 'user', content: prompt }],
@@ -4012,7 +3743,6 @@ class LLMAnalyzer {
 
         const data = await response.json();
         
-        // Handle different response formats
         if (config.name === 'Anthropic') {
             return data.content[0].text;
         } else if (config.name === 'Google') {
@@ -4030,7 +3760,6 @@ class LLMAnalyzer {
         } else if (config.name === 'Baichuan AI') {
             return data.choices[0].message.content;
         } else {
-            // OpenAI-compatible response format
             return data.choices[0].message.content;
         }
     }
@@ -4043,7 +3772,7 @@ function createLLMAnalysisSection(analysisStorageKey, endpointDisplay) {
         <h4 class="report-section-title">🤖 LLM Security Analysis</h4>
         <div class="llm-config">
             <div class="llm-provider-selector">
-                <label for="llm-provider">🔧 Provider:</label>
+                <label for="llm-provider">Provider:</label>
                 <select id="llm-provider" class="llm-select">
                     <option value="openai">OpenAI</option>
                     <option value="anthropic">Anthropic</option>
@@ -4064,7 +3793,7 @@ function createLLMAnalysisSection(analysisStorageKey, endpointDisplay) {
                 </select>
             </div>
             <div class="llm-model-selector">
-                <label for="llm-model">🧠 Model:</label>
+                <label for="llm-model">Model:</label>
                 <select id="llm-model" class="llm-select">
                     <option value="gpt-4o">GPT-4o</option>
                     <option value="gpt-4o-mini">GPT-4o Mini</option>
@@ -4072,51 +3801,62 @@ function createLLMAnalysisSection(analysisStorageKey, endpointDisplay) {
                 </select>
             </div>
             <div class="llm-api-key">
-                <label for="llm-api-key">🔑 API Key:</label>
+                <label for="llm-api-key">API Key:</label>
                 <input type="password" id="llm-api-key" class="llm-input" placeholder="Enter your API key">
             </div>
             <div class="llm-save-button">
-                <button id="save-api-key" class="llm-button">💾 Save</button>
+                <button id="save-api-key" class="llm-button">Save</button>
             </div>
             <div class="llm-actions">
-                <button id="analyze-llm" class="llm-analyze-button" disabled>🚀 Analyze using LLM</button>
-                <div id="llm-status" class="llm-status"></div>
+                <button id="analyze-llm" class="llm-analyze-button" disabled>🚀 Analyze</button>
             </div>
         </div>
     `;
 
-    // Store the analysisStorageKey for later use
     llmSection.dataset.analysisKey = analysisStorageKey;
     
     return llmSection;
 }
 
-function setupLLMEventListeners(analysisStorageKey) {
-    // Use setTimeout to ensure DOM elements are available
+function setupLLMEventListeners(analysisStorageKey, retryCount = 0) {
+    const maxRetries = 10;
+    const retryDelay = 200;
+    
+    // Check if already set up to prevent duplicates
+    if (window.llmEventListenersSetup) {
+        console.log('LLM event listeners already set up, skipping...');
+        return;
+    }
+    
     setTimeout(() => {
         const providerSelect = document.getElementById('llm-provider');
         const modelSelect = document.getElementById('llm-model');
         const apiKeyInput = document.getElementById('llm-api-key');
         const saveButton = document.getElementById('save-api-key');
         const analyzeButton = document.getElementById('analyze-llm');
+        
         if (!providerSelect || !modelSelect || !apiKeyInput || !saveButton || !analyzeButton) {
-            console.warn('LLM elements not found, retrying...');
-            setupLLMEventListeners(analysisStorageKey);
-            return;
+            if (retryCount < maxRetries) {
+                console.warn(`LLM elements not found, retrying... (${retryCount + 1}/${maxRetries})`);
+                setupLLMEventListeners(analysisStorageKey, retryCount + 1);
+                return;
+            } else {
+                console.error('LLM elements not found after maximum retries, giving up.');
+                return;
+            }
         }
 
-        // Load saved API key
+        console.log('LLM elements found, setting up event listeners...');
+        window.llmEventListenersSetup = true;
+        
         loadSavedAPIKey();
 
-        // Provider change handler
         providerSelect.addEventListener('change', updateModelOptions);
         
-        // Save API key handler
         saveButton.addEventListener('click', saveAPIKey);
         
-        // Analyze button handler
         analyzeButton.addEventListener('click', () => performLLMAnalysis(analysisStorageKey));
-    }, 100);
+    }, retryDelay);
 }
 
 function updateModelOptions() {
@@ -4153,7 +3893,7 @@ async function saveAPIKey() {
     try {
         await chrome.storage.local.set({ llm_api_key: apiKey });
         document.getElementById('analyze-llm').disabled = false;
-        updateLLMStatus('API key saved successfully', 'success');
+        updateLLMStatus('Saved!', 'success');
     } catch (error) {
         console.error('Error saving API key:', error);
         updateLLMStatus('Error saving API key', 'error');
@@ -4171,12 +3911,15 @@ async function performLLMAnalysis(analysisStorageKey) {
     }
     
     const analyzer = new LLMAnalyzer();
-    const statusEl = document.getElementById('llm-status');
+    const analyzeBtn = document.getElementById('analyze-llm');
     
     try {
-        updateLLMStatus('Preparing analysis...', 'info');
+        // Disable button and show analyzing state
+        if (analyzeBtn) {
+            analyzeBtn.disabled = true;
+        }
+        updateLLMStatus('Preparing...', 'info');
         
-        // Get handler code
         const reportData = await getReportData(analysisStorageKey);
         if (!reportData) {
             throw new Error('No report data found');
@@ -4190,71 +3933,92 @@ async function performLLMAnalysis(analysisStorageKey) {
             throw new Error('No handler code found for analysis');
         }
         
-        // Get messages (max 3 from each unique structure)
         const messages = await getMessagesForAnalysis(analysisStorageKey);
         
-        // Show consent popup
         showLLMConsentPopup(handlerCode, messages, async () => {
             await executeLLMAnalysis(analyzer, provider, model, apiKey, handlerCode, messages, analysisStorageKey);
         }, () => {
-            updateLLMStatus('Analysis cancelled by user', 'info');
+            updateLLMStatus('Cancelled', 'info');
         });
         
     } catch (error) {
         console.error('LLM analysis error:', error);
         updateLLMStatus(`Analysis failed: ${error.message}`, 'error');
+        // Re-enable button on error
+        if (analyzeBtn) {
+            analyzeBtn.disabled = false;
+        }
     }
 }
 
 async function executeLLMAnalysis(analyzer, provider, model, apiKey, handlerCode, messages, analysisStorageKey) {
+    const analyzeBtn = document.getElementById('analyze-llm');
+    
     try {
-        updateLLMStatus('Starting LLM analysis...', 'info');
+        updateLLMStatus('Starting...', 'info');
         
-        // Sanitize messages before sending to LLM
         const sanitizedMessages = sanitizeMessagesForLLM(messages);
         console.log('🔒 [Sanitization] Sanitized messages for LLM:', sanitizedMessages);
         
-        // Step 1: Analyze handler
-        updateLLMStatus('Step 1/3: Analyzing handler...', 'info');
-        const handlerAnalysis = await analyzer.analyzeHandler(provider, model, apiKey, handlerCode);
-        const parsedHandlerAnalysis = parseLLMResponse(handlerAnalysis);
-        
-        updateHandlerWithLLMAnalysis(parsedHandlerAnalysis);
-        
-        // Save LLM analysis to report data for persistence
-        await saveLLMAnalysisToReport(analysisStorageKey, parsedHandlerAnalysis);
-        
-        // Step 2: Analyze messages
-        updateLLMStatus('Step 2/3: Analyzing messages...', 'info');
-        const messageAnalysis = await analyzer.analyzeMessages(provider, model, apiKey, sanitizedMessages);
-        const parsedMessageAnalysis = parseLLMResponse(messageAnalysis);
-        
-        // Step 3: Generate payloads
-        updateLLMStatus('Step 3/3: Generating payloads...', 'info');
-        console.log('🔍 [Debug] About to call generatePayloads with:', {
+        updateLLMStatus('Analyzing...', 'info');
+        console.log('🔍 [Debug] About to call unifiedAnalyze with:', {
             provider,
             model,
             handlerCodeLength: handlerCode.length,
-            messagesCount: sanitizedMessages.length,
-            handlerAnalysis: parsedHandlerAnalysis
+            messagesCount: sanitizedMessages.length
         });
-        const payloadAnalysis = await analyzer.generatePayloads(provider, model, apiKey, handlerCode, sanitizedMessages, parsedHandlerAnalysis);
-        console.log('🔍 [Debug] Payload analysis response:', payloadAnalysis);
-        const parsedPayloadAnalysis = parseLLMResponse(payloadAnalysis);
-        console.log('🔍 [Debug] Parsed payload analysis:', parsedPayloadAnalysis);
-        updatePayloadsWithLLM(parsedPayloadAnalysis, analysisStorageKey);
         
-        updateLLMStatus('LLM analysis completed successfully!', 'success');
+        const unifiedAnalysis = await analyzer.unifiedAnalyze(provider, model, apiKey, handlerCode, sanitizedMessages);
+        const parsedUnifiedAnalysis = parseLLMResponse(unifiedAnalysis);
+        
+        console.log('🔍 [Debug] Unified analysis response:', parsedUnifiedAnalysis);
+        
+        updateHandlerWithLLMAnalysis(parsedUnifiedAnalysis);
+        
+        const newPayloads = parsedUnifiedAnalysis.new_payloads || [];
+        if (newPayloads.length > 0) {
+            console.log(`✅ [Legacy UI Update] Generated ${newPayloads.length} LLM payloads via executeLLMAnalysis`);
+        }
+        
+        await saveLLMAnalysisToReport(analysisStorageKey, parsedUnifiedAnalysis);
+        
+        if (newPayloads.length > 0) {
+            await handleLLMPayloadUpdate(newPayloads, analysisStorageKey);
+        }
+        
+        updateLLMStatus('Complete!', 'success');
+        // Re-enable button after completion
+        if (analyzeBtn) {
+            analyzeBtn.disabled = false;
+        }
         
     } catch (error) {
         console.error('LLM analysis error:', error);
         updateLLMStatus(`Analysis failed: ${error.message}`, 'error');
+        // Re-enable button on error
+        if (analyzeBtn) {
+            analyzeBtn.disabled = false;
+        }
+    }
+}
+
+async function handleLLMPayloadUpdate(newPayloads, analysisStorageKey) {
+    if (newPayloads && newPayloads.length > 0) {
+        console.log(`🚀 [Payloads] Starting update with ${newPayloads.length} new payloads.`);
+        
+        await updatePayloadsWithLLM({
+            payloads_generated: true,
+            new_payloads: newPayloads
+        }, analysisStorageKey);
+
+        console.log(`✅ [Payloads] Successfully processed ${newPayloads.length} LLM payloads.`);
+    } else {
+        console.log('🤔 [Payloads] No new LLM payloads to process.');
     }
 }
 
 async function getReportData(analysisStorageKey) {
     try {
-        // Use the same method as the dashboard to get report data from IndexedDB
         const reportData = await window.traceReportStorage.getTraceReport(analysisStorageKey);
         
         if (!reportData) {
@@ -4262,7 +4026,6 @@ async function getReportData(analysisStorageKey) {
             return null;
         }
         
-        // Debug: Log the structure to understand what we have
         console.log('Report data structure:', {
             hasDetails: !!reportData.details,
             hasBestHandler: !!reportData.details?.bestHandler,
@@ -4288,7 +4051,6 @@ async function getMessagesForAnalysis(analysisStorageKey) {
             return !isTest && (o === k || d === k);
         });
         
-        // Group by structure and take max 3 from each
         const structureGroups = {};
         messages.forEach(msg => {
             const structure = JSON.stringify(msg.data);
@@ -4309,9 +4071,32 @@ async function getMessagesForAnalysis(analysisStorageKey) {
 
 
 function updateLLMStatus(message, type) {
-    const statusEl = document.getElementById('llm-status');
-    statusEl.textContent = message;
-    statusEl.className = `llm-status ${type}`;
+    const analyzeBtn = document.getElementById('analyze-llm');
+    if (analyzeBtn) {
+        const originalText = '🚀 Analyze';
+        const icon = type === 'success' ? '✅' : type === 'error' ? '❌' : '⏳';
+        analyzeBtn.textContent = `${icon} ${message}`;
+        analyzeBtn.className = `llm-analyze-button ${type}`;
+        
+        // Only auto-reset for success messages, not for info (analyzing) messages
+        if (type === 'success') {
+            setTimeout(() => {
+                analyzeBtn.textContent = originalText;
+                analyzeBtn.className = 'llm-analyze-button';
+            }, 3000);
+        }
+        // For error messages, keep them visible until manually reset
+        // For info messages (analyzing), keep them until the next status update
+    }
+}
+
+function resetAnalyzeButton() {
+    const analyzeBtn = document.getElementById('analyze-llm');
+    if (analyzeBtn) {
+        analyzeBtn.textContent = '🚀 Analyze';
+        analyzeBtn.className = 'llm-analyze-button';
+        analyzeBtn.disabled = false;
+    }
 }
 
 function updateHandlerWithLLMAnalysis(analysis) {
@@ -4320,23 +4105,33 @@ function updateHandlerWithLLMAnalysis(analysis) {
 
     const summaryElement = handlerSection.querySelector('.handler-meta');
     if (summaryElement && !analysis.error) {
-        const riskScore = analysis.risk_score || analysis.handler_score || 0;
-        const riskColor = riskScore >= 70 ? '#ff6b6b' : riskScore >= 40 ? '#ffa726' : '#66bb6a';
-        
-        const originalText = summaryElement.textContent;
-        summaryElement.innerHTML = `${originalText} | <span style="color: ${riskColor};">LLM Score: ${riskScore}/100</span>`;
+        const cleanText = summaryElement.textContent.replace(/\s*\|\s*(LLM Score|Risk Score):[^|]*/ig, '');
+        summaryElement.textContent = cleanText;
         
         const codeBlock = handlerSection.querySelector('.handler-code');
         if (codeBlock) {
+            const existingSummary = codeBlock.parentNode.querySelector('.llm-handler-summary');
+            if (existingSummary) {
+                existingSummary.remove();
+            }
+            
             const assessment = analysis.security_assessment || analysis.handler_assessment || 'No assessment provided';
             const riskScore = analysis.risk_score || analysis.handler_score || 0;
             
             let llmSummary = `
-                <div style="margin-top: 15px; padding: 12px; background: var(--bg-primary); border-radius: 6px; border: 1px solid var(--border-color);">
+                <div class="llm-handler-summary" style="margin-top: 15px; padding: 12px; background: var(--bg-primary); border-radius: 6px; border: 1px solid var(--border-color);">
                     <h6 style="margin: 0 0 8px 0; color: var(--accent-primary); font-size: 13px;">🤖 LLM Handler Summary</h6>
                     <p style="margin: 4px 0; font-size: 12px;"><strong>Security Assessment:</strong> ${assessment}</p>
                     <p style="margin: 4px 0; font-size: 12px;"><strong>Risk Score:</strong> ${riskScore}/100</p>
             `;
+            
+            const handlerMatch = typeof analysis.handler_match === 'number' ? analysis.handler_match
+                                  : (typeof analysis.match_score === 'number' ? analysis.match_score : null);
+            console.log(handlerMatch)
+            if (handlerMatch !== null) {
+                const matchColor = handlerMatch >= 85 ? '#22c55e' : handlerMatch >= 60 ? '#d97706' : '#dc2626';
+                llmSummary += `<p style="margin: 4px 0; font-size: 12px;"><strong>Handler Match:</strong> <span style="color: ${matchColor};">${handlerMatch}/100</span></p>`;
+            }
             
             if (analysis.dom_xss_sinks && analysis.dom_xss_sinks.length > 0) {
                 const sinksText = Array.isArray(analysis.dom_xss_sinks) 
@@ -4358,7 +4153,6 @@ function updateHandlerWithLLMAnalysis(analysis) {
         }
     }
 }
-
 async function saveLLMAnalysisToReport(analysisStorageKey, llmAnalysis) {
     try {
         const reportData = await window.traceReportStorage.getTraceReport(analysisStorageKey);
@@ -4366,7 +4160,10 @@ async function saveLLMAnalysisToReport(analysisStorageKey, llmAnalysis) {
             if (!reportData.llmAnalysis) {
                 reportData.llmAnalysis = {};
             }
-            reportData.llmAnalysis.handlerAnalysis = llmAnalysis;
+            const existing = reportData.llmAnalysis.handlerAnalysis || {};
+            reportData.llmAnalysis.handlerAnalysis = { ...existing, ...llmAnalysis };
+
+
             await window.traceReportStorage.saveTraceReport(analysisStorageKey, reportData);
             console.log('💾 [LLM Analysis] Saved handler analysis to report data');
         }
@@ -4381,31 +4178,24 @@ async function updatePayloadsWithLLM(payloadAnalysis, analysisStorageKey) {
     }
 
     try {
-        // Get existing payloads from storage
         const existingPayloads = await window.traceReportStorage.getReportPayloads(analysisStorageKey) || [];
         
-        // Add LLM-generated payloads
-        const llmPayloads = [
-            ...(payloadAnalysis.xss_payloads || []),
-            ...(payloadAnalysis.prototype_pollution_payloads || [])
-        ];
+        const llmPayloads = payloadAnalysis.new_payloads || [];
+        
+        console.log(`🎯 [Payloads] Attempting to add ${llmPayloads.length} LLM-generated payloads`);
         
         if (llmPayloads.length > 0) {
-            // Save updated payloads to storage
             const updatedPayloads = [...existingPayloads, ...llmPayloads];
             await window.traceReportStorage.saveReportPayloads(analysisStorageKey, updatedPayloads);
             
-            // Store LLM payload count for persistence
             await window.traceReportStorage.saveLLMPayloadCount(analysisStorageKey, llmPayloads.length);
             
-            // Update the payload count display
             const payloadCountElement = document.querySelector(`[id*="payload-count-display"]`);
             if (payloadCountElement) {
                 const currentCount = parseInt(payloadCountElement.textContent) || 0;
                 const newCount = currentCount + llmPayloads.length;
                 payloadCountElement.textContent = newCount;
                 
-                // Add LLM indicator
                 const payloadSection = payloadCountElement.closest('.metric');
                 if (payloadSection) {
                     const existingIndicator = payloadSection.querySelector('.llm-payload-indicator');
@@ -4419,10 +4209,8 @@ async function updatePayloadsWithLLM(payloadAnalysis, analysisStorageKey) {
                 }
             }
             
-            // Refresh the payloads list if it's currently displayed
             const payloadsList = document.getElementById('payloads-list');
             if (payloadsList) {
-                // Trigger a refresh of the payloads display
                 const reportButton = document.querySelector('.iframe-report-button');
                 if (reportButton) {
                     reportButton.click();
@@ -4434,7 +4222,6 @@ async function updatePayloadsWithLLM(payloadAnalysis, analysisStorageKey) {
     }
 }
 
-// ===== Risk badge helpers (for metric cubes) =====
 function getWorstRiskLevel(levelA, levelB) {
   const order = { 'LOW': 0, 'MEDIUM': 1, 'HIGH': 2, 'CRITICAL': 3 };
   const a = order[String(levelA || 'LOW').toUpperCase()] ?? 0;
@@ -4608,7 +4395,6 @@ function renderPayloadItem(payloadItem, index) {
     const payloadJson = typeof actualPayload === 'object' ? JSON.stringify(actualPayload, null, 2) : String(actualPayload);
     const displayString = payloadJson.substring(0, 300) + (payloadJson.length > 300 ? '...' : '');
 
-    // Determine Source
     let source = 'unknown';
     if (payloadItem.source === 'LLM' || payloadItem.generator === 'LLM') {
         source = 'LLM';
@@ -4616,12 +4402,10 @@ function renderPayloadItem(payloadItem, index) {
         source = 'FrogPost';
     }
 
-    // Determine Type
     let type = payloadItem.type || 'unknown';
     if (source === 'LLM') {
         type = payloadItem.payload_class || 'AI-Generated';
     } else {
-        // Clean up FrogPost types
         type = type.replace(/^(FrogPost|default)-/i, '');
     }
 
@@ -4642,6 +4426,8 @@ function renderPayloadItem(payloadItem, index) {
 async function displayReport(reportData, panel) {
     try {
         panel.innerHTML = '';
+        // Reset LLM event listeners flag when clearing report
+        window.llmEventListenersSetup = false;
     } catch (clearError) {
         panel.innerHTML = '<p class="error-message">Internal error clearing report panel.</p>';
         return;
@@ -4660,7 +4446,6 @@ async function displayReport(reportData, panel) {
         content.innerHTML = '<p class="error-message">Error: Invalid or missing report data.</p>';
         return;
     }
-
     try {
         const details = reportData.details || {};
         const summary = reportData.summary || {};
@@ -4757,7 +4542,6 @@ async function displayReport(reportData, panel) {
             </div>`;
         content.appendChild(summarySection);
 
-        // Check for and display LLM payload indicator if it exists
         try {
             const llmPayloadCount = await window.traceReportStorage.getLLMPayloadCount(analysisStorageKey);
             if (llmPayloadCount > 0) {
@@ -4780,17 +4564,17 @@ async function displayReport(reportData, panel) {
             console.warn('Could not load LLM payload count:', error);
         }
 
-        // Check for and display saved LLM analysis if it exists
         try {
             if (reportData.llmAnalysis && reportData.llmAnalysis.handlerAnalysis) {
                 console.log('💾 [LLM Analysis] Found saved LLM analysis, displaying...');
-                updateHandlerWithLLMAnalysis(reportData.llmAnalysis.handlerAnalysis);
+                setTimeout(() => {
+                    updateHandlerWithLLMAnalysis(reportData.llmAnalysis.handlerAnalysis);
+                }, 100);
             }
         } catch (error) {
             console.warn('Could not load saved LLM analysis:', error);
         }
 
-        // After rendering, populate risk details and global overview
         try {
             const messagesForPanel = (window.frogPostState?.messages || []).filter(msg => {
                 const k = analysisStorageKey;
@@ -4867,11 +4651,9 @@ async function displayReport(reportData, panel) {
             content.appendChild(handlerSection);
         }
 
-        // Add LLM Analysis Section after handler
         const llmSection = createLLMAnalysisSection(analysisStorageKey, endpointDisplay);
         content.appendChild(llmSection);
         
-        // Setup LLM event listeners after DOM is updated
         setupLLMEventListeners(analysisStorageKey);
 
         const findingsSection = document.createElement('div');
@@ -4932,7 +4714,6 @@ async function displayReport(reportData, panel) {
             });
             findingsHTML += `</tbody></table></div>`;
 
-            // Smart payload UI removed by request
         }
 
         if (uniqueIssues.length > 0) {
@@ -4941,7 +4722,7 @@ async function displayReport(reportData, panel) {
             uniqueIssues.forEach(issue => {
                 const type = issue?.type || '?'; const severity = issue?.severity || 'N/A'; const contextHTML = issue?.context || '';
                 let severityClass = severity.toLowerCase(); if(severity === 'Critical') severityClass = 'critical'; else if(severity === 'High') severityClass = 'high'; else if(severity === 'Medium') severityClass = 'medium'; else if(severity === 'Low') severityClass = 'low'; else severityClass='unknown';
-                const detectionMethod = vuln?.method || 'Unknown';
+                const detectionMethod = issue?.method || 'Unknown';
                 findingsHTML += `<tr class="severity-row-${severityClass}"><td>${escapeHTML(type)}</td><td><span class="severity-badge severity-${severityClass}">${escapeHTML(severity)}</span></td><td><code>${escapeHTML(detectionMethod)}</code></td><td class="context-snippet-cell">${contextHTML}</td></tr>`;
             });
             findingsHTML += `</tbody></table></div>`;
@@ -5013,7 +4794,6 @@ async function displayReport(reportData, panel) {
     }
 }
 
-// Smart payload feature permanently removed
 
 function showFullPayloadModal(payloadItem) {
     document.querySelector('.payload-modal')?.remove(); document.querySelector('.payload-modal-backdrop')?.remove(); const modal = document.createElement('div'); modal.className = 'payload-modal'; const modalContent = document.createElement('div'); modalContent.className = 'payload-modal-content'; const closeBtn = document.createElement('span'); closeBtn.className = 'close-modal'; closeBtn.innerHTML = '&times;'; const backdrop = document.createElement('div'); backdrop.className = 'payload-modal-backdrop'; const closeModal = () => { modal.remove(); backdrop.remove(); }; closeBtn.onclick = closeModal; backdrop.onclick = closeModal; const heading = document.createElement('h4'); const targetInfo = document.createElement('p'); targetInfo.style.cssText = 'margin-bottom:15px;font-size:13px;color:#aaa;'; const payloadPre = document.createElement('pre'); payloadPre.className = 'report-code-block'; payloadPre.style.cssText = 'max-height:50vh;overflow-y:auto;'; const payloadCode = document.createElement('code'); const actualPayloadData = (payloadItem && payloadItem.payload !== undefined) ? payloadItem.payload : payloadItem; heading.textContent = `Payload Details (Type: ${escapeHTML(payloadItem?.type || 'unknown')})`; targetInfo.innerHTML = `<strong>Target/Desc:</strong> ${escapeHTML(payloadItem?.targetPath || payloadItem?.targetFlow || payloadItem?.description || 'N/A')}`; let formattedPayload = ''; try { if (typeof actualPayloadData === 'object' && actualPayloadData !== null) formattedPayload = JSON.stringify(actualPayloadData, null, 2); else formattedPayload = String(actualPayloadData); } catch { formattedPayload = String(actualPayloadData); } payloadCode.textContent = formattedPayload; payloadPre.appendChild(payloadCode); const copyBtn = document.createElement('button'); copyBtn.textContent = 'Copy Payload'; copyBtn.className = 'control-button'; copyBtn.style.marginTop = '15px'; copyBtn.onclick = () => { navigator.clipboard.writeText(formattedPayload).then(() => { copyBtn.textContent = 'Copied!'; setTimeout(() => copyBtn.textContent = 'Copy Payload', 2000); }).catch(() => { copyBtn.textContent = 'Copy Failed'; setTimeout(() => copyBtn.textContent = 'Copy Payload', 2000); }); }; modalContent.appendChild(closeBtn); modalContent.appendChild(heading); modalContent.appendChild(targetInfo); modalContent.appendChild(payloadPre); modalContent.appendChild(copyBtn); modal.appendChild(modalContent); document.body.appendChild(backdrop); document.body.appendChild(modal);
@@ -5058,7 +4838,6 @@ async function handleReportButton(endpointKey) {
         if (!reportData.summary) reportData.summary = {};
         reportData.summary.payloadsGenerated = reportPayloads?.length || 0;
         
-        // Remove any existing panels
         document.querySelector('.trace-results-panel')?.remove();
         document.querySelector('.trace-panel-backdrop')?.remove();
         
@@ -5102,8 +4881,6 @@ async function restoreLastReport(endpointKey) {
       console.log(`ℹ️ [Restore] No saved report found for ${endpointKey}.`);
       const reportContent = document.getElementById('report-content');
       if (reportContent) {
-          // Clear previous report findings if no new one is found
-          updateExistingReportWithLLM(null);
       }
     }
   } catch (e) {
@@ -5150,7 +4927,6 @@ async function populateInitialHandlerStates() {
         endpointsWithDetectedHandlers.clear();
     }
 }
-
 const traceReportStyles = `.trace-results-panel {} .trace-panel-backdrop {} .trace-panel-header {} .trace-panel-close {} .trace-results-content {} .report-section { margin-bottom: 30px; padding: 20px; background: #1a1d21; border-radius: 8px; box-shadow: 0 2px 5px rgba(0, 0, 0, 0.3); border: 1px solid #333; } .report-section-title { margin-top: 0; padding-bottom: 10px; border-bottom: 1px solid #444; color: #00e1ff; font-size: 1.3em; font-weight: 600; text-shadow: 0 0 5px rgba(0, 225, 255, 0.5); } .report-subsection-title { margin-top: 0; color: #a8b3cf; font-size: 1.1em; margin-bottom: 10px; } .report-summary .summary-grid { display: grid; grid-template-columns: auto 1fr; gap: 0; align-items: center; margin-bottom: 20px; } .security-score-container { display: flex; justify-content: center; } .security-score { width: 90px; height: 90px; border-radius: 50%; display: flex; flex-direction: column; justify-content: center; align-items: center; text-align: center; color: #fff; font-weight: bold; background: conic-gradient(#e74c3c 0% 20%, #e67e22 20% 40%, #f39c12 40% 60%, #3498db 60% 80%, #2ecc71 80% 100%); position: relative; border: 3px solid #555; box-shadow: inset 0 0 10px rgba(0,0,0,0.5); } .security-score::before { content: ''; position: absolute; inset: 5px; background: #1a1d21; border-radius: 50%; z-index: 1; } .security-score div { position: relative; z-index: 2; } .security-score-value { font-size: 28px; line-height: 1; } .security-score-label { font-size: 12px; margin-top: 3px; text-transform: uppercase; letter-spacing: 0.5px; } .security-score.critical { border-color: #e74c3c; } .security-score.high { border-color: #e67e22; } .security-score.medium { border-color: #f39c12; } .security-score.low { border-color: #3498db; } .security-score.negligible { border-color: #2ecc71; } .summary-metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px 20px; } .metric { background-color: #252a30; padding: 10px; border-radius: 4px; text-align: center; border: 1px solid #3a3f44; } .metric-label { display: block; font-size: 11px; color: #a8b3cf; margin-bottom: 4px; text-transform: uppercase; } .metric-value { display: block; font-size: 18px; font-weight: bold; color: #fff; } .recommendations { margin-top: 15px; padding: 15px; background: rgba(0, 225, 255, 0.05); border-radius: 4px; border-left: 3px solid #00e1ff; } .recommendation-text { color: #d0d8e8; font-size: 13px; line-height: 1.6; margin: 0; } .report-code-block { background: #111316; border: 1px solid #333; border-radius: 4px; padding: 12px; overflow-x: auto; margin: 10px 0; max-height: 300px; } .report-code-block pre { margin: 0; } .report-code-block code { font-family: 'Courier New', Courier, monospace; font-size: 13px; color: #c4c4c4; white-space: pre; } .report-handler .handler-meta { font-size: 0.8em; color: #777; margin-left: 10px; } details.report-details { background: #22252a; border: 1px solid #3a3f44; border-radius: 4px; margin-bottom: 10px; } summary.report-summary-toggle { cursor: pointer; padding: 10px 15px; display: flex; justify-content: space-between; align-items: center; font-weight: 600; color: #d0d8e8; } summary.report-summary-toggle:focus { outline: none; box-shadow: 0 0 0 2px rgba(0, 225, 255, 0.5); } details[open] > summary.report-summary-toggle { border-bottom: 1px solid #3a3f44; } .toggle-icon { font-size: 1.2em; transition: transform 0.2s; } details[open] .toggle-icon { transform: rotate(90deg); } .report-details > div { padding: 15px; } .report-table { width: 100%; border-collapse: collapse; margin: 15px 0; background-color: #22252a; } .report-table th, .report-table td { padding: 10px 12px; text-align: left; border: 1px solid #3a3f44; font-size: 13px; color: #d0d8e8; } .report-table th { background-color: #2c313a; font-weight: bold; color: #fff; } .report-table td code { font-size: 12px; color: #a8b3cf; background-color: #111316; padding: 2px 4px; border-radius: 3px; white-space: pre-wrap; word-break: break-all; } .report-table .context-snippet { max-width: 400px; white-space: pre-wrap; word-break: break-all; display: inline-block; vertical-align: middle; } .severity-badge { display: inline-block; padding: 3px 8px; border-radius: 12px; font-size: 11px; font-weight: bold; text-transform: uppercase; } .severity-critical { background-color: #e74c3c; color: white; } .severity-high { background-color: #e67e22; color: white; } .severity-medium { background-color: #f39c12; color: #333; } .severity-low { background-color: #3498db; color: white; } .severity-row-critical td { background-color: rgba(231, 76, 60, 0.15); } .severity-row-high td { background-color: rgba(230, 126, 34, 0.15); } .severity-row-medium td { background-color: rgba(243, 156, 18, 0.1); } .severity-row-low td { background-color: rgba(52, 152, 219, 0.1); } .no-findings-text { color: #777; font-style: italic; padding: 10px 0; } .dataflow-table td:first-child code { font-weight: bold; color: #ffb86c; } .report-list { max-height: 400px; overflow-y: auto; padding-right: 10px; } .payload-item, .structure-item { background: #22252a; border: 1px solid #3a3f44; border-radius: 4px; margin-bottom: 15px; overflow: hidden; } .payload-header { padding: 8px 12px; background-color: #2c313a; color: #a8b3cf; font-size: 12px; } .payload-header strong { color: #fff; } .payload-meta { color: #8be9fd; margin: 0 5px; } .payload-item .report-code-block { margin: 0; border: none; border-top: 1px solid #3a3f44; border-radius: 0 0 4px 4px; } .structure-content { padding: 15px; } .structure-content p { margin: 0 0 10px 0; color: #d0d8e8; font-size: 13px; } .structure-content strong { color: #00e1ff; } .structure-content code { color: #a8b3cf; background-color: #111316; padding: 2px 4px; border-radius: 3px; } .show-more-btn { display: block; width: 100%; margin-top: 15px; text-align: center; background-color: #343a42; border: 1px solid #4a5058; color: #a8b3cf; } .show-more-btn:hover { background-color: #4a5058; color: #fff; } .control-button {} .secondary-button {} .error-message { color: #e74c3c; font-weight: bold; padding: 15px; background-color: rgba(231, 76, 60, 0.1); border: 1px solid #e74c3c; border-radius: 4px; } span.highlight-finding { background-color: rgba(255, 0, 0, 0.3); color: #ffdddd; font-weight: bold; padding: 1px 2px; border-radius: 2px; border: 1px solid rgba(255, 100, 100, 0.5); }`;
 
 const progressStyles = `.trace-progress-container { position: fixed; bottom: 20px; right: 20px; background: rgba(40, 44, 52, 0.95); padding: 15px 20px; border-radius: 8px; box-shadow: 0 4px 15px rgba(0,0,0,0.4); z-index: 1001; border: 1px solid #555; font-family: sans-serif; width: 280px; color: #d0d8e8; } .trace-progress-container h4 { margin: 0 0 12px 0; font-size: 14px; color: #00e1ff; border-bottom: 1px solid #444; padding-bottom: 8px; text-transform: uppercase; letter-spacing: 0.5px; } .phase-list { display: flex; flex-direction: column; gap: 10px; } .phase { display: flex; align-items: center; gap: 12px; padding: 8px 12px; border-radius: 4px; transition: background-color 0.3s ease, color 0.3s ease, border-color 0.3s ease; border: 1px solid #444; } .phase .emoji { font-size: 20px; line-height: 1; } .phase .label { font-size: 13px; flex-grow: 1; color: #a8b3cf; } .phase.active { background-color: rgba(0, 225, 255, 0.1); border-color: #00e1ff; animation: pulse-border 1.5s infinite; } .phase.active .label { color: #fff; font-weight: 600; } .phase.active .emoji { animation: spin 1s linear infinite; } .phase.completed { background-color: rgba(80, 250, 123, 0.1); border-color: #50fa7b; } .phase.completed .label { color: #50fa7b; } .phase.completed .emoji::before { content: '✅'; } .phase.error { background-color: rgba(255, 85, 85, 0.1); border-color: #ff5555; } .phase.error .label { color: #ff5555; font-weight: 600; } .phase.error .emoji::before { content: '❌'; } .phase[data-phase="finished"], .phase[data-phase="error"] { display: none; } .phase[data-phase="finished"].completed, .phase[data-phase="error"].error { display: flex; } @keyframes pulse-border { 0% { border-color: #00e1ff; } 50% { border-color: rgba(0, 225, 255, 0.5); } 100% { border-color: #00e1ff; } } @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`;
@@ -5334,7 +5110,6 @@ function getCurrentEndpointKey() {
   const selected = document.querySelector('.endpoint-item.selected');
   return selected?.dataset.endpointKey || getFirstEndpointKey();
 }
-// Developer console function to verify LLM-generated payloads
 window.verifyLLMPayloads = async function(endpointKey = null) {
   const targetEndpoint = endpointKey || getCurrentEndpointKey();
   if (!targetEndpoint) {
@@ -5345,7 +5120,6 @@ window.verifyLLMPayloads = async function(endpointKey = null) {
   console.log(`🔍 [Payload Verification] Analyzing payloads for: ${targetEndpoint}`);
   
   try {
-    // Get the saved report and payloads
     const report = await window.traceReportStorage.getTraceReport(targetEndpoint);
     const payloads = await window.traceReportStorage.getReportPayloads(targetEndpoint);
     
@@ -5359,7 +5133,6 @@ window.verifyLLMPayloads = async function(endpointKey = null) {
     console.log(`   • Sinks Found: ${report.details?.sinks?.length || 0}`);
     console.log(`   • Total Payloads: ${payloads.length}`);
     
-    // Get intercepted messages for comparison
     const savedMessages = await chrome.storage.local.get([`saved-messages-${targetEndpoint}`]);
     const interceptedMessages = savedMessages[`saved-messages-${targetEndpoint}`] || [];
     
@@ -5368,7 +5141,6 @@ window.verifyLLMPayloads = async function(endpointKey = null) {
       console.log(`   ${i+1}. Type: ${typeof msg.data}, Structure:`, msg.data);
     });
 
-    // Analyze payload types and structures
     const payloadAnalysis = {
       llmGenerated: [],
       defaultFrogPost: [],
@@ -5386,7 +5158,6 @@ window.verifyLLMPayloads = async function(endpointKey = null) {
         payloadAnalysis.defaultFrogPost.push({index: i, payload: payloadData});
       }
 
-      // Check if payload structure matches intercepted messages
       const hasMatchingStructure = interceptedMessages.some(msg => {
         const msgKeys = Object.keys(msg.data || {}).sort();
         const payloadKeys = Object.keys(payloadData || {}).sort();
@@ -5406,13 +5177,11 @@ window.verifyLLMPayloads = async function(endpointKey = null) {
     console.log(`   • Structure Matches: ${payloadAnalysis.structureMatches}`);
     console.log(`   • Structure Mismatches: ${payloadAnalysis.structureMismatches}`);
 
-    // Show sample LLM payloads
     if (payloadAnalysis.llmGenerated.length > 0) {
       console.log(`🤖 [LLM Generated Payloads] Sample (first 5):`);
       payloadAnalysis.llmGenerated.slice(0, 5).forEach((item, i) => {
         console.log(`   ${i+1}. Index ${item.index}:`, item.payload);
         
-        // Validate structure
         const interceptedExample = interceptedMessages.find(msg => msg.data && typeof msg.data === 'object');
         if (interceptedExample) {
           const interceptedKeys = Object.keys(interceptedExample.data).sort();
@@ -5423,7 +5192,6 @@ window.verifyLLMPayloads = async function(endpointKey = null) {
       });
     }
 
-    // Show sample FrogPost payloads for comparison
     if (payloadAnalysis.defaultFrogPost.length > 0) {
       console.log(`🐸 [FrogPost Default Payloads] Sample (first 3):`);
       payloadAnalysis.defaultFrogPost.slice(0, 3).forEach((item, i) => {
@@ -5431,7 +5199,6 @@ window.verifyLLMPayloads = async function(endpointKey = null) {
       });
     }
 
-    // Effectiveness analysis
     console.log(`⚡ [Effectiveness Analysis]`);
     const renderPayloads = payloads.filter(p => {
       const data = p.payload || p;
@@ -5450,7 +5217,6 @@ window.verifyLLMPayloads = async function(endpointKey = null) {
     });
     console.log(`   • Unique XSS Vectors: ${Array.from(uniqueXSSVectors).join(', ')}`);
 
-    // Final verdict
     const successRate = (payloadAnalysis.structureMatches / payloads.length * 100).toFixed(1);
     console.log(`🏆 [Final Verdict]`);
     console.log(`   • Structure Match Rate: ${successRate}%`);
@@ -5484,7 +5250,6 @@ async function renderReportUI(traceReportData, initialPayloads = null) {
     let traceResultsPanel = document.getElementById('trace-results-panel');
     let content = document.getElementById('trace-results-content');
 
-    // If panel doesn't exist (first open), create it with basic structure
     if (!traceResultsPanel) {
         traceResultsPanel = document.createElement('div');
         traceResultsPanel.id = 'trace-results-panel';
@@ -5572,7 +5337,6 @@ async function renderReportUI(traceReportData, initialPayloads = null) {
 
         content.appendChild(summarySection);
 
-        // Simplified: no risk overview/details population
 
         const bestHandlerCode = details.bestHandler?.handler || details.analyzedHandler?.handler || details.analyzedHandler?.code;
         if (bestHandlerCode) {
@@ -5619,11 +5383,9 @@ async function renderReportUI(traceReportData, initialPayloads = null) {
             content.appendChild(handlerSection);
         }
 
-        // Add LLM Analysis Section after handler
         const llmSection = createLLMAnalysisSection(analysisStorageKey, endpointDisplay);
         content.appendChild(llmSection);
         
-        // Setup LLM event listeners after DOM is updated
         setupLLMEventListeners(analysisStorageKey);
 
         const findingsSection = document.createElement('div');
@@ -5676,7 +5438,7 @@ async function renderReportUI(traceReportData, initialPayloads = null) {
             uniqueIssues.forEach(issue => {
                 const type = issue?.type || '?'; const severity = issue?.severity || 'N/A'; const contextHTML = issue?.context || '';
                 let severityClass = severity.toLowerCase(); if(severity === 'Critical') severityClass = 'critical'; else if(severity === 'High') severityClass = 'high'; else if(severity === 'Medium') severityClass = 'medium'; else if(severity === 'Low') severityClass = 'low'; else severityClass='unknown';
-                const detectionMethod = vuln?.method || 'Unknown';
+                const detectionMethod = issue?.method || 'Unknown';
                 findingsHTML += `<tr class="severity-row-${severityClass}"><td>${escapeHTML(type)}</td><td><span class="severity-badge severity-${severityClass}">${escapeHTML(severity)}</span></td><td><code>${escapeHTML(detectionMethod)}</code></td><td class="context-snippet-cell">${contextHTML}</td></tr>`;
             });
             findingsHTML += `</tbody></table></div>`;
@@ -5773,24 +5535,5 @@ async function handleLoadPayloadsClick(event) {
         payloadListElement.innerHTML = `<p class="error-message">Error loading payloads.</p>`;
         button.textContent = `Retry Load Payloads`;
         button.disabled = false;
-    }
-}
-async function handleGenerateSmartPayloadsClick(event) {
-    const button = event.target;
-    const controlsDiv = button.closest('.smart-payload-controls');
-    if (!controlsDiv) {
-        log.error("Cannot find smart payload controls container.");
-        return;
-    }
-
-    const statusSpan = controlsDiv.querySelector('.smart-payload-status');
-    const analysisKey = controlsDiv.dataset.analysisKey;
-    const originalEndpointKey = controlsDiv.dataset.endpointKey;
-    const reportPanel = button.closest('.trace-results-panel');
-    const safeKeyIdPart = analysisKey?.replace(/[^a-zA-Z0-9_-]/g, '_');
-    if (!analysisKey || !originalEndpointKey || !reportPanel) {
-        log.error("Missing analysis key, original endpoint key, or report panel for generating smart payloads.");
-        if (statusSpan) statusSpan.textContent = 'Error: Missing data context.';
-        return;
     }
 }

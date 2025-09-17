@@ -1,10 +1,17 @@
 #!/usr/bin/env node
+
+/**
+ * FrogPost Extension
+ * Originally Created by thisis0xczar/Lidor 
+ * Refined on: 2025-09-17
+ */
+
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
 const http = require('http');
 
-const rootDir = '';
+const rootDir = path.join(__dirname, '..');
 
 require(path.join(rootDir, 'fuzzer', 'fuzzer.js'));
 
@@ -109,12 +116,17 @@ app.get('/', (req, res) => {
     res.sendFile(path.join(rootDir, 'fuzzer', 'test-environment.html'));
 });
 
-app.post('/llm/analyze-handler', async (req, res) => {
+// Old separate endpoints removed - replaced by /llm/unified-analyze
+
+app.post('/llm/unified-analyze', async (req, res) => {
   try {
     const { provider, model, apiKey } = req.body || {};
     const handlerCode = req.body?.context?.handlerCode || '';
+    const observedMessages = Array.isArray(req.body?.context?.observedMessages) ? req.body.context.observedMessages : [];
     
-    const prompt = buildAnalyzeHandlerPrompt(handlerCode);
+    console.log(`🚀 [Unified LLM] Starting combined analysis for handler (${handlerCode.length} chars) with ${observedMessages.length} messages`);
+    
+    const prompt = buildUnifiedAnalysisPrompt(handlerCode, observedMessages);
     const raw = await runLLM(provider, model, apiKey, prompt);
     
     if (!raw || (!raw.content && !raw.choices)) {
@@ -123,9 +135,14 @@ app.post('/llm/analyze-handler', async (req, res) => {
         ok: true, 
         handler_assessment: "Analysis provided by static analysis",
         handler_score: 50,
+        handler_match: 50,
         risks: staticSinks.length > 0 ? ["DOM XSS vulnerability detected by static analysis"] : [],
         dom_xss_sinks: staticSinks,
+        prototype_pollution_indicators: [],
         data_type: staticSinks.length > 0 ? "JSON" : "STRING",
+        new_payloads: [],
+        payload_class: 'none',
+        notes: 'Static analysis fallback used',
         llm_raw_output: raw 
       });
     }
@@ -133,69 +150,26 @@ app.post('/llm/analyze-handler', async (req, res) => {
     const jsonString = raw?.content || raw;
     const parsed = robustParseLlmJson(jsonString) || {};
     
-    if (!Array.isArray(parsed.dom_xss_sinks)) {
-      parsed.dom_xss_sinks = [];
-      
-      // Use static analysis to detect sinks instead of hardcoded fallback
-      const staticSinks = await getStaticAnalysisSinks(handlerCode);
-      if (staticSinks.length > 0) {
-        parsed.dom_xss_sinks = staticSinks;
-      }
+    console.log('🔍 [Unified LLM] Raw response:', jsonString);
+    console.log('🔍 [Unified LLM] Parsed response:', parsed);
+    
+    // Validate required fields
+    if (typeof parsed.handler_match !== 'number') {
+      console.error('❌ [Unified LLM] Missing handler_match field. LLM response:', parsed);
+      throw new Error('LLM failed to provide required handler_match score.');
     }
     
-    const normalized = normalizeLlmResponse(parsed, { handlerCode });
+    // Normalize the unified response
+    const normalized = normalizeUnifiedLlmResponse(parsed, { handlerCode, observedMessages });
     
     res.json({ ok: true, ...normalized, llm_raw_output: raw });
   } catch (e) {
-    console.error('Handler analysis error:', e);
+    console.error('Unified LLM analysis error:', e);
     res.status(500).json({ ok: false, error: String(e) });
   }
 });
 
-app.post('/llm/analyze-messages', async (req, res) => {
-  try {
-    const { provider, model, apiKey } = req.body || {};
-    const observedMessages = Array.isArray(req.body?.context?.observedMessages) ? req.body.context.observedMessages : [];
-    const prompt = buildAnalyzeMessagesPrompt(observedMessages);
-    const raw = await runLLM(provider, model, apiKey, prompt);
-    const jsonString = raw?.content || raw;
-    const parsed = robustParseLlmJson(jsonString) || {};
-    res.json({ ok: true, ...parsed, llm_raw_output: raw });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: String(e) });
-  }
-});
-
-app.post('/llm/analyze', async (req, res) => {
-  try {
-    const { provider, model, apiKey } = req.body || {};
-    const ctx = req.body?.context || {};
-    const sinks = Array.isArray(ctx.sinks) ? ctx.sinks : [];
-    const hasSinks = sinks.length > 0;
-    if (!hasSinks) return res.json({ ok: true, newPayloads: [], payload_class: 'none', newPayloadsCount: 0 });
-
-    const prompt = buildPayloadGenerationPrompt({
-      handlerCode: ctx.handlerCode || '',
-      observedMessages: Array.isArray(ctx.observedMessages) ? ctx.observedMessages : [],
-      sinks
-    });
-    
-    const raw = await runLLM(provider, model, apiKey, prompt);
-    const jsonString = raw?.content || raw;
-    const parsed = robustParseLlmJson(jsonString) || {};
-    const norm = normalizePayloadGenResponse(parsed, ctx);
-
-    res.json({
-      ok: true,
-      newPayloads: norm.new_payloads,
-      payload_class: norm.payload_class,
-      llm_raw_output: raw,
-      newPayloadsCount: norm.new_payloads.length
-    });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: String(e) });
-  }
-});
+// Legacy endpoint removed - now using unified-analyze
 
 function mergePayloads(existing, incoming) {
     const toNorm = (p) => {
@@ -212,106 +186,19 @@ function mergePayloads(existing, incoming) {
     return Array.from(set).map(fromNorm);
 }
 
-function buildPrompt(context) {
-    const originalMessages = context.observedMessages || [];
-    const sanitizedMessages = global.sanitizeMessagesForLlm ? global.sanitizeMessagesForLlm(originalMessages) : originalMessages;
-    
-    const messageTypes = { strings: [], objects: [], mixed: false };
-    sanitizedMessages.forEach(msg => {
-        const data = msg?.data !== undefined ? msg.data : msg;
-        if (typeof data === 'string') {
-            messageTypes.strings.push(data);
-        } else if (typeof data === 'object' && data !== null) {
-            messageTypes.objects.push(data);
-        }
-    });
-    messageTypes.mixed = messageTypes.strings.length > 0 && messageTypes.objects.length > 0;
-    
-    const sys = `You are a senior offensive security engineer analyzing window.postMessage handlers.
 
-**CRITICAL: Handler Quality Assessment Guidelines**
-When scoring handlers (0-100), consider:
-- COMPLEXITY: Multi-line handlers with business logic score 70-100
-- SIMPLE WRAPPERS: Single-line forwarding functions score 20-40  
-- REALISTIC BEHAVIOR: Handlers that parse/validate/process data score higher
-- WEBPACK/MINIFIED: Obfuscated production code typically scores 80-95
-- FUNCTION CALLS: Handlers calling other functions (like onMessageCallback) are often incomplete stubs
+// Old prompt building functions removed - now using buildUnifiedAnalysisPrompt
 
-**Your tasks:**
-1) **VALIDATE** the detected handler against observed messages - score its correctness (0-100)
-2) **ASSESS** handler complexity vs simplicity (complex webpack handlers >> simple forwarders)
-3) **GENERATE** attack payloads matching the observed message formats
-4) **IDENTIFY** specific risks based on handler patterns
+function buildUnifiedAnalysisPrompt(handlerCode, observedMessages) {
+  const sanitizedContext = sanitizeForLLMContext({ handlerCode, observedMessages });
+  const messagesToAnalyze = shapeOnlyMessages(sanitizedContext.observedMessages || []);
+  
+  const SYSTEM = `You are an expert security researcher performing comprehensive postMessage handler analysis. 
 
-**Return STRICT JSON:**
-{"handler_assessment":"detailed validation with complexity analysis","handler_score":number,"better_handler":"improved code|null","new_payloads":[mixed_types],"risks":["specific_risks"],"notes":"analysis_summary"}
-
-**Handler Assessment Must Include:**
-- Code complexity analysis (simple wrapper vs sophisticated logic)
-- Match quality vs observed messages  
-- Production-ready indicators (error handling, validation)
-- Missing functionality assessment
-
-**Payload Requirements:**
-- Generate ${messageTypes.mixed ? 'BOTH string AND object' : messageTypes.strings.length > 0 ? 'string-focused' : 'object-focused'} payloads
-- Match observed message patterns: ${messageTypes.strings.length} strings, ${messageTypes.objects.length} objects
-- Include XSS, prototype pollution, type confusion attacks
-- Target specific message keys/formats from observations
-
-Only output valid JSON, no markdown.`;
-    
-    const user = `**TARGET:** ${context.url}
-
-**OBSERVED MESSAGES (${sanitizedMessages.length} total):**
-String messages: ${JSON.stringify(messageTypes.strings.slice(0,3), null, 2)}
-Object messages: ${JSON.stringify(messageTypes.objects.slice(0,3), null, 2)}
-
-**DETECTED HANDLER (${context.handlerCode?.length || 0} chars):**
-\`\`\`javascript
-${context.handlerCode || "<no handler detected>"}
-\`\`\`
-
-**HANDLER ANALYSIS REQUIRED:**
-- Is this a simple forwarder (like "onMessageCallback(ev.data)") or complex business logic?
-- Does it match the observed message patterns (strings vs objects)?
-- Are there webpack/minification indicators suggesting production code?
-- Does it include error handling, validation, or sophisticated processing?
-
-**CURRENT PAYLOADS (${(context.currentPayloads||[]).length} existing):**
-${JSON.stringify((context.currentPayloads||[]).slice(0,3), null, 2)}
-
-**SECURITY CONTEXT:**
-- DOM Sinks: ${(context.sinks||[]).map(s => s.name || s.type || s).join(", ") || "none detected"}
-- Origin Checks: ${(context.originChecks||[]).length || 0} found
-- Message Security: ${messageTypes.mixed ? 'Mixed types increase attack surface' : messageTypes.strings.length > 0 ? 'String messages - XSS risk' : 'Object messages - injection/pollution risk'}
-
-**GENERATE PAYLOADS** matching the ${messageTypes.mixed ? 'MIXED (string+object)' : messageTypes.strings.length > 0 ? 'STRING' : 'OBJECT'} pattern observed.`;
-    
-    return { system: sys, user };
-}
-
-function buildHandlerAnalysisPrompt(context) {
-    const sys = `You are an expert code reviewer. Your ONLY task is to analyze the following JavaScript postMessage handler.
-- Assess its quality, correctness, and potential security risks.
-- Provide a score from 0-100 on how accurately it seems to match typical postMessage logic. Complex, realistic handlers should score higher.
-- Identify specific security risks you see in the code.
-- Return a strict JSON object: {"handler_assessment": "your analysis text", "handler_score": number, "risks": ["risk 1", "risk 2"]}`;
-    const user = `**DETECTED HANDLER:**\n\`\`\`javascript\n${context.handlerCode || "<no handler detected>"}\n\`\`\``;
-    return { system: sys, user };
-}
-
-function buildMessageAnalysisPrompt(context) {
-    const limitedMessages = (context.observedMessages || []).slice(0, 3);
-    const sys = `You are a data pattern analyst. Your ONLY task is to analyze these sample postMessage messages.
-- Identify patterns, structures, and potential security risks based on the data format.
-- Do NOT analyze handler code or generate payloads.
-- Return a strict JSON object: {"risks": ["risk based on message data"], "notes": "your summary of the patterns"}`;
-    const user = `**OBSERVED MESSAGES (max 3):**\n\`\`\`json\n${JSON.stringify(limitedMessages, null, 2)}\n\`\`\``;
-    return { system: sys, user };
-}
-
-function buildAnalyzeHandlerPrompt(handlerCode) {
-  const SYSTEM = `You are an expert security researcher analyzing JavaScript postMessage handlers for DOM XSS vulnerabilities.
+**YOUR TASK: Analyze the handler and messages to provide:**
+1. **Security Analysis** - Detect DOM XSS vulnerabilities and prototype pollution indicators
+2. **Handler-Message Matching** - Score how well the handler correlates with intercepted messages (0-100)
+3. **Payload Generation** - Generate up to 10 XSS payloads if DOM XSS sink found, up to 10 prototype pollution payloads if prototype pollution indicators found
 
 **CRITICAL: DOM XSS Sink Detection**
 Analyze the handler code and identify ANY of these DOM XSS sinks:
@@ -326,125 +213,137 @@ Analyze the handler code and identify ANY of these DOM XSS sinks:
 - React: dangerouslySetInnerHTML
 - Range.createContextualFragment, Range.insertNode
 
+**CRITICAL: Prototype Pollution Detection**
+Look for these prototype pollution indicators:
+- Unsafe object property access patterns: obj[key] = value where key comes from user input
+- Dangerous property names: __proto__, constructor, prototype
+- Unsafe merge operations without proper filtering
+- Dynamic property assignment from untrusted data
+
 **DATA TYPE ANALYSIS:**
-- If handler uses \`evt.data\` directly (like \`innerHTML = evt.data\`): STRING data type
-- If handler accesses properties (like \`evt.data.html\` or \`evt.data.type\`): JSON data type
+- If handler uses \`evt.data\` directly: STRING data type
+- If handler accesses properties (like \`evt.data.html\`): JSON data type
 - If handler calls \`JSON.parse(evt.data)\`: JSON STRING data type
 
-**Your task:**
-1) **DETECT DOM XSS SINKS** - Identify any dangerous DOM manipulation
-2) **ASSESS HANDLER QUALITY** - Score complexity and production-readiness (0-100)
-3) **IDENTIFY SECURITY RISKS** - List specific vulnerabilities
-4) **DETERMINE DATA TYPE** - Specify if handler expects STRING or JSON data
+**Handler Match Scoring Guidelines:**
+- 90-100: Complex business logic, multiple event.data accesses, sophisticated processing
+- 70-89: Good postMessage patterns, some complexity, clear data handling
+- 50-69: Basic postMessage functionality, simple data access
+- 30-49: Minimal postMessage characteristics, limited functionality
+- 0-29: Non-postMessage code, utility functions, or positioning logic
 
-**CRITICAL: You MUST return the dom_xss_sinks field!**
-
-**Return STRICT JSON:**
-{"handler_assessment":string,"handler_score":number,"risks":string[],"dom_xss_sinks":array,"data_type":"STRING|JSON"}
-
-**dom_xss_sinks format (REQUIRED FIELD):**
-- If you find innerHTML, outerHTML, insertAdjacentHTML: [{"type":"innerHTML assignment","severity":"High","line":"target.innerHTML = data","sink":"innerHTML"}]
-- If you find document.write: [{"type":"document.write","severity":"High","line":"document.write(data)","sink":"document.write"}]
-- If you find eval: [{"type":"eval execution","severity":"Critical","line":"eval(data)","sink":"eval"}]
-- If NO sinks found: "dom_xss_sinks":[]
-
-**EXAMPLES:**
-- For "target.innerHTML = event.data.html": {"dom_xss_sinks":[{"type":"innerHTML assignment","severity":"High","line":"target.innerHTML = event.data.html","sink":"innerHTML"}],"data_type":"JSON"}
-- For "target.innerHTML = evt.data": {"dom_xss_sinks":[{"type":"innerHTML assignment","severity":"High","line":"target.innerHTML = evt.data","sink":"innerHTML"}],"data_type":"STRING"}
-
-Only output valid JSON, no markdown.`;
-  
-  const USER = { 
-    handler_code: sanitizeForLLMContext({ handlerCode }).handlerCode,
-    task: "Analyze this postMessage handler for DOM XSS sinks, security issues, and data type expectations"
-  };
-  return { system: SYSTEM, user: JSON.stringify(USER, null, 2) };
+**MANDATORY OUTPUT FORMAT - You MUST include ALL these fields:**
+{
+  "handler_assessment": "detailed security analysis of the handler",
+  "handler_score": 85,
+  "handler_match": 78,
+  "risks": ["risk description 1", "risk description 2"],
+  "dom_xss_sinks": [{"type":"innerHTML assignment","severity":"High","line":"target.innerHTML = data","sink":"innerHTML"}],
+  "prototype_pollution_indicators": [{"type":"unsafe merge","severity":"Medium","line":"Object.assign(obj, userInput)","indicator":"object_assign"}],
+  "data_type": "JSON|STRING",
+  "new_payloads": {
+    "xss_payloads": ["<script>alert(1)</script>"],
+    "prototype_pollution_payloads": [{"__proto__": {"isAdmin": true}}]
+  },
+  "payload_class": "xss|prototype_pollution|mixed|none",
+  "notes": "comprehensive analysis summary"
 }
 
-function buildAnalyzeMessagesPrompt(messages) {
-  const SYSTEM = `You analyze ONLY postMessage SHAPES (no values).
-Return STRICT JSON: {"message_risks":string[],"shape_summary":string}. No prose.`;
-  const USER = { message_shapes: shapeOnlyMessages(messages || []) };
-  return { system: SYSTEM, user: JSON.stringify(USER, null, 2) };
-}
+**Payload Generation Rules:**
+- If DOM XSS sinks found: Generate up to 10 XSS payloads targeting those sinks
+- If prototype pollution indicators found: Generate up to 10 prototype pollution payloads
+- Use the detected data_type format (JSON objects vs strings)
+- If no vulnerabilities found: Return empty payload arrays
 
-function buildPayloadGenerationPrompt(context) {
-  const safe = sanitizeForLLMContext(context || {});
-  const sinks = Array.isArray(safe.sinks) ? safe.sinks : [];
-  const hasSinks = sinks.length > 0;
+**CRITICAL REQUIREMENTS:**
+1. You MUST provide handler_match score (0-100)
+2. You MUST provide all required fields - no omissions allowed
+3. Empty arrays are acceptable for sinks/indicators if none found
+4. Payloads must match the data_type format
 
-  // Use the detected sinks to determine data type
-  const handlerCode = safe.handlerCode || '';
-  const primarySink = sinks[0] || {};
-  const sinkLine = primarySink.line || '';
-  
-  // Determine data type based on sink usage
-  const expectsJSON = sinkLine.includes('event.data.') || 
-                     sinkLine.includes('evt.data.') ||
-                     sinkLine.includes('data.type') ||
-                     sinkLine.includes('data.html') ||
-                     sinkLine.includes('data[') ||
-                     handlerCode.includes('JSON.parse');
-  
-  const expectsString = !expectsJSON && (sinkLine.includes('evt.data') || sinkLine.includes('event.data'));
-  
-
-  const SYSTEM = `
-You are a creative and methodical security researcher specializing in postMessage vulnerability exploitation.
-
-**Primary Goal: Generate high-quality, diverse, and context-aware payloads.**
-
-**CRITICAL RULES:**
-1.  **Analyze the Handler's Data Type:** 
-    - If the handler uses \`evt.data\` directly (like \`innerHTML = evt.data\`), generate STRING payloads
-    - If the handler accesses properties (like \`evt.data.html\` or \`evt.data.type\`), generate JSON payloads
-    - If the handler calls \`JSON.parse(evt.data)\`, generate JSON STRING payloads (stringified JSON)
-2.  **Match Message Structure EXACTLY:** 
-    - For STRING handlers: Generate simple string payloads like \`"<img src=x onerror=alert(1)>"\`
-    - For JSON handlers: Generate complete JSON objects that match intercepted message structure
-3.  **Quality over Quantity:** Generate up to 10 high-quality payloads. If you can only generate a few very good ones, that is better than 10 generic ones.
-4.  **Payload Diversity:** Create a mix of payloads:
-    *   **Simple & Direct:** Basic XSS payloads targeting the sink
-    *   **Obfuscated:** Payloads using encoding (HTML entities, String.fromCharCode) to bypass filters
-    *   **Logic-Based:** Payloads that abuse the handler's intended logic
-5.  **Target the Sink:** Ensure your malicious input reaches the detected DOM XSS sink
-
-**STRICT PROHIBITIONS:**
-- Do NOT generate JSON payloads for string-based handlers (like \`{"type":"render","html":"..."}\` when handler uses \`evt.data\` directly)
-- Do NOT generate string payloads for JSON-based handlers
-- Do NOT change the top-level structure of the message
-- For string handlers: Generate strings like \`"<script>alert(1)</script>"\`, NOT objects like \`{"html":"<script>alert(1)</script>"}\`
-
-**OUTPUT FORMAT (Strict JSON):**
-{"new_payloads": [/* up to 10 payload objects */], "payload_class": "xss"}
-`;
+Return ONLY valid JSON, no markdown, no explanations.`;
 
   const USER = {
-    task: hasSinks 
-      ? `Generate up to 10 diverse, high-quality XSS payloads. The handler ${expectsJSON ? 'expects JSON data' : 'expects string data'}. Analyze the handler code to ensure your payloads are effective.` 
-      : "No sinks were detected. Return an empty array for new_payloads.",
-    handler_analysis: {
-      details: "The following JavaScript code is the message handler. Analyze its data handling to determine if it expects JSON or string data.",
-      code: safe.handlerCode || "No handler code available.",
-      data_type: expectsJSON ? "JSON" : "STRING",
-      reasoning: expectsJSON ? "Handler accesses properties like evt.data.property or uses JSON.parse" : "Handler uses evt.data directly without property access"
-    },
-    intercepted_message_examples: safe.observedMessages || [],
-    detected_sinks: sinks,
-    payload_requirements: {
-      count: hasSinks ? "Up to 10" : 0,
-      data_format: expectsJSON ? "JSON objects matching intercepted message structure" : "Simple strings",
-      target_field: hasSinks ? "Inject malicious content into the field(s) that flow into the 'detected_sinks'." : "N/A",
-      diversity: "Provide a mix of simple, obfuscated, and logic-based payloads."
-    },
-    example_of_correct_transformation: hasSinks 
-      ? (expectsJSON 
-          ? 'If handler uses evt.data.html and intercepted message is `{"type":"render","html":"<b>Hello</b>"}`, generate `{"type":"render","html":"<img src=x onerror=alert(1)>"}`'
-          : 'If handler uses evt.data directly (like innerHTML = evt.data), generate simple string payloads like: `"<img src=x onerror=alert(1)>"`, `"<svg onload=alert(1)>"`, `"<script>alert(1)</script>"` - NOT JSON objects!')
-      : "No example needed."
+    handler_code: sanitizedContext.handlerCode,
+    intercepted_messages: messagesToAnalyze,
+    task: "Perform unified security analysis: 1) Detect vulnerabilities 2) Score handler-message correlation 3) Generate payloads if vulnerabilities found"
   };
 
   return { system: SYSTEM, user: JSON.stringify(USER, null, 2) };
+}
+
+function normalizeUnifiedLlmResponse(parsed, context) {
+  const out = { ...parsed };
+  
+  // Normalize basic fields
+  if (typeof out.handler_assessment !== 'string') out.handler_assessment = 'No assessment provided by LLM.';
+  if (typeof out.handler_score !== 'number') {
+    const len = (context?.handlerCode || '').length;
+    const msgs = (context?.observedMessages || []).length;
+    out.handler_score = Math.min(100, Math.max(10, Math.round((len/300) + (msgs>0?20:0))));
+  }
+  if (typeof out.handler_match !== 'number') out.handler_match = 50;
+  if (!Array.isArray(out.risks)) out.risks = [];
+  if (typeof out.notes !== 'string') out.notes = 'Unified analysis completed';
+  
+  // Normalize vulnerability detection
+  if (!Array.isArray(out.dom_xss_sinks)) out.dom_xss_sinks = [];
+  if (!Array.isArray(out.prototype_pollution_indicators)) out.prototype_pollution_indicators = [];
+  if (typeof out.data_type !== 'string') out.data_type = 'JSON';
+  
+  // Normalize payloads - handle both old and new format
+  let xssPayloads = [];
+  let prototypePollutionPayloads = [];
+  
+  if (out.new_payloads && typeof out.new_payloads === 'object' && !Array.isArray(out.new_payloads)) {
+    // New unified format
+    xssPayloads = Array.isArray(out.new_payloads.xss_payloads) ? out.new_payloads.xss_payloads : [];
+    prototypePollutionPayloads = Array.isArray(out.new_payloads.prototype_pollution_payloads) ? out.new_payloads.prototype_pollution_payloads : [];
+  } else if (Array.isArray(out.new_payloads)) {
+    // Legacy format - assume all are XSS payloads
+    xssPayloads = out.new_payloads;
+  }
+  
+  // Combine payloads for UI compatibility
+  const allPayloads = [];
+  
+  // Add XSS payloads
+  xssPayloads.slice(0, 10).forEach(payload => {
+    allPayloads.push({
+      source: 'LLM',
+      type: 'XSS',
+      payload: payload,
+      targetPath: '(XSS vulnerability)',
+      sinkType: out.dom_xss_sinks.length > 0 ? out.dom_xss_sinks[0].sink : 'innerHTML'
+    });
+  });
+  
+  // Add prototype pollution payloads
+  prototypePollutionPayloads.slice(0, 10).forEach(payload => {
+    allPayloads.push({
+      source: 'LLM',
+      type: 'Prototype Pollution',
+      payload: payload,
+      targetPath: '(Prototype pollution)',
+      sinkType: 'prototype'
+    });
+  });
+  
+  out.new_payloads = allPayloads;
+  out.newPayloadsCount = allPayloads.length;
+  
+  // Determine payload class
+  if (xssPayloads.length > 0 && prototypePollutionPayloads.length > 0) {
+    out.payload_class = 'mixed';
+  } else if (xssPayloads.length > 0) {
+    out.payload_class = 'xss';
+  } else if (prototypePollutionPayloads.length > 0) {
+    out.payload_class = 'prototype_pollution';
+  } else {
+    out.payload_class = 'none';
+  }
+  
+  return out;
 }
 
 function robustParseLlmJson(raw) {
@@ -493,57 +392,7 @@ async function getStaticAnalysisSinks(handlerCode) {
     return [];
 }
 
-function normalizeLlmResponse(parsed, context) {
-    const out = { ...parsed };
-    if (typeof out.handler_assessment !== 'string') out.handler_assessment = 'No assessment provided by LLM.';
-    if (typeof out.handler_score !== 'number') {
-        const len = (context?.handlerCode || '').length; const msgs = (context?.observedMessages || []).length;
-        out.handler_score = Math.min(100, Math.max(10, Math.round((len/300) + (msgs>0?20:0))));
-    }
-    if (!Array.isArray(out.new_payloads)) out.new_payloads = [];
-    if (!Array.isArray(out.risks)) out.risks = [];
-    if (typeof out.notes !== 'string') out.notes = 'LLM response normalized';
-    if (!Array.isArray(out.sinks_detected)) out.sinks_detected = [];
-    if (typeof out.payload_class !== 'string') {
-        out.payload_class = out.new_payloads.length > 0 ? 'xss' : 'none';
-    }
-    return out;
-}
-
-function normalizePayloadGenResponse(parsed, context) {
-  const out = { new_payloads: [], payload_class: 'none' };
-  const sinks = Array.isArray(context?.sinks) ? context.sinks : [];
-  const hasSinks = sinks.length > 0;
-
-  if (parsed && Array.isArray(parsed.new_payloads)) {
-    // Accept both objects (preferred) and strings (legacy)
-    out.new_payloads = parsed.new_payloads.filter(p => 
-      (typeof p === 'object' && p !== null) || typeof p === 'string'
-    ).slice(0, 10);
-  }
-  if (typeof parsed?.payload_class === 'string') out.payload_class = parsed.payload_class;
-
-  if (!hasSinks) { out.new_payloads = []; out.payload_class = 'none'; return out; }
-
-  // Wrap LLM payloads with metadata for consistent UI display
-  const primarySink = sinks?.[0] || {};
-  out.new_payloads = out.new_payloads.map(p => {
-    let type = 'LLM-generated';
-    if (typeof p === 'object' && p !== null && p.type) {
-      type = p.type;
-    }
-
-    return {
-      source: 'LLM',
-      type: type,
-      payload: p,
-      targetPath: '(derived by LLM)',
-      sinkType: primarySink?.type || primarySink?.name || 'unknown'
-    };
-  });
-
-  return out;
-}
+// Old normalization functions removed - now using normalizeUnifiedLlmResponse
 
 async function runLLM(provider, model, apiKey, prompt) {
     if (provider === 'none' || !apiKey || !model) {
@@ -710,43 +559,7 @@ async function runLLM(provider, model, apiKey, prompt) {
     return { content: null };
 }
 
-function computePipelineScore({ handlerOk, messagesOk, payloadsOk, sinksFound }) {
-  if (sinksFound && handlerOk && messagesOk && payloadsOk) return 100;
-  let score = 0;
-  if (handlerOk) score += 40;
-  if (messagesOk) score += 30;
-  if (payloadsOk) score += 20;
-  if (sinksFound) score += 10;
-  return Math.min(95, score);
-}
 
-function robustParseLlmJson(raw) {
-  if (!raw || typeof raw !== 'string') return {};
-  
-  let cleaned = raw.replace(/```json\s*\n?/gi, '').replace(/```\s*$/gi, '');
-  
-  try {
-    return JSON.parse(cleaned);
-  } catch {
-    const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
-    if (jsonMatch) {
-      try {
-        return JSON.parse(jsonMatch[0]);
-      } catch {
-        return {};
-      }
-    }
-    return {};
-  }
-}
-
-function safeParseJson(str) {
-    try {
-        return JSON.parse(str);
-    } catch {
-        return {};
-    }
-}
 
 process.on('uncaughtException', e => console.error('Uncaught:', e?.message));
 process.on('unhandledRejection', e => console.error('Unhandled:', e?.message));
