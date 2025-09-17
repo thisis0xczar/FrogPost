@@ -1190,12 +1190,275 @@ function escapeHTML(str) {
 window.escapeHTML = escapeHTML;
 
 async function sendMessageTo(targetKey, button) {
-    let success = false; try { const messageItem = button.closest('.message-item'); if (!messageItem) throw new Error("Message item not found"); const messageDataElement = messageItem.querySelector('.message-data'); if (!messageDataElement) throw new Error("Message data element not found"); const messageContent = messageDataElement.textContent; let data; try { data = JSON.parse(messageContent); } catch (e) { data = messageContent; } const iframe = document.createElement('iframe'); iframe.style.display = 'none'; document.body.appendChild(iframe); iframe.src = targetKey; await new Promise((resolve, reject) => { const timer = setTimeout(() => reject(new Error("Iframe load timeout")), 3000); iframe.onload = () => { clearTimeout(timer); resolve(); }; iframe.onerror = () => { clearTimeout(timer); reject(new Error("Iframe load error")); }; }); if (iframe.contentWindow) { iframe.contentWindow.postMessage(data, '*'); success = true; } else throw new Error("Iframe content window not accessible"); setTimeout(() => { if (document.body.contains(iframe)) document.body.removeChild(iframe); }, 500); } catch (error) { log.error("Error in sendMessageTo:", error); success = false; } finally { button.classList.toggle('success', success); button.classList.toggle('error', !success); setTimeout(() => button.classList.remove('success', 'error'), 1000); } return success;
+    let success = false;
+    let iframe = null;
+    
+    try {
+        // Validate inputs
+        if (!targetKey || !button) {
+            throw new Error("Missing required parameters");
+        }
+        
+        // Get message data first
+        const messageItem = button.closest('.message-item');
+        if (!messageItem) {
+            throw new Error("Message item not found");
+        }
+        
+        const messageDataElement = messageItem.querySelector('.message-data');
+        if (!messageDataElement) {
+            throw new Error("Message data element not found");
+        }
+        
+        const messageContent = messageDataElement.textContent;
+        let data;
+        try {
+            data = JSON.parse(messageContent);
+        } catch (e) {
+            data = messageContent;
+        }
+        
+        // First, try to send message to the actual webpage's iframe via content script
+        try {
+            // Find the webpage tab, not the extension popup
+            const targetUrl = new URL(targetKey);
+            const domainPattern = `*://${targetUrl.hostname}/*`;
+            const tabs = await chrome.tabs.query({ url: domainPattern });
+            console.log('Found webpage tabs for sendMessageTo:', tabs);
+            
+            if (tabs.length > 0) {
+                const webpageTab = tabs[0];
+                console.log('Sending message to content script on webpage tab:', webpageTab.id);
+                const response = await chrome.tabs.sendMessage(webpageTab.id, {
+                    action: 'sendPostMessageToIframe',
+                    message: data,
+                    targetUrl: targetKey
+                });
+                
+                console.log('Content script response for sendMessageTo:', response);
+                
+                if (response && response.success) {
+                    console.log('Message sent to webpage iframe via content script:', data);
+                    return true;
+                } else {
+                    throw new Error(response?.error || 'Content script failed');
+                }
+            } else {
+                console.log('No webpage tab found for sendMessageTo content script approach');
+            }
+        } catch (error) {
+            console.log('Failed to send via content script in sendMessageTo, falling back to iframe method:', error);
+        }
+        
+        // Fallback: Find existing iframe first - try both full URL and relative path
+        iframe = document.querySelector(`iframe[src*="${targetKey}"]`) || 
+                 document.querySelector(`iframe[src*="${new URL(targetKey).pathname}"]`) ||
+                 document.querySelector('iframe');
+        
+        // Create iframe only if none exists
+        if (!iframe) {
+            iframe = document.createElement('iframe');
+            iframe.style.display = 'none';
+            iframe.src = targetKey;
+            document.body.appendChild(iframe);
+            
+            // Wait for iframe to load
+            await new Promise((resolve, reject) => {
+                const timer = setTimeout(() => {
+                    reject(new Error("Iframe load timeout"));
+                }, 5000);
+                
+                iframe.onload = () => {
+                    clearTimeout(timer);
+                    resolve();
+                };
+                
+                iframe.onerror = () => {
+                    clearTimeout(timer);
+                    reject(new Error("Iframe load error"));
+                };
+            });
+        }
+        
+        // Send message with proper origin
+        if (iframe.contentWindow) {
+            // For iframes loaded in extension context, always use '*'
+            // This is necessary because the iframe origin will be the extension origin
+            const targetOrigin = '*';
+            
+            console.log('Sending message to:', targetKey, 'Origin:', targetOrigin);
+            
+            iframe.contentWindow.postMessage(data, targetOrigin);
+            success = true;
+            
+            console.log('Message sent successfully:', data);
+        } else {
+            throw new Error("Iframe content window not accessible");
+        }
+        
+    } catch (error) {
+        console.error("Error in sendMessageTo:", error);
+        success = false;
+    } finally {
+        // Update button state
+        button.classList.toggle('success', success);
+        button.classList.toggle('error', !success);
+        
+        // Cleanup after delay (only if we created the iframe)
+        const existingIframe = document.querySelector(`iframe[src*="${targetKey}"]`) || 
+                              document.querySelector(`iframe[src*="${new URL(targetKey).pathname}"]`) ||
+                              document.querySelector('iframe');
+        if (iframe && !existingIframe) {
+            setTimeout(() => {
+                if (document.body.contains(iframe)) {
+                    document.body.removeChild(iframe);
+                }
+            }, 2000); // Increased timeout
+        }
+        
+        // Reset button state
+        setTimeout(() => {
+            button.classList.remove('success', 'error');
+        }, 1000);
+    }
+    
+    return success;
 }
 
 async function sendMessageFromModal(targetKey, editedDataString, buttonElement, originalButtonText) {
-    if (!targetKey || !buttonElement) return false; let dataToSend; try { dataToSend = JSON.parse(editedDataString); } catch (e) { dataToSend = editedDataString; } buttonElement.textContent = 'Sending...'; buttonElement.disabled = true; buttonElement.classList.remove('success', 'error'); let iframe = null;
-    try { iframe = document.createElement('iframe'); iframe.style.display = 'none'; document.body.appendChild(iframe); iframe.src = targetKey; await new Promise((resolve, reject) => { const timeoutId = setTimeout(() => reject(new Error("Iframe load timeout")), 5000); iframe.onload = () => { clearTimeout(timeoutId); resolve(); }; iframe.onerror = (err) => { clearTimeout(timeoutId); reject(new Error("Iframe load error")); }; }); if (iframe.contentWindow) { iframe.contentWindow.postMessage(dataToSend, '*'); buttonElement.textContent = 'Sent ✓'; buttonElement.classList.add('success'); await new Promise(res => setTimeout(res, 1000)); return true; } else throw new Error("Iframe content window not accessible"); } catch (error) { log.error(`Error sending message from modal to ${targetKey}:`, error); buttonElement.textContent = 'Error ✕'; buttonElement.classList.add('error'); await new Promise(res => setTimeout(res, 2000)); return false; } finally { if (iframe && iframe.parentNode) iframe.parentNode.removeChild(iframe); if (buttonElement && !buttonElement.classList.contains('success')) { buttonElement.disabled = false; buttonElement.textContent = originalButtonText; buttonElement.classList.remove('error'); } }
+    if (!targetKey || !buttonElement) {
+        console.error("Missing required parameters");
+        return false;
+    }
+    
+    let dataToSend;
+    try {
+        dataToSend = JSON.parse(editedDataString);
+    } catch (e) {
+        dataToSend = editedDataString;
+    }
+    
+    // Update button state
+    buttonElement.textContent = 'Sending...';
+    buttonElement.disabled = true;
+    buttonElement.classList.remove('success', 'error');
+    
+    let iframe = null;
+    
+    try {
+        // First, try to send message to the actual webpage's iframe via content script
+        try {
+            // Find the webpage tab, not the extension popup
+            const targetUrl = new URL(targetKey);
+            const domainPattern = `*://${targetUrl.hostname}/*`;
+            const tabs = await chrome.tabs.query({ url: domainPattern });
+            console.log('Found webpage tabs:', tabs);
+            
+            if (tabs.length > 0) {
+                const webpageTab = tabs[0];
+                console.log('Sending message to content script on webpage tab:', webpageTab.id);
+                const response = await chrome.tabs.sendMessage(webpageTab.id, {
+                    action: 'sendPostMessageToIframe',
+                    message: dataToSend,
+                    targetUrl: targetKey
+                });
+                
+                console.log('Content script response:', response);
+                
+                if (response && response.success) {
+                    buttonElement.textContent = 'Sent ✓';
+                    buttonElement.classList.add('success');
+                    console.log('Message sent to webpage iframe via content script:', dataToSend);
+                    
+                    await new Promise(res => setTimeout(res, 1000));
+                    return true;
+                } else {
+                    throw new Error(response?.error || 'Content script failed');
+                }
+            } else {
+                console.log('No webpage tab found for content script approach');
+            }
+        } catch (error) {
+            console.log('Failed to send via content script, falling back to iframe method:', error);
+        }
+        
+        // Fallback: Find existing iframe first - try both full URL and relative path
+        iframe = document.querySelector(`iframe[src*="${targetKey}"]`) || 
+                 document.querySelector(`iframe[src*="${new URL(targetKey).pathname}"]`) ||
+                 document.querySelector('iframe');
+        
+        // Create iframe only if none exists
+        if (!iframe) {
+            iframe = document.createElement('iframe');
+            iframe.style.display = 'none';
+            iframe.src = targetKey;
+            document.body.appendChild(iframe);
+            
+            // Wait for iframe to load
+            await new Promise((resolve, reject) => {
+                const timeoutId = setTimeout(() => {
+                    reject(new Error("Iframe load timeout"));
+                }, 5000);
+                
+                iframe.onload = () => {
+                    clearTimeout(timeoutId);
+                    resolve();
+                };
+                
+                iframe.onerror = (err) => {
+                    clearTimeout(timeoutId);
+                    reject(new Error("Iframe load error"));
+                };
+            });
+        }
+        
+        // Send message with proper origin
+        if (iframe.contentWindow) {
+            // For iframes loaded in extension context, always use '*'
+            // This is necessary because the iframe origin will be the extension origin
+            const targetOrigin = '*';
+            
+            console.log('Sending message from modal to:', targetKey, 'Origin:', targetOrigin);
+            
+            iframe.contentWindow.postMessage(dataToSend, targetOrigin);
+            
+            buttonElement.textContent = 'Sent ✓';
+            buttonElement.classList.add('success');
+            
+            console.log('Message sent successfully from modal:', dataToSend);
+            
+            await new Promise(res => setTimeout(res, 1000));
+            return true;
+        } else {
+            throw new Error("Iframe content window not accessible");
+        }
+        
+    } catch (error) {
+        console.error(`Error sending message from modal to ${targetKey}:`, error);
+        buttonElement.textContent = 'Error ✕';
+        buttonElement.classList.add('error');
+        
+        await new Promise(res => setTimeout(res, 2000));
+        return false;
+        
+    } finally {
+        // Cleanup only if we created the iframe
+        const existingIframe = document.querySelector(`iframe[src*="${targetKey}"]`) || 
+                              document.querySelector(`iframe[src*="${new URL(targetKey).pathname}"]`) ||
+                              document.querySelector('iframe');
+        if (iframe && !existingIframe) {
+            if (iframe.parentNode) {
+                iframe.parentNode.removeChild(iframe);
+            }
+        }
+        
+        // Reset button state
+        if (buttonElement && !buttonElement.classList.contains('success')) {
+            buttonElement.disabled = false;
+            buttonElement.textContent = originalButtonText;
+            buttonElement.classList.remove('error');
+        }
+    }
 }
 
 function showEditModal(messageObject) {
@@ -2035,6 +2298,7 @@ function updateDashboardUI() {
         if (msg.origin && msg.origin.startsWith('http://127.0.0.1:1337/')) return;
         if (msg.destinationUrl && msg.destinationUrl.startsWith('http://127.0.0.1:1337/')) return;
         if (msg.topLevelUrl && msg.topLevelUrl.startsWith('http://127.0.0.1:1337/')) return;
+        if (msg.topLevelUrl && msg.topLevelUrl.startsWith('chrome-extension://')) return;
         // Filter out generic localhost/127.0.0.1 traffic from dashboard
         if (isLocalDevUrl(msg.origin)) return;
         if (isLocalDevUrl(msg.destinationUrl)) return;
@@ -3490,6 +3754,7 @@ class LLMAnalyzer {
         try {
             let sinks = [];
             
+            console.log('🔍 [Debug] generatePayloads called with handlerAnalysis:', handlerAnalysis);
             if (handlerAnalysis && handlerAnalysis.dom_xss_sinks) {
                 // Use the already analyzed handler data
                 sinks = handlerAnalysis.dom_xss_sinks;
@@ -3546,6 +3811,7 @@ class LLMAnalyzer {
                 }
             });
             
+            console.log('🔍 [Debug] About to make fetch request to /llm/analyze');
             const response = await fetch('http://localhost:1337/llm/analyze', {
                 method: 'POST',
                 headers: {
@@ -3899,8 +4165,17 @@ async function executeLLMAnalysis(analyzer, provider, model, apiKey, handlerCode
         
         // Step 3: Generate payloads
         updateLLMStatus('Step 3/3: Generating payloads...', 'info');
+        console.log('🔍 [Debug] About to call generatePayloads with:', {
+            provider,
+            model,
+            handlerCodeLength: handlerCode.length,
+            messagesCount: sanitizedMessages.length,
+            handlerAnalysis: parsedHandlerAnalysis
+        });
         const payloadAnalysis = await analyzer.generatePayloads(provider, model, apiKey, handlerCode, sanitizedMessages, parsedHandlerAnalysis);
+        console.log('🔍 [Debug] Payload analysis response:', payloadAnalysis);
         const parsedPayloadAnalysis = parseLLMResponse(payloadAnalysis);
+        console.log('🔍 [Debug] Parsed payload analysis:', parsedPayloadAnalysis);
         updatePayloadsWithLLM(parsedPayloadAnalysis, analysisStorageKey);
         
         updateLLMStatus('LLM analysis completed successfully!', 'success');
@@ -4375,33 +4650,33 @@ async function displayReport(reportData, panel) {
                              <span class="tick t33"></span>
                              <span class="tick t67"></span>
                              <span class="risk-caret" style="left: ${Math.max(0, Math.min(100, score))}%"></span>
-                         </div>
-                         <span class="risk-level-text ${riskColor}">${riskLevel}</span>
                      </div>
+                         <span class="risk-level-text ${riskColor}">${riskLevel}</span>
                 </div>
+                 </div>
                  <div class="summary-metrics" id="summary-metrics">
                      <div class="metric" data-metric="handler">
                         <div class="metric-header"><span class="metric-label">Handler Security Score</span></div>
                         <span class="metric-value ${getHandlerScoreClass(Math.round(Math.max(1, Math.min(10, Math.round((10*score)/100))))) }">${Math.round(Math.max(1, Math.min(10, Math.round((10*score)/100))))}/10</span>
                      </div>
                      <div class="metric" data-metric="msgs">
-                        <div class="metric-header">
-                            <span class="metric-label">Msgs</span>
-                        </div>
+                         <div class="metric-header">
+                             <span class="metric-label">Msgs</span>
+                         </div>
                          <span class="metric-value">${uiMessageCount}</span>
                          <div class="risk-details"></div>
                      </div>
                      <div class="metric" data-metric="structs">
-                        <div class="metric-header">
-                            <span class="metric-label">Structs</span>
-                        </div>
+                         <div class="metric-header">
+                             <span class="metric-label">Structs</span>
+                         </div>
                          <span class="metric-value">${structures?.length ?? 0}</span>
                          <div class="risk-details"></div>
                      </div>
                      <div class="metric" data-metric="sinks">
-                        <div class="metric-header">
-                            <span class="metric-label">Sinks</span>
-                        </div>
+                         <div class="metric-header">
+                             <span class="metric-label">Sinks</span>
+                         </div>
                          <span class="metric-value">${uniqueVulns?.length ?? 0}</span>
                          <div class="risk-details"></div>
                      </div>
@@ -4555,22 +4830,38 @@ async function displayReport(reportData, panel) {
 
         if (originChecks.length > 0) {
             findingsExist = true;
-            findingsHTML += `<div class="subsection"><h5 class="report-subsection-title">Origin Validation (${originChecks.length})</h5><table class="report-table"><thead><tr><th>Check Type</th><th>Compared Value</th><th>Snippet</th></tr></thead><tbody>`;
+            findingsHTML += `<div class="subsection"><h5 class="report-subsection-title">Origin Validation (${originChecks.length})</h5><table class="report-table"><thead><tr><th>Detection Result</th><th>Analysis Method</th><th>Code Evidence</th></tr></thead><tbody>`;
             originChecks.forEach(check => {
-                const type = check?.type || '?'; const strength = check?.strength || 'N/A'; const value = check?.comparedValue !== null && check?.comparedValue !== undefined ? String(check.comparedValue).substring(0, 100) : 'N/A'; const snippetHTML = check?.rawSnippet ? `<code class="context-snippet">${escapeHTML(check.rawSnippet)}</code>` : 'N/A';
-                let strengthClass = strength.toLowerCase(); if(strength === 'Missing') strengthClass = 'critical'; else if(strength === 'Weak') strengthClass = 'high'; else if(strength === 'Medium') strengthClass = 'medium'; else if(strength === 'Strong') strengthClass = 'negligible'; else strengthClass='low';
-                findingsHTML += `<tr class="severity-row-${strengthClass}"><td>${escapeHTML(type)}</td><td><code>${escapeHTML(value)}</code></td><td>${snippetHTML}</td></tr>`;
+                const type = check?.type || '?'; 
+                const strength = check?.strength || 'N/A'; 
+                const value = check?.comparedValue !== null && check?.comparedValue !== undefined ? String(check.comparedValue).substring(0, 100) : 'N/A'; 
+                const snippetHTML = check?.rawSnippet ? `<code class="context-snippet">${escapeHTML(check.rawSnippet)}</code>` : 'N/A';
+                
+                let detectionResult, analysisMethod, codeEvidence;
+                
+                if(strength === 'Missing') {
+                    detectionResult = '<span style="color: #dc2626; font-weight: bold;">❌ NO ORIGIN VALIDATION DETECTED</span>';
+                    analysisMethod = 'Static code analysis scanned entire handler for origin validation patterns (event.origin comparisons, method calls, etc.)';
+                    codeEvidence = '<span style="color: #888; font-style: italic;">Handler code analyzed - no origin validation patterns found</span>';
+                } else {
+                    detectionResult = `<span style="color: #16a34a; font-weight: bold;">✅ ORIGIN VALIDATION FOUND</span>`;
+                    analysisMethod = `Detected ${type} validation with ${strength} strength`;
+                    codeEvidence = snippetHTML;
+                }
+                
+                findingsHTML += `<tr><td>${detectionResult}</td><td>${analysisMethod}</td><td>${codeEvidence}</td></tr>`;
             });
             findingsHTML += `</tbody></table></div>`;
         }
 
         if (uniqueVulns.length > 0) {
             findingsExist = true;
-            findingsHTML += `<div class="subsection"><h5 class="report-subsection-title">Potential Sinks Reached (${uniqueVulns.length})</h5><table class="report-table"><thead><tr><th>Sink</th><th>Data Path</th><th>Conditions</th><th>Context Snippet</th></tr></thead><tbody>`;
+            findingsHTML += `<div class="subsection"><h5 class="report-subsection-title">Potential Sinks Reached (${uniqueVulns.length})</h5><table class="report-table"><thead><tr><th>Sink</th><th>Severity</th><th>Context Snippet</th></tr></thead><tbody>`;
             uniqueVulns.forEach(vuln => {
                 const type = vuln?.name || vuln?.type || '?'; const severity = vuln?.severity || 'N/A'; const contextHTML = vuln?.context || ''; const sourcePath = vuln?.sourcePath || '(unknown)'; const conditions = vuln?.conditions || [];
                 let conditionsHtml = 'None'; if (conditions.length > 0) { conditionsHtml = conditions.map(c => { let valStr = escapeHTML(String(c.value)); if (typeof c.value === 'string') valStr = `'${valStr}'`; return `<code>${escapeHTML(c.path)} ${escapeHTML(c.op)} ${valStr}</code>`; }).join('<br>'); }
-                findingsHTML += `<tr class="severity-row-${severity.toLowerCase()}"><td>${escapeHTML(type)}</td><td><code>${escapeHTML(sourcePath)}</code></td><td>${conditionsHtml}</td><td class="context-snippet-cell">${contextHTML}</td></tr>`;
+                let severityClass = severity.toLowerCase(); if(severity === 'Critical') severityClass = 'critical'; else if(severity === 'High') severityClass = 'high'; else if(severity === 'Medium') severityClass = 'medium'; else if(severity === 'Low') severityClass = 'low'; else severityClass='unknown';
+                findingsHTML += `<tr class="severity-row-${severityClass}"><td>${escapeHTML(type)}</td><td><span class="severity-badge severity-${severityClass}">${escapeHTML(severity)}</span></td><td class="context-snippet-cell">${contextHTML}</td></tr>`;
             });
             findingsHTML += `</tbody></table></div>`;
 
@@ -4579,10 +4870,11 @@ async function displayReport(reportData, panel) {
 
         if (uniqueIssues.length > 0) {
             findingsExist = true;
-            findingsHTML += `<div class="subsection"><h5 class="report-subsection-title">Other Security Issues (${uniqueIssues.length})</h5><table class="report-table"><thead><tr><th>Issue</th><th>Context Snippet</th></tr></thead><tbody>`;
+            findingsHTML += `<div class="subsection"><h5 class="report-subsection-title">Other Security Issues (${uniqueIssues.length})</h5><table class="report-table"><thead><tr><th>Issue</th><th>Severity</th><th>Context Snippet</th></tr></thead><tbody>`;
             uniqueIssues.forEach(issue => {
                 const type = issue?.type || '?'; const severity = issue?.severity || 'N/A'; const contextHTML = issue?.context || '';
-                findingsHTML += `<tr class="severity-row-${severity.toLowerCase()}"><td>${escapeHTML(type)}</td><td class="context-snippet-cell">${contextHTML}</td></tr>`;
+                let severityClass = severity.toLowerCase(); if(severity === 'Critical') severityClass = 'critical'; else if(severity === 'High') severityClass = 'high'; else if(severity === 'Medium') severityClass = 'medium'; else if(severity === 'Low') severityClass = 'low'; else severityClass='unknown';
+                findingsHTML += `<tr class="severity-row-${severityClass}"><td>${escapeHTML(type)}</td><td><span class="severity-badge severity-${severityClass}">${escapeHTML(severity)}</span></td><td class="context-snippet-cell">${contextHTML}</td></tr>`;
             });
             findingsHTML += `</tbody></table></div>`;
         }
@@ -5273,32 +5565,49 @@ async function renderReportUI(traceReportData, initialPayloads = null) {
 
         if (details.originValidationChecks?.length > 0) {
             findingsExist = true;
-            findingsHTML += `<div class="subsection"><h5 class="report-subsection-title">Origin Validation (${details.originValidationChecks.length})</h5><table class="report-table"><thead><tr><th>Check Type</th><th>Strength</th><th>Compared Value</th><th>Snippet</th></tr></thead><tbody>`;
+            findingsHTML += `<div class="subsection"><h5 class="report-subsection-title">Origin Validation (${details.originValidationChecks.length})</h5><table class="report-table"><thead><tr><th>Detection Result</th><th>Analysis Method</th><th>Code Evidence</th></tr></thead><tbody>`;
             details.originValidationChecks.forEach(check => {
-                const type = check?.type || '?'; const strength = check?.strength || 'N/A'; const value = check?.comparedValue !== null && check?.comparedValue !== undefined ? String(check.comparedValue).substring(0, 100) : 'N/A'; const snippetHTML = check?.rawSnippet ? `<code class="context-snippet">${escapeHTML(check.rawSnippet)}</code>` : 'N/A';
-                let strengthClass = strength.toLowerCase(); if(strength === 'Missing') strengthClass = 'critical'; else if(strength === 'Weak') strengthClass = 'high'; else if(strength === 'Medium') strengthClass = 'medium'; else if(strength === 'Strong') strengthClass = 'negligible'; else strengthClass='low';
-                findingsHTML += `<tr class="severity-row-${strengthClass}"><td>${escapeHTML(type)}</td><td><code>${escapeHTML(value)}</code></td><td>${snippetHTML}</td></tr>`;
+                const type = check?.type || '?'; 
+                const strength = check?.strength || 'N/A'; 
+                const value = check?.comparedValue !== null && check?.comparedValue !== undefined ? String(check.comparedValue).substring(0, 100) : 'N/A'; 
+                const snippetHTML = check?.rawSnippet ? `<code class="context-snippet">${escapeHTML(check.rawSnippet)}</code>` : 'N/A';
+                
+                let detectionResult, analysisMethod, codeEvidence;
+                
+                if(strength === 'Missing') {
+                    detectionResult = '<span style="color: #dc2626; font-weight: bold;">❌ NO ORIGIN VALIDATION DETECTED</span>';
+                    analysisMethod = 'Static code analysis scanned entire handler for origin validation patterns (event.origin comparisons, method calls, etc.)';
+                    codeEvidence = '<span style="color: #888; font-style: italic;">Handler code analyzed - no origin validation patterns found</span>';
+                } else {
+                    detectionResult = `<span style="color: #16a34a; font-weight: bold;">✅ ORIGIN VALIDATION FOUND</span>`;
+                    analysisMethod = `Detected ${type} validation with ${strength} strength`;
+                    codeEvidence = snippetHTML;
+                }
+                
+                findingsHTML += `<tr><td>${detectionResult}</td><td>${analysisMethod}</td><td>${codeEvidence}</td></tr>`;
             });
             findingsHTML += `</tbody></table></div>`;
         }
 
         if (uniqueVulns.length > 0) {
             findingsExist = true;
-            findingsHTML += `<div class="subsection"><h5 class="report-subsection-title">Potential Sinks Reached (${uniqueVulns.length})</h5><table class="report-table"><thead><tr><th>Sink</th><th>Data Path</th><th>Conditions</th><th>Context Snippet</th></tr></thead><tbody>`;
+            findingsHTML += `<div class="subsection"><h5 class="report-subsection-title">Potential Sinks Reached (${uniqueVulns.length})</h5><table class="report-table"><thead><tr><th>Sink</th><th>Severity</th><th>Context Snippet</th></tr></thead><tbody>`;
             uniqueVulns.forEach(vuln => {
                 const type = vuln?.name || vuln?.type || '?'; const severity = vuln?.severity || 'N/A'; const contextHTML = vuln?.context || ''; const sourcePath = vuln?.sourcePath || '(unknown)'; const conditions = vuln?.conditions || [];
                 let conditionsHtml = 'None'; if (conditions.length > 0) { conditionsHtml = conditions.map(c => { let valStr = escapeHTML(String(c.value)); if (typeof c.value === 'string') valStr = `'${valStr}'`; return `<code>${escapeHTML(c.path)} ${escapeHTML(c.op)} ${valStr}</code>`; }).join('<br>'); }
-                findingsHTML += `<tr class="severity-row-${severity.toLowerCase()}"><td>${escapeHTML(type)}</td><td><code>${escapeHTML(sourcePath)}</code></td><td>${conditionsHtml}</td><td class="context-snippet-cell">${contextHTML}</td></tr>`;
+                let severityClass = severity.toLowerCase(); if(severity === 'Critical') severityClass = 'critical'; else if(severity === 'High') severityClass = 'high'; else if(severity === 'Medium') severityClass = 'medium'; else if(severity === 'Low') severityClass = 'low'; else severityClass='unknown';
+                findingsHTML += `<tr class="severity-row-${severityClass}"><td>${escapeHTML(type)}</td><td><span class="severity-badge severity-${severityClass}">${escapeHTML(severity)}</span></td><td class="context-snippet-cell">${contextHTML}</td></tr>`;
             });
             findingsHTML += `</tbody></table></div>`;
         }
 
         if (uniqueIssues.length > 0) {
             findingsExist = true;
-            findingsHTML += `<div class="subsection"><h5 class="report-subsection-title">Other Security Issues (${uniqueIssues.length})</h5><table class="report-table"><thead><tr><th>Issue</th><th>Context Snippet</th></tr></thead><tbody>`;
+            findingsHTML += `<div class="subsection"><h5 class="report-subsection-title">Other Security Issues (${uniqueIssues.length})</h5><table class="report-table"><thead><tr><th>Issue</th><th>Severity</th><th>Context Snippet</th></tr></thead><tbody>`;
             uniqueIssues.forEach(issue => {
                 const type = issue?.type || '?'; const severity = issue?.severity || 'N/A'; const contextHTML = issue?.context || '';
-                findingsHTML += `<tr class="severity-row-${severity.toLowerCase()}"><td>${escapeHTML(type)}</td><td class="context-snippet-cell">${contextHTML}</td></tr>`;
+                let severityClass = severity.toLowerCase(); if(severity === 'Critical') severityClass = 'critical'; else if(severity === 'High') severityClass = 'high'; else if(severity === 'Medium') severityClass = 'medium'; else if(severity === 'Low') severityClass = 'low'; else severityClass='unknown';
+                findingsHTML += `<tr class="severity-row-${severityClass}"><td>${escapeHTML(type)}</td><td><span class="severity-badge severity-${severityClass}">${escapeHTML(severity)}</span></td><td class="context-snippet-cell">${contextHTML}</td></tr>`;
             });
             findingsHTML += `</tbody></table></div>`;
         }

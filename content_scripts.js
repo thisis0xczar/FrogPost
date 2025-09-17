@@ -19,6 +19,32 @@
         return 'access-denied-or-invalid';
     }
 
+    // Handle messages from extension to send to iframe
+    chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+        console.log('Content script received message:', request);
+        if (request.action === 'sendPostMessageToIframe') {
+            try {
+                console.log('Looking for iframe on page...');
+                const iframe = document.querySelector('iframe');
+                console.log('Found iframe:', iframe);
+                
+                if (iframe && iframe.contentWindow) {
+                    console.log('Sending postMessage to iframe:', request.message);
+                    iframe.contentWindow.postMessage(request.message, '*');
+                    console.log('Content script sent message to iframe:', request.message);
+                    sendResponse({ success: true });
+                } else {
+                    console.log('No iframe found to send message to');
+                    sendResponse({ success: false, error: 'No iframe found' });
+                }
+            } catch (error) {
+                console.error('Error sending message to iframe:', error);
+                sendResponse({ success: false, error: error.message });
+            }
+            return true; // Keep message channel open for async response
+        }
+    });
+
     window.addEventListener('message', (event) => {
         if (event.source === window && event.data?.type === 'frogPostAgent->ForwardToBackground') {
             if (chrome?.runtime?.id && chrome.runtime.sendMessage) {
