@@ -19,6 +19,42 @@
     --font-mono: 'SF Mono', 'Fira Code', 'Fira Mono', 'Roboto Mono', monospace;
 }
 
+/* Severity Badge Styles */
+.severity-badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.severity-critical {
+    background-color: #dc2626;
+    color: white;
+}
+
+.severity-high {
+    background-color: #ea580c;
+    color: white;
+}
+
+.severity-medium {
+    background-color: #d97706;
+    color: white;
+}
+
+.severity-low {
+    background-color: #16a34a;
+    color: white;
+}
+
+.severity-unknown {
+    background-color: #6b7280;
+    color: white;
+}
+
 /* Pulse animation for LLM status indicator */
 @keyframes pulse {
     0% {

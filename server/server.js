@@ -114,40 +114,32 @@ app.post('/llm/analyze-handler', async (req, res) => {
     const { provider, model, apiKey } = req.body || {};
     const handlerCode = req.body?.context?.handlerCode || '';
     
-    console.log(`🔍 [Handler Analysis] Received handler code (${handlerCode.length} chars):`, handlerCode);
-    
     const prompt = buildAnalyzeHandlerPrompt(handlerCode);
-    console.log(`🔍 [Handler Analysis] Built prompt:`, {
-      system: prompt.system.substring(0, 200) + '...',
-      user: prompt.user
-    });
-    
     const raw = await runLLM(provider, model, apiKey, prompt);
-    console.log(`🔍 [Handler Analysis] LLM raw response:`, raw);
     
-    // Extract content from OpenAI response format
+    if (!raw || (!raw.content && !raw.choices)) {
+      const staticSinks = await getStaticAnalysisSinks(handlerCode);
+      return res.json({ 
+        ok: true, 
+        handler_assessment: "Analysis provided by static analysis",
+        handler_score: 50,
+        risks: staticSinks.length > 0 ? ["DOM XSS vulnerability detected by static analysis"] : [],
+        dom_xss_sinks: staticSinks,
+        data_type: staticSinks.length > 0 ? "JSON" : "STRING",
+        llm_raw_output: raw 
+      });
+    }
+    
     const jsonString = raw?.content || raw;
-    console.log(`🔍 [Handler Analysis] JSON string to parse:`, jsonString);
-    
     const parsed = robustParseLlmJson(jsonString) || {};
-    console.log(`🔍 [Handler Analysis] Parsed response:`, parsed);
-    
-    // Ensure dom_xss_sinks is an array (could be [] if not detected)
-    console.log(`🔍 [Debug] Checking dom_xss_sinks field:`, typeof parsed.dom_xss_sinks, parsed.dom_xss_sinks);
-    console.log(`🔍 [Debug] Parsed risks:`, parsed.risks);
     
     if (!Array.isArray(parsed.dom_xss_sinks)) {
-      console.log(`🔧 [Fallback] dom_xss_sinks not provided, initializing empty array`);
       parsed.dom_xss_sinks = [];
       
-      // FALLBACK: If LLM didn't provide dom_xss_sinks but mentioned XSS in risks, extract it
       if (Array.isArray(parsed.risks)) {
-        console.log(`🔧 [Fallback] Checking ${parsed.risks.length} risks for XSS mentions`);
-        parsed.risks.forEach((risk, index) => {
+        parsed.risks.forEach((risk) => {
           const riskLower = risk.toLowerCase();
-          console.log(`🔧 [Fallback] Risk ${index}: "${risk}" -> "${riskLower}"`);
           if (riskLower.includes('xss') || riskLower.includes('innerhtml') || riskLower.includes('cross-site scripting')) {
-            console.log(`🔧 [Fallback] ✅ MATCH! Extracting sink from risk: "${risk}"`);
             parsed.dom_xss_sinks.push({
               type: "innerHTML assignment", 
               severity: "High", 
@@ -155,22 +147,16 @@ app.post('/llm/analyze-handler', async (req, res) => {
               sink: "innerHTML",
               source: "fallback_from_risks"
             });
-          } else {
-            console.log(`🔧 [Fallback] ❌ No XSS match for: "${risk}"`);
           }
         });
-      } else {
-        console.log(`🔧 [Fallback] No risks array found or not an array:`, typeof parsed.risks);
       }
-    } else {
-      console.log(`🔧 [Fallback] dom_xss_sinks already provided by LLM:`, parsed.dom_xss_sinks);
     }
     
-    console.log(`🔍 [Handler Analysis] Final sinks detected: ${parsed.dom_xss_sinks.length}`, parsed.dom_xss_sinks);
+    const normalized = normalizeLlmResponse(parsed, { handlerCode });
     
-    res.json({ ok: true, ...parsed, llm_raw_output: raw });
+    res.json({ ok: true, ...normalized, llm_raw_output: raw });
   } catch (e) {
-    console.error(`❌ [Handler Analysis] Error:`, e);
+    console.error('Handler analysis error:', e);
     res.status(500).json({ ok: false, error: String(e) });
   }
 });
@@ -197,32 +183,16 @@ app.post('/llm/analyze', async (req, res) => {
     const hasSinks = sinks.length > 0;
     if (!hasSinks) return res.json({ ok: true, newPayloads: [], payload_class: 'none', newPayloadsCount: 0 });
 
-    console.log(`🎯 [Payload Generation] Starting for ${sinks.length} sinks`);
-    console.log(`🎯 [Payload Generation] Observed messages:`, ctx.observedMessages);
-    console.log(`🎯 [Payload Generation] Detected sinks:`, sinks);
-    
     const prompt = buildPayloadGenerationPrompt({
       handlerCode: ctx.handlerCode || '',
       observedMessages: Array.isArray(ctx.observedMessages) ? ctx.observedMessages : [],
       sinks
     });
     
-    console.log(`🎯 [Payload Generation] Built prompt:`, {
-      system: prompt.system.substring(0, 300) + '...',
-      user: prompt.user
-    });
-    
     const raw = await runLLM(provider, model, apiKey, prompt);
-    console.log(`🎯 [Payload Generation] LLM raw response:`, raw);
-    
     const jsonString = raw?.content || raw;
-    console.log(`🎯 [Payload Generation] JSON string to parse:`, jsonString);
-    
     const parsed = robustParseLlmJson(jsonString) || {};
-    console.log(`🎯 [Payload Generation] Parsed response:`, parsed);
-    
     const norm = normalizePayloadGenResponse(parsed, ctx);
-    console.log(`🎯 [Payload Generation] Normalized payloads:`, norm);
 
     res.json({
       ok: true,
@@ -254,7 +224,6 @@ function mergePayloads(existing, incoming) {
 function buildPrompt(context) {
     const originalMessages = context.observedMessages || [];
     const sanitizedMessages = global.sanitizeMessagesForLlm ? global.sanitizeMessagesForLlm(originalMessages) : originalMessages;
-    console.log(`🔐 Sanitized ${originalMessages.length} messages for LLM analysis`);
     
     const messageTypes = { strings: [], objects: [], mixed: false };
     sanitizedMessages.forEach(msg => {
@@ -413,42 +382,21 @@ function buildPayloadGenerationPrompt(context) {
   const sinks = Array.isArray(safe.sinks) ? safe.sinks : [];
   const hasSinks = sinks.length > 0;
 
-  // Analyze handler to determine if it expects JSON or string data
+  // Use the detected sinks to determine data type
   const handlerCode = safe.handlerCode || '';
+  const primarySink = sinks[0] || {};
+  const sinkLine = primarySink.line || '';
   
-  // Check for JSON usage patterns first
-  const hasJSONPropertyAccess = handlerCode.includes('event.data.') || 
-                               handlerCode.includes('evt.data.') ||
-                               handlerCode.includes('data.type') ||
-                               handlerCode.includes('data.html') ||
-                               handlerCode.includes('data[');
+  // Determine data type based on sink usage
+  const expectsJSON = sinkLine.includes('event.data.') || 
+                     sinkLine.includes('evt.data.') ||
+                     sinkLine.includes('data.type') ||
+                     sinkLine.includes('data.html') ||
+                     sinkLine.includes('data[') ||
+                     handlerCode.includes('JSON.parse');
   
-  const hasJSONParse = handlerCode.includes('JSON.parse');
+  const expectsString = !expectsJSON && (sinkLine.includes('evt.data') || sinkLine.includes('event.data'));
   
-  // Check for direct string usage patterns
-  const hasDirectStringUsage = handlerCode.includes('innerHTML = evt.data') ||
-                              handlerCode.includes('innerHTML = event.data') ||
-                              handlerCode.includes('outerHTML = evt.data') ||
-                              handlerCode.includes('outerHTML = event.data') ||
-                              handlerCode.includes('evt.data ===') ||
-                              handlerCode.includes('event.data ===') ||
-                              handlerCode.includes('evt.data ==') ||
-                              handlerCode.includes('event.data ==');
-  
-  // Determine data type: JSON if property access or JSON.parse, otherwise STRING
-  const expectsJSON = hasJSONPropertyAccess || hasJSONParse;
-  const expectsString = !expectsJSON && hasDirectStringUsage;
-  
-  // Debug logging
-  console.log(`🔍 [Data Type Detection] Handler analysis:`, {
-    handlerCode: handlerCode.substring(0, 200) + '...',
-    hasJSONPropertyAccess,
-    hasJSONParse,
-    hasDirectStringUsage,
-    expectsJSON,
-    expectsString,
-    finalType: expectsJSON ? 'JSON' : 'STRING'
-  });
 
   const SYSTEM = `
 You are a creative and methodical security researcher specializing in postMessage vulnerability exploitation.
@@ -526,6 +474,34 @@ function robustParseLlmJson(raw) {
     return null;
 }
 
+async function getStaticAnalysisSinks(handlerCode) {
+    if (!handlerCode || typeof handlerCode !== 'string') {
+        return [];
+    }
+    
+    try {
+        if (typeof window !== 'undefined' && window.analyzeHandlerStatically) {
+            const analysis = window.analyzeHandlerStatically(handlerCode);
+            if (analysis && analysis.success && analysis.analysis) {
+                const detectedSinks = analysis.analysis.potentialSinks || [];
+                return detectedSinks.map(sink => ({
+                    type: sink.name || sink.type,
+                    severity: sink.severity || 'Medium',
+                    line: sink.snippet || 'Unknown',
+                    sink: sink.name?.toLowerCase().replace(/\s+/g, '_') || 'unknown',
+                    category: sink.category || 'generic',
+                    method: 'static_analyzer',
+                    path: sink.sourcePath || 'unknown'
+                }));
+            }
+        }
+    } catch (error) {
+        console.error('Static analyzer error:', error.message);
+    }
+    
+    return [];
+}
+
 function normalizeLlmResponse(parsed, context) {
     const out = { ...parsed };
     if (typeof out.handler_assessment !== 'string') out.handler_assessment = 'No assessment provided by LLM.';
@@ -580,7 +556,7 @@ function normalizePayloadGenResponse(parsed, context) {
 
 async function runLLM(provider, model, apiKey, prompt) {
     if (provider === 'none' || !apiKey || !model) {
-        console.warn(`🤖 Skipping LLM call - provider: ${provider}, hasKey: ${!!apiKey}, hasModel: ${!!model}`);
+        console.warn(`Skipping LLM call - provider: ${provider}, hasKey: ${!!apiKey}, hasModel: ${!!model}`);
         return { content: null };
     }
     
@@ -599,7 +575,7 @@ async function runLLM(provider, model, apiKey, prompt) {
         
         if (!resp.ok) {
             const errorText = await resp.text();
-            console.error(`❌ LLM API Error ${resp.status}:`, errorText);
+            console.error(`LLM API Error ${resp.status}:`, errorText);
             throw new Error(`LLM HTTP ${resp.status}: ${errorText}`);
         }
         
@@ -618,7 +594,6 @@ async function runLLM(provider, model, apiKey, prompt) {
     };
 
     try {
-        console.log(`🤖 Making ${provider} API call...`);
         let result;
         if (provider === 'openai') {
             result = await callOpenAICompatible('https://api.openai.com/v1/chat/completions', { 'authorization': `Bearer ${apiKey}`, 'content-type': 'application/json' });
@@ -736,17 +711,16 @@ async function runLLM(provider, model, apiKey, prompt) {
             return result;
         }
     } catch (e) {
-        console.error(`❌ LLM call failed for ${provider}:`, e.message);
+        console.error(`LLM call failed for ${provider}:`, e.message);
         return { content: null };
     }
     
-    console.warn(`🤖 Unknown provider: ${provider}`);
+    console.warn(`Unknown provider: ${provider}`);
     return { content: null };
 }
 
 function computePipelineScore({ handlerOk, messagesOk, payloadsOk, sinksFound }) {
   if (sinksFound && handlerOk && messagesOk && payloadsOk) return 100;
-  // graceful degradation
   let score = 0;
   if (handlerOk) score += 40;
   if (messagesOk) score += 30;
@@ -758,13 +732,11 @@ function computePipelineScore({ handlerOk, messagesOk, payloadsOk, sinksFound })
 function robustParseLlmJson(raw) {
   if (!raw || typeof raw !== 'string') return {};
   
-  // Strip markdown code fences
   let cleaned = raw.replace(/```json\s*\n?/gi, '').replace(/```\s*$/gi, '');
   
   try {
     return JSON.parse(cleaned);
   } catch {
-    // Try to extract JSON from the middle of the response
     const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
     if (jsonMatch) {
       try {
@@ -785,11 +757,11 @@ function safeParseJson(str) {
     }
 }
 
-process.on('uncaughtException', e => console.error('❌ Uncaught:', e?.message));
-process.on('unhandledRejection', e => console.error('❌ Unhandled:', e?.message));
+process.on('uncaughtException', e => console.error('Uncaught:', e?.message));
+process.on('unhandledRejection', e => console.error('Unhandled:', e?.message));
 
 server.listen(port, '0.0.0.0', () => {
-    console.log(`🚀 FrogPost server running on port ${port}`);
+    console.log(`FrogPost server running on port ${port}`);
     serverReady = true;
-    console.log('✅ Server fully initialized');
+    console.log('Server fully initialized');
 });
