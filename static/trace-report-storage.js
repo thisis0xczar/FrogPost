@@ -168,5 +168,37 @@ class TraceReportStorage {
             } catch (err) { console.error("Error getting LLM payload count:", err); resolve(0); }
         });
     }
+
+    async clearAllData() {
+        if (!this.db) await this.openDatabase();
+
+        return new Promise((resolve, reject) => {
+            try {
+                const transaction = this.db.transaction(['reports', 'payloads'], 'readwrite');
+                
+                // Clear reports store
+                const reportsStore = transaction.objectStore('reports');
+                const clearReportsRequest = reportsStore.clear();
+                
+                // Clear payloads store
+                const payloadsStore = transaction.objectStore('payloads');
+                const clearPayloadsRequest = payloadsStore.clear();
+                
+                transaction.oncomplete = () => {
+                    log.info("IndexedDB cleared successfully");
+                    resolve(true);
+                };
+                
+                transaction.onerror = (event) => {
+                    console.error('Error clearing IndexedDB:', event.target.error);
+                    reject(false);
+                };
+                
+            } catch (err) {
+                console.error("Error creating clear transaction:", err);
+                reject(false);
+            }
+        });
+    }
 }
 window.traceReportStorage = new TraceReportStorage();

@@ -2535,7 +2535,73 @@ function setupCallbackUrl() {
 }
 
 function setupUIControls() {
-    document.getElementById("clearMessages")?.addEventListener("click", () => { log.info("Clearing dashboard state..."); window.frogPostState.messages.length = 0; window.frogPostState.activeUrl = null; buttonStates.clear(); traceButtonStates.clear(); reportButtonStates.clear(); endpointsWithHandlers.clear(); knownHandlerEndpoints.clear(); launchInProgressEndpoints.clear(); chrome.storage.local.clear(() => log.info("Local storage cleared.")); chrome.runtime.sendMessage({ type: "resetState" }, (response) => log.info("Background reset")); requestUiUpdate(); });
+    document.getElementById("clearMessages")?.addEventListener("click", async () => { 
+        log.info("Clearing ALL extension data..."); 
+        
+        // Clear dashboard state
+        window.frogPostState.messages.length = 0; 
+        window.frogPostState.activeUrl = null; 
+        buttonStates.clear(); 
+        traceButtonStates.clear(); 
+        reportButtonStates.clear(); 
+        endpointsWithHandlers.clear(); 
+        knownHandlerEndpoints.clear(); 
+        launchInProgressEndpoints.clear(); 
+        
+        // Clear Chrome storage
+        await new Promise(resolve => {
+            chrome.storage.local.clear(() => {
+                log.info("Chrome local storage cleared.");
+                resolve();
+            });
+        });
+        
+        await new Promise(resolve => {
+            chrome.storage.session.clear(() => {
+                log.info("Chrome session storage cleared.");
+                resolve();
+            });
+        });
+        
+        // Clear IndexedDB (TraceReportStorage)
+        try {
+            if (window.traceReportStorage) {
+                await window.traceReportStorage.clearAllData();
+                log.info("IndexedDB trace reports cleared.");
+            }
+        } catch (e) {
+            log.warn("Error clearing IndexedDB:", e);
+        }
+        
+        // Clear localStorage
+        try {
+            localStorage.clear();
+            log.info("localStorage cleared.");
+        } catch (e) {
+            log.warn("Error clearing localStorage:", e);
+        }
+        
+        // Clear sessionStorage
+        try {
+            sessionStorage.clear();
+            log.info("sessionStorage cleared.");
+        } catch (e) {
+            log.warn("Error clearing sessionStorage:", e);
+        }
+        
+        // Reset background state
+        chrome.runtime.sendMessage({ type: "resetState" }, (response) => {
+            log.info("Background state reset.");
+        });
+        
+        // Reset custom payloads
+        if (window.FuzzingPayloads && window.FuzzingPayloads._originalXSS) {
+            window.FuzzingPayloads.XSS = [...window.FuzzingPayloads._originalXSS];
+        }
+        
+        log.success("All extension data cleared successfully!");
+        requestUiUpdate(); 
+    });
     document.getElementById("exportMessages")?.addEventListener("click", () => { const sanitizedMessages = window.frogPostState.messages.map(msg => ({ origin: msg.origin, destinationUrl: msg.destinationUrl, timestamp: msg.timestamp, data: sanitizeMessageData(msg.data), messageType: msg.messageType, messageId: msg.messageId })); const blob = new Blob([JSON.stringify(sanitizedMessages, null, 2)], { type: "application/json" }); const url = URL.createObjectURL(blob); const a = document.createElement("a"); a.href = url; a.download = "frogpost_messages.json"; a.click(); URL.revokeObjectURL(url); });
     document.getElementById("checkAll")?.addEventListener("click", checkAllEndpoints); const debugButton = document.getElementById("debugToggle"); if (debugButton) { debugButton.addEventListener("click", toggleDebugMode); debugButton.textContent = debugMode ? 'Debug: ON' : 'Debug: OFF'; debugButton.className = debugMode ? 'control-button debug-on' : 'control-button debug-off'; }
     document.getElementById("refreshMessages")?.addEventListener("click", () => { chrome.runtime.sendMessage({ type: "fetchInitialState" }, (response) => { if (response?.success) { if (response.messages) { window.frogPostState.messages.length = 0; window.frogPostState.messages.push(...response.messages); } if (response.handlerEndpointKeys) { knownHandlerEndpoints.clear(); endpointsWithHandlers.clear(); response.handlerEndpointKeys.forEach(key => { knownHandlerEndpoints.add(key); endpointsWithHandlers.add(key); }); } log.info("Dashboard refreshed."); requestUiUpdate(); } else log.error("Failed refresh:", response?.error); }); });
@@ -4856,12 +4922,13 @@ async function displayReport(reportData, panel) {
 
         if (uniqueVulns.length > 0) {
             findingsExist = true;
-            findingsHTML += `<div class="subsection"><h5 class="report-subsection-title">Potential Sinks Reached (${uniqueVulns.length})</h5><table class="report-table"><thead><tr><th>Sink</th><th>Severity</th><th>Context Snippet</th></tr></thead><tbody>`;
+            findingsHTML += `<div class="subsection"><h5 class="report-subsection-title">Potential Sinks Reached (${uniqueVulns.length})</h5><table class="report-table"><thead><tr><th>Sink</th><th>Severity</th><th>Detection Method</th><th>Context Snippet</th></tr></thead><tbody>`;
             uniqueVulns.forEach(vuln => {
                 const type = vuln?.name || vuln?.type || '?'; const severity = vuln?.severity || 'N/A'; const contextHTML = vuln?.context || ''; const sourcePath = vuln?.sourcePath || '(unknown)'; const conditions = vuln?.conditions || [];
                 let conditionsHtml = 'None'; if (conditions.length > 0) { conditionsHtml = conditions.map(c => { let valStr = escapeHTML(String(c.value)); if (typeof c.value === 'string') valStr = `'${valStr}'`; return `<code>${escapeHTML(c.path)} ${escapeHTML(c.op)} ${valStr}</code>`; }).join('<br>'); }
                 let severityClass = severity.toLowerCase(); if(severity === 'Critical') severityClass = 'critical'; else if(severity === 'High') severityClass = 'high'; else if(severity === 'Medium') severityClass = 'medium'; else if(severity === 'Low') severityClass = 'low'; else severityClass='unknown';
-                findingsHTML += `<tr class="severity-row-${severityClass}"><td>${escapeHTML(type)}</td><td><span class="severity-badge severity-${severityClass}">${escapeHTML(severity)}</span></td><td class="context-snippet-cell">${contextHTML}</td></tr>`;
+                const detectionMethod = vuln?.method || 'Unknown';
+                findingsHTML += `<tr class="severity-row-${severityClass}"><td>${escapeHTML(type)}</td><td><span class="severity-badge severity-${severityClass}">${escapeHTML(severity)}</span></td><td><code>${escapeHTML(detectionMethod)}</code></td><td class="context-snippet-cell">${contextHTML}</td></tr>`;
             });
             findingsHTML += `</tbody></table></div>`;
 
@@ -4874,7 +4941,8 @@ async function displayReport(reportData, panel) {
             uniqueIssues.forEach(issue => {
                 const type = issue?.type || '?'; const severity = issue?.severity || 'N/A'; const contextHTML = issue?.context || '';
                 let severityClass = severity.toLowerCase(); if(severity === 'Critical') severityClass = 'critical'; else if(severity === 'High') severityClass = 'high'; else if(severity === 'Medium') severityClass = 'medium'; else if(severity === 'Low') severityClass = 'low'; else severityClass='unknown';
-                findingsHTML += `<tr class="severity-row-${severityClass}"><td>${escapeHTML(type)}</td><td><span class="severity-badge severity-${severityClass}">${escapeHTML(severity)}</span></td><td class="context-snippet-cell">${contextHTML}</td></tr>`;
+                const detectionMethod = vuln?.method || 'Unknown';
+                findingsHTML += `<tr class="severity-row-${severityClass}"><td>${escapeHTML(type)}</td><td><span class="severity-badge severity-${severityClass}">${escapeHTML(severity)}</span></td><td><code>${escapeHTML(detectionMethod)}</code></td><td class="context-snippet-cell">${contextHTML}</td></tr>`;
             });
             findingsHTML += `</tbody></table></div>`;
         }
@@ -5591,12 +5659,13 @@ async function renderReportUI(traceReportData, initialPayloads = null) {
 
         if (uniqueVulns.length > 0) {
             findingsExist = true;
-            findingsHTML += `<div class="subsection"><h5 class="report-subsection-title">Potential Sinks Reached (${uniqueVulns.length})</h5><table class="report-table"><thead><tr><th>Sink</th><th>Severity</th><th>Context Snippet</th></tr></thead><tbody>`;
+            findingsHTML += `<div class="subsection"><h5 class="report-subsection-title">Potential Sinks Reached (${uniqueVulns.length})</h5><table class="report-table"><thead><tr><th>Sink</th><th>Severity</th><th>Detection Method</th><th>Context Snippet</th></tr></thead><tbody>`;
             uniqueVulns.forEach(vuln => {
                 const type = vuln?.name || vuln?.type || '?'; const severity = vuln?.severity || 'N/A'; const contextHTML = vuln?.context || ''; const sourcePath = vuln?.sourcePath || '(unknown)'; const conditions = vuln?.conditions || [];
                 let conditionsHtml = 'None'; if (conditions.length > 0) { conditionsHtml = conditions.map(c => { let valStr = escapeHTML(String(c.value)); if (typeof c.value === 'string') valStr = `'${valStr}'`; return `<code>${escapeHTML(c.path)} ${escapeHTML(c.op)} ${valStr}</code>`; }).join('<br>'); }
                 let severityClass = severity.toLowerCase(); if(severity === 'Critical') severityClass = 'critical'; else if(severity === 'High') severityClass = 'high'; else if(severity === 'Medium') severityClass = 'medium'; else if(severity === 'Low') severityClass = 'low'; else severityClass='unknown';
-                findingsHTML += `<tr class="severity-row-${severityClass}"><td>${escapeHTML(type)}</td><td><span class="severity-badge severity-${severityClass}">${escapeHTML(severity)}</span></td><td class="context-snippet-cell">${contextHTML}</td></tr>`;
+                const detectionMethod = vuln?.method || 'Unknown';
+                findingsHTML += `<tr class="severity-row-${severityClass}"><td>${escapeHTML(type)}</td><td><span class="severity-badge severity-${severityClass}">${escapeHTML(severity)}</span></td><td><code>${escapeHTML(detectionMethod)}</code></td><td class="context-snippet-cell">${contextHTML}</td></tr>`;
             });
             findingsHTML += `</tbody></table></div>`;
         }
@@ -5607,7 +5676,8 @@ async function renderReportUI(traceReportData, initialPayloads = null) {
             uniqueIssues.forEach(issue => {
                 const type = issue?.type || '?'; const severity = issue?.severity || 'N/A'; const contextHTML = issue?.context || '';
                 let severityClass = severity.toLowerCase(); if(severity === 'Critical') severityClass = 'critical'; else if(severity === 'High') severityClass = 'high'; else if(severity === 'Medium') severityClass = 'medium'; else if(severity === 'Low') severityClass = 'low'; else severityClass='unknown';
-                findingsHTML += `<tr class="severity-row-${severityClass}"><td>${escapeHTML(type)}</td><td><span class="severity-badge severity-${severityClass}">${escapeHTML(severity)}</span></td><td class="context-snippet-cell">${contextHTML}</td></tr>`;
+                const detectionMethod = vuln?.method || 'Unknown';
+                findingsHTML += `<tr class="severity-row-${severityClass}"><td>${escapeHTML(type)}</td><td><span class="severity-badge severity-${severityClass}">${escapeHTML(severity)}</span></td><td><code>${escapeHTML(detectionMethod)}</code></td><td class="context-snippet-cell">${contextHTML}</td></tr>`;
             });
             findingsHTML += `</tbody></table></div>`;
         }

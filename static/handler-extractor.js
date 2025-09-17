@@ -947,7 +947,8 @@ class HandlerExtractor {
             if (!tabId) throw new Error("Failed to create target tab.");
             // Mark this tab in storage as a handler-extraction tab for extra safety
             try { await chrome.storage.local.set({ [`handler-extraction-tab-${tabId}`]: true }); } catch {}
-            await new Promise(resolve => setTimeout(resolve, 2000));
+            // Wait for page to be ready - need enough time for scripts to load
+            await new Promise(resolve => setTimeout(resolve, 1500));
 
             targetOrigin = new URL(targetUrl).origin;
 
@@ -1010,32 +1011,50 @@ class HandlerExtractor {
             if(typeof log !== 'undefined') log.debug(`[Breakpoint Exec] Finished attempting to set ${breakpointMap.size} breakpoints.`);
 
             if (breakpointMap.size === 0) {
+                if(typeof log !== 'undefined') log.warn(`[Breakpoint Exec] No breakpoints could be set. Potential handlers:`, potentialHandlers.map(h => ({ 
+                    category: h.category, 
+                    source: h.source?.substring(h.source?.lastIndexOf('/')+1),
+                    hasLocation: !!h.handlerNode?.loc?.start 
+                })));
                 throw new Error("Could not set any breakpoints for potential handlers.");
             }
 
             if(typeof log !== 'undefined') log.debug(`[Breakpoint Exec] Injecting postMessage probes with targetOrigin: ${targetOrigin}`);
-            // 1) JSON probe
+            
+            // Send both probes in parallel for faster execution
             const jsonProbe = JSON.stringify(testMessageData || { "FrogPost": "BreakpointTest" });
-            const exprJson = `window.postMessage(${jsonProbe}, '${targetOrigin}');`;
-            await chrome.debugger.sendCommand({ tabId }, "Runtime.evaluate", { expression: exprJson });
-            if(typeof log !== 'undefined') log.debug(`[Breakpoint Exec] JSON probe sent.`);
-
-            // Small delay to allow first probe to process
-            await new Promise(res => setTimeout(res, 500));
-
-            // 2) String probe (distinct marker so UI can ignore)
             const strProbe = 'FrogPost::BreakpointTest';
-            const exprStr = `window.postMessage('${strProbe}', '${targetOrigin}');`;
-            await chrome.debugger.sendCommand({ tabId }, "Runtime.evaluate", { expression: exprStr });
-            if(typeof log !== 'undefined') log.debug(`[Breakpoint Exec] String probe sent.`);
+            
+            const probePromises = [
+                chrome.debugger.sendCommand({ tabId }, "Runtime.evaluate", { 
+                    expression: `window.postMessage(${jsonProbe}, '${targetOrigin}');` 
+                }),
+                chrome.debugger.sendCommand({ tabId }, "Runtime.evaluate", { 
+                    expression: `window.postMessage('${strProbe}', '${targetOrigin}');` 
+                })
+            ];
+            
+            // Small delay to ensure breakpoints are fully registered
+            await new Promise(resolve => setTimeout(resolve, 300));
+            
+            await Promise.all(probePromises);
+            if(typeof log !== 'undefined') log.debug(`[Breakpoint Exec] Both probes sent in parallel.`);
 
-            await new Promise(resolve => setTimeout(resolve, 7000));
+            // Wait for handler confirmation with early exit capability
+            const maxWaitTime = 3000;
+            const checkInterval = 100;
+            let waitedTime = 0;
+            
+            while (waitedTime < maxWaitTime && !confirmedHandler) {
+                await new Promise(resolve => setTimeout(resolve, checkInterval));
+                waitedTime += checkInterval;
+            }
 
             if (confirmedHandler) {
-                if(typeof log !== 'undefined') log.success(`[Breakpoint Exec] Confirmed handler via execution:`, confirmedHandler);
+                if(typeof log !== 'undefined') log.success(`[Breakpoint Exec] Confirmed handler via execution (${waitedTime}ms):`, confirmedHandler);
                 confirmedHandler.category = `breakpoint-${confirmedHandler.category || 'confirmed'}`;
             } else {
-                if(typeof log !== 'undefined') log.warn(`[Breakpoint Exec] No breakpoint hit confirmed within timeout.`);
+                if(typeof log !== 'undefined') log.warn(`[Breakpoint Exec] No breakpoint hit confirmed within ${maxWaitTime}ms timeout.`);
             }
 
         } catch (error) {

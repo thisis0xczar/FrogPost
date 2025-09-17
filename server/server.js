@@ -136,19 +136,10 @@ app.post('/llm/analyze-handler', async (req, res) => {
     if (!Array.isArray(parsed.dom_xss_sinks)) {
       parsed.dom_xss_sinks = [];
       
-      if (Array.isArray(parsed.risks)) {
-        parsed.risks.forEach((risk) => {
-          const riskLower = risk.toLowerCase();
-          if (riskLower.includes('xss') || riskLower.includes('innerhtml') || riskLower.includes('cross-site scripting')) {
-            parsed.dom_xss_sinks.push({
-              type: "innerHTML assignment", 
-              severity: "High", 
-              line: "target.innerHTML = event.data.html", 
-              sink: "innerHTML",
-              source: "fallback_from_risks"
-            });
-          }
-        });
+      // Use static analysis to detect sinks instead of hardcoded fallback
+      const staticSinks = await getStaticAnalysisSinks(handlerCode);
+      if (staticSinks.length > 0) {
+        parsed.dom_xss_sinks = staticSinks;
       }
     }
     
