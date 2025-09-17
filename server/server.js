@@ -4,7 +4,7 @@ const cors = require('cors');
 const path = require('path');
 const http = require('http');
 
-const rootDir = '/Users/lidorbs/Downloads/Tools/FrogPost';
+const rootDir = '';
 
 require(path.join(rootDir, 'fuzzer', 'fuzzer.js'));
 
