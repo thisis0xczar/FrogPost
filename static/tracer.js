@@ -1,7 +1,7 @@
 /**
  * FrogPost Extension
  * Originally Created by thisis0xczar/Lidor 
- * Refined on: 2025-09-16
+ * Refined on: 2025-09-17
  */
 const DATA_PROP = 'data';
 
@@ -686,7 +686,6 @@ class HandlerTracer {
         return sanitizedPayloads.slice(0, this.MAX_PAYLOADS_TOTAL);
     }
 
-    async generateSmartPayloads(context) { return []; }
 
 }
 

@@ -1,7 +1,7 @@
 /**
  * FrogPost Extension
  * Originally Created by thisis0xczar/Lidor 
- * Refined on: 2025-09-16
+ * Refined on: 2025-09-17
  */
 
 class HandlerExtractor {
@@ -16,6 +16,50 @@ class HandlerExtractor {
     _is(n, t) { return !!n && n.type === t; }
     _prop(o, k) { return (o && Object.prototype.hasOwnProperty.call(o, k)) ? o[k] : undefined; }
     _safeLog(...args) { try { console.debug(...args); } catch {} }
+
+    _isNonPostMessageHandler(handlerCode, handlerFlags) {
+        if (!handlerCode || typeof handlerCode !== 'string') return false;
+        
+        // Check for common non-postMessage handler patterns
+        const nonPostMessagePatterns = [
+            // Positioning/UI related functions
+            /positioning|offset|placement|floating|platform|isRTL/i,
+            // Scheduler/async related
+            /scheduler|async.*fn|unstable_now|MessageChannel/i,
+            // Generic utility functions
+            /utility|helper|util|common|shared/i,
+            // Event handling without message focus
+            /addEventListener.*(?!message)|removeEventListener/i,
+            // Function that doesn't access event.data
+            /function.*\{[^}]*\}(?!.*event\.data)/i
+        ];
+        
+        // Check if handler code matches non-postMessage patterns
+        for (const pattern of nonPostMessagePatterns) {
+            if (pattern.test(handlerCode)) return true;
+        }
+        
+        // Check if handler doesn't access event.data at all
+        if (!handlerCode.includes('event.data') && !handlerCode.includes('evt.data')) {
+            return true;
+        }
+        
+        // Check if handler doesn't have any DOM manipulation or postMessage processing
+        const domPatterns = [/innerHTML|outerHTML|insertAdjacentHTML|document\.write|eval|Function|createElement|appendChild|setAttribute|style\.|classList\./i];
+        const processingPatterns = [/JSON\.parse|JSON\.stringify|switch.*case|if.*event\.data|\.type|\.action|\.command/i];
+        const hasDOMManipulation = domPatterns.some(pattern => pattern.test(handlerCode));
+        const hasProcessingLogic = processingPatterns.some(pattern => pattern.test(handlerCode));
+        
+        // If no DOM manipulation AND no processing logic, likely not a postMessage handler
+        if (!hasDOMManipulation && !hasProcessingLogic) return true;
+        
+        // Check if handler is too complex for a simple postMessage handler
+        if (handlerCode.length > 1000 && !handlerFlags.accessesEventDataConditionally) {
+            return true;
+        }
+        
+        return false;
+    }
 
     _resolveStringLiteral(node) {
         if (!node) return null;
@@ -490,6 +534,7 @@ class HandlerExtractor {
         const SCHEDULER_PENALTY = -250;
         const POSTMESSAGE_NULL_PENALTY = -75;
         const SIMPLICITY_PENALTY = -50;
+        const NON_POSTMESSAGE_PENALTY = -200; // Heavy penalty for non-postMessage handlers
 
         const VERIFIER_BONUS = 120;
         const CALLBACK_MAP_BONUS = 110;
@@ -497,6 +542,12 @@ class HandlerExtractor {
         const SWITCH_BONUS = 140;
         const CONDITIONAL_DATA_ACCESS_BONUS = 75;
         const ORIGIN_CHECK_STRUCTURE_BONUS = 90;
+        
+        // New bonuses for better handler detection
+        const POSTMESSAGE_HANDLER_BONUS = 200;  // Strong indicator
+        const DOM_SINK_BONUS = 150;             // Has DOM manipulation
+        const JSON_PROCESSING_BONUS = 100;       // Processes JSON data
+        const TYPE_CHECKING_BONUS = 80;          // Checks message type/action
 
         const COMMON_DATA_FIELD_BONUS = 30;
         const ANY_DATA_FIELD_BONUS = 5;
@@ -515,6 +566,10 @@ class HandlerExtractor {
 
         if (handlerFlags.looksLikeScheduler) featureScore += SCHEDULER_PENALTY;
         if (handlerFlags.mentionsPostMessageNull) featureScore += POSTMESSAGE_NULL_PENALTY;
+        
+        // Check if this looks like a non-postMessage handler
+        const isNonPostMessageHandler = this._isNonPostMessageHandler(handlerCode, handlerFlags);
+        if (isNonPostMessageHandler) featureScore += NON_POSTMESSAGE_PENALTY;
 
         if (handlerFlags.callsVerifier) featureScore += VERIFIER_BONUS;
         if (handlerFlags.usesCallbackMap) featureScore += CALLBACK_MAP_BONUS;
@@ -525,6 +580,20 @@ class HandlerExtractor {
         if (handlerFlags.accessesCommonDataFields > 0) featureScore += (handlerFlags.accessesCommonDataFields * COMMON_DATA_FIELD_BONUS);
         if (handlerFlags.accessesAnyDataField && !handlerFlags.accessesEventDataConditionally && handlerFlags.accessesCommonDataFields === 0) featureScore += ANY_DATA_FIELD_BONUS;
         if (handlerFlags.accessesOriginField && !handlerFlags.accessesEventOriginConditionally) featureScore += ORIGIN_FIELD_BONUS;
+        
+        // Apply new pattern-based bonuses
+        if (/addEventListener.*message|window\.onmessage|message.*event/i.test(handlerCode)) {
+            featureScore += POSTMESSAGE_HANDLER_BONUS;
+        }
+        if (/innerHTML|outerHTML|insertAdjacentHTML|document\.write|createElement/i.test(handlerCode)) {
+            featureScore += DOM_SINK_BONUS;
+        }
+        if (/JSON\.parse|JSON\.stringify/i.test(handlerCode)) {
+            featureScore += JSON_PROCESSING_BONUS;
+        }
+        if (/\.type|\.action|\.command|switch.*case|if.*event\.data\./i.test(handlerCode)) {
+            featureScore += TYPE_CHECKING_BONUS;
+        }
 
         if (handlerNode && typeof acorn !== 'undefined' && typeof acorn.walk !== 'undefined') {
             try {
@@ -633,6 +702,21 @@ class HandlerExtractor {
             if(typeof log !== 'undefined') log.debug(`[getBestHandler Boost Calc] File: ${filename}, Category: ${category}, Calculated Boost: ${boost} (Reason: ${reason})`);
             return boost;
         };
+
+        // Early exit for extremely high confidence handlers (saves processing time)
+        const HIGH_CONFIDENCE_THRESHOLD = 800;
+        for (const handlerInfo of handlersInfo) {
+            if (!handlerInfo.handler && handlerInfo.fullScriptContent && handlerInfo.handlerNode) {
+                try { handlerInfo.handler = handlerInfo.fullScriptContent.substring(handlerInfo.handlerNode.start, handlerInfo.handlerNode.end); } catch {}
+            }
+            if (handlerInfo.handler) {
+                const quickScore = this.scoreHandler(handlerInfo);
+                if (quickScore >= HIGH_CONFIDENCE_THRESHOLD) {
+                    if(typeof log !== 'undefined') log.success(`[getBestHandler] Early exit - found high confidence handler (score: ${quickScore})`);
+                    return { ...handlerInfo, score: quickScore };
+                }
+            }
+        }
 
         const scoredHandlers = handlersInfo.map((handlerInfo, index) => {
             let originalScore = 0;
@@ -745,9 +829,9 @@ class HandlerExtractor {
         let detachReason = null;
         const collectedScripts = new Map();
         let analysisTimer = null;
-        const ANALYSIS_TIMEOUT = 10000;
-        const SETTLE_TIME = 1500;
-        const LOAD_EXTRA_TIME = 2000;
+        const ANALYSIS_TIMEOUT = 15000;  // Increased for better handler detection
+        const SETTLE_TIME = 2000;        // Increased for script parsing to complete
+        const LOAD_EXTRA_TIME = 3000;    // Increased for page load completion
         let resolveAnalysis;
         const analysisPromise = new Promise(res => { resolveAnalysis = res; });
         let analysisResolved = false;
@@ -814,7 +898,7 @@ class HandlerExtractor {
             // Mark this tab as a handler extraction tab
             await chrome.storage.local.set({ [`handler-extraction-tab-${tabId}`]: true });
             
-            await new Promise(res => setTimeout(res, 1500));
+            await new Promise(res => setTimeout(res, 2000)); // Increased for better page load
 
             await chrome.debugger.attach({ tabId }, "1.3");
             attached = true;
@@ -948,7 +1032,7 @@ class HandlerExtractor {
             // Mark this tab in storage as a handler-extraction tab for extra safety
             try { await chrome.storage.local.set({ [`handler-extraction-tab-${tabId}`]: true }); } catch {}
             // Wait for page to be ready - need enough time for scripts to load
-            await new Promise(resolve => setTimeout(resolve, 1500));
+            await new Promise(resolve => setTimeout(resolve, 1000)); // Reduced from 1500
 
             targetOrigin = new URL(targetUrl).origin;
 
@@ -1034,15 +1118,16 @@ class HandlerExtractor {
                 })
             ];
             
-            // Small delay to ensure breakpoints are fully registered
-            await new Promise(resolve => setTimeout(resolve, 300));
+            // Adaptive delay based on number of breakpoints set
+            const breakpointDelay = Math.min(200 + (breakpointMap.size * 50), 500);
+            await new Promise(resolve => setTimeout(resolve, breakpointDelay));
             
             await Promise.all(probePromises);
             if(typeof log !== 'undefined') log.debug(`[Breakpoint Exec] Both probes sent in parallel.`);
 
             // Wait for handler confirmation with early exit capability
-            const maxWaitTime = 3000;
-            const checkInterval = 100;
+            const maxWaitTime = 2000; // Reduced from 3000
+            const checkInterval = 50;  // Reduced from 100 for faster checking
             let waitedTime = 0;
             
             while (waitedTime < maxWaitTime && !confirmedHandler) {

@@ -1,7 +1,7 @@
 /**
  * FrogPost Extension
  * Originally Created by thisis0xczar/Lidor 
- * Refined on: 2025-09-16
+ * Refined on: 2025-09-17
  */
 
 try {
@@ -222,7 +222,7 @@ async function handleExtensionPageLoad(tabId, targetUrl) {
         await chrome.debugger.attach({ tabId: tabId }, "1.3"); attached = true; log.debug(`[AutoAttach] Attached successfully.`);
         if (typeof HandlerExtractor === 'undefined') { log.warn("[AutoAttach] HandlerExtractor class not available. Cannot analyze scripts."); await chrome.debugger.detach({ tabId: tabId }); attached = false; return; }
         extractor = new HandlerExtractor(); extractor.initialize(targetUrl, []);
-        let analysisCompleteResolve; const analysisCompletionPromise = new Promise(resolve => { analysisCompleteResolve = resolve; }); analysisTimeout = setTimeout(() => { log.warn(`[AutoAttach] Analysis timeout reached for ${targetUrl}. Detaching.`); analysisCompleteResolve(); }, 7000);
+        let analysisCompleteResolve; const analysisCompletionPromise = new Promise(resolve => { analysisCompleteResolve = resolve; }); analysisTimeout = setTimeout(() => { log.warn(`[AutoAttach] Analysis timeout reached for ${targetUrl}. Detaching.`); analysisCompleteResolve(); }, 12000);
         const onEvent = async (source, method, params) => {
             if (source.tabId !== tabId) return;
             if (method === 'Debugger.scriptParsed') {
@@ -245,7 +245,7 @@ async function handleExtensionPageLoad(tabId, targetUrl) {
                         }
                     } catch (e) { log.warn(`[AutoAttach] Failed to fetch/analyze source for ${scriptId} (${url}):`, e.message); }
                 } else { log.debug(`[AutoAttach] Skipping script (not target origin or not .js or too long): ${sourceUrl}`); }
-            } else if (method === 'Page.loadEventFired') { log.debug("[AutoAttach] Page load event fired. Resetting timeout."); clearTimeout(analysisTimeout); analysisTimeout = setTimeout(() => { log.warn(`[AutoAttach] Analysis timeout reached after load for ${targetUrl}. Detaching.`); analysisCompleteResolve(); }, 4000); }
+            } else if (method === 'Page.loadEventFired') { log.debug("[AutoAttach] Page load event fired. Resetting timeout."); clearTimeout(analysisTimeout); analysisTimeout = setTimeout(() => { log.warn(`[AutoAttach] Analysis timeout reached after load for ${targetUrl}. Detaching.`); analysisCompleteResolve(); }, 8000); }
         };
         const onDetach = (source, reason) => { if (source.tabId === tabId) { log.warn(`[AutoAttach] Detached from tab ${tabId}. Reason: ${reason}`); attached = false; try{chrome.debugger.onEvent.removeListener(onEvent);}catch(e){} try{chrome.debugger.onDetach.removeListener(onDetach);}catch(e){} clearTimeout(analysisTimeout); analysisCompleteResolve(); } };
         chrome.debugger.onEvent.addListener(onEvent); chrome.debugger.onDetach.addListener(onDetach);
@@ -277,17 +277,17 @@ async function handleWebPageLoadForDebug(tabId, targetUrl) {
         await chrome.debugger.attach({ tabId: tabId }, "1.3"); attached = true; log.debug(`[Debug Mode] Attached successfully.`);
         if (typeof HandlerExtractor === 'undefined') { log.warn("[Debug Mode] HandlerExtractor class not available. Cannot analyze scripts."); await chrome.debugger.detach({ tabId: tabId }); attached = false; return; }
         extractor = new HandlerExtractor(); extractor.initialize(targetUrl, []);
-        let analysisCompleteResolve; const analysisCompletionPromise = new Promise(resolve => { analysisCompleteResolve = resolve; }); analysisTimeout = setTimeout(() => { log.warn(`[Debug Mode] Analysis timeout for ${targetUrl}. Detaching.`); analysisCompleteResolve(); }, 10000);
+        let analysisCompleteResolve; const analysisCompletionPromise = new Promise(resolve => { analysisCompleteResolve = resolve; }); analysisTimeout = setTimeout(() => { log.warn(`[Debug Mode] Analysis timeout for ${targetUrl}. Detaching.`); analysisCompleteResolve(); }, 15000);
         
         let lastScriptParsedAt = Date.now();
         let idleTimer = null;
         const refreshIdleTimer = () => {
             lastScriptParsedAt = Date.now();
             if (idleTimer) clearTimeout(idleTimer);
-            // Detach if idle for 5s with no new scripts
+            // Detach if idle for 8s with no new scripts
             idleTimer = setTimeout(() => { 
                 if (analysisCompleteResolve) analysisCompleteResolve(); 
-            }, 5000);
+            }, 8000);
         };
         
         const tryDetach = async (tabId) => {
@@ -562,14 +562,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     try {
         const messageType = message?.type; const payload = message?.payload; const detail = message?.detail; const payloadIndex = message?.payloadIndex; const senderTabId = sender?.tab?.id;
         if (message.type === "performSearch" && message.query) {
-            console.log(`BG: Received search request for query: ${message.query}`);
             performGoogleSearch(message.query) // Assume this function calls the Google Search tool
                 .then(results => {
-                    console.log("BG: Search successful, sending response.");
                     sendResponse({ success: true, results: results });
                 })
                 .catch(error => {
-                    console.error("BG: Search failed:", error);
                     sendResponse({ success: false, error: error.message || 'Unknown search error' });
                 });
             return true;
