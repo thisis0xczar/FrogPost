@@ -1,6 +1,6 @@
 /**
  * FrogPost Extension
- * Originally Created by thisis0xczar/Lidor 
+ * Originally Created by thisis0xczar/Lidor
  * Refined on: 2025-09-17
  */
 
@@ -28,7 +28,7 @@
             this.messageEvents = new Map();
             this.originalMethods = {};
             this.isActive = true;
-            
+
             this.initialize();
         }
 
@@ -36,22 +36,22 @@
             try {
                 // Override addEventListener to catch message handlers
                 this.overrideAddEventListener();
-                
+
                 // Override postMessage to log outgoing messages
                 this.overridePostMessage();
-                
+
                 // Override onmessage property
                 this.overrideOnMessage();
-                
+
                 // Scan for existing handlers
                 this.scanExistingHandlers();
 
                 // Watch and instrument iframes (same-origin only)
                 this.setupIframeMonitoring();
-                
+
                 // Report initialization
                 this.reportInitialization();
-                
+
                 console.log('FrogPost DOM Agent: Successfully initialized');
             } catch (error) {
                 console.error('FrogPost DOM Agent: Initialization failed', error);
@@ -64,7 +64,7 @@
         overrideAddEventListener() {
             const self = this;
             this.originalMethods.addEventListener = EventTarget.prototype.addEventListener;
-            
+
             EventTarget.prototype.addEventListener = function(type, listener, options) {
                 if (type === 'message' && self.isActive) {
                     self.handleMessageListenerAdded(this, listener, options);
@@ -79,7 +79,7 @@
         overridePostMessage() {
             const self = this;
             this.originalMethods.postMessage = window.postMessage;
-            
+
             window.postMessage = function() {
                 try {
                     if (self.isActive) {
@@ -101,7 +101,7 @@
          */
         overrideOnMessage() {
             const self = this;
-            
+
             // Override onmessage for window
             Object.defineProperty(window, 'onmessage', {
                 get: function() {
@@ -141,7 +141,7 @@
 
                 this.detectedHandlers.set(handlerInfo.id, handlerInfo);
                 this.reportHandler(handlerInfo);
-                
+
                 console.log('FrogPost DOM Agent: Handler detected', handlerInfo);
             } catch (error) {
                 console.error('FrogPost DOM Agent: Error handling listener', error);
@@ -171,7 +171,7 @@
 
                 this.messageEvents.set(messageInfo.id, messageInfo);
                 this.reportMessage(messageInfo);
-                
+
                 console.log('FrogPost DOM Agent: Message sent', messageInfo);
             } catch (error) {
                 console.error('FrogPost DOM Agent: Error handling message', error);
@@ -208,7 +208,7 @@
                 // This is a simplified approach - we can't easily detect all existing listeners
                 // but we can check for common patterns
                 console.log('FrogPost DOM Agent: Scanning for existing listeners...');
-                
+
                 // Check if there are any message-related properties
                 const targets = [window, document];
                 targets.forEach(target => {
@@ -261,9 +261,9 @@
                 }
 
                 const messageStr = JSON.stringify(message);
-                return messageStr.includes('__frogPost') || 
-                       messageStr.includes('FrogPost DOM Agent') ||
-                       messageStr.includes('frogPostDOMAgent');
+                return messageStr.includes('__frogPost') ||
+                    messageStr.includes('FrogPost DOM Agent') ||
+                    messageStr.includes('frogPostDOMAgent');
             } catch (error) {
                 return false;
             }
@@ -480,7 +480,7 @@
          */
         stop() {
             this.isActive = false;
-            
+
             // Restore original methods
             if (this.originalMethods.addEventListener) {
                 EventTarget.prototype.addEventListener = this.originalMethods.addEventListener;
@@ -493,7 +493,7 @@
 
     // Initialize the DOM injection agent
     const agent = new DOMInjectionAgent();
-    
+
     // Cleanup on page unload
     window.addEventListener('beforeunload', () => {
         agent.stop();
@@ -503,53 +503,4 @@
     window.frogPostDOMAgent = agent;
 
     console.log('FrogPost DOM Agent: Ready');
-})();
-
-/**
- * DOM Agent Forwarder
- * Listens for messages from the DOM injection agent and forwards them to the background script
- */
-(function() {
-    // Prevent multiple initializations
-    if (window.__frogPostDOMAgentForwarder) {
-        return;
-    }
-    window.__frogPostDOMAgentForwarder = true;
-
-    console.log('FrogPost DOM Agent Forwarder: Initializing');
-
-    // Listen for messages from the DOM injection agent
-    window.addEventListener('message', (event) => {
-        // Only process messages from the same origin
-        if (event.source !== window) {
-            return;
-        }
-
-        // Check if this is a message from our DOM agent
-        if (event.data && event.data.type && event.data.type.startsWith('frogPostDOMAgent')) {
-            try {
-                // Forward to background script (only if chrome.runtime is available)
-                if (chrome?.runtime?.sendMessage) {
-                    chrome.runtime.sendMessage({
-                        type: event.data.type,
-                        payload: event.data.data
-                    }).catch(error => {
-                        console.error('FrogPost DOM Agent Forwarder: Error sending message to background:', error);
-                    });
-                } else {
-                    console.warn('FrogPost DOM Agent Forwarder: chrome.runtime not available, skipping message forwarding');
-                }
-            } catch (error) {
-                console.error('FrogPost DOM Agent Forwarder: Error processing message:', error);
-            }
-            return;
-        }
-
-        // Explicitly ignore upstream agent-forwarded meta messages
-        if (event.data && event.data.type === 'frogPostAgent->ForwardToBackground') {
-            return;
-        }
-    });
-
-    console.log('FrogPost DOM Agent Forwarder: Ready');
 })();
