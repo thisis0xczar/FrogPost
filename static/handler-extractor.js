@@ -340,7 +340,7 @@ class HandlerExtractor {
                                     else if (objExpr?.type === 'Identifier') objName = this._prop(objExpr, 'name');
 
                                     if (objName && calleeName) {
-                                        lookupKey = `${objName}.${calleeName}`;
+                                        const lookupKey = `${objName}.${calleeName}`;
                                         resolvedCalleeDef = this.functionDefinitions.get(lookupKey);
                                         this._log(3, 'debug', `[quickScanRec] Depth ${currentDepth}: Found method call '${lookupKey}', Definition found: ${!!resolvedCalleeDef?.node}`);
 

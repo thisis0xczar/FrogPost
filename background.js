@@ -148,6 +148,54 @@ const DEBUGGER_MODE_STORAGE_KEY = 'debuggerApiModeEnabled';
         isDebuggerApiModeGloballyEnabled = false;
     }
 })();
+// Helper: Fetch response headers via debugger network interception to reliably read X-Frame-Options/CSP
+async function fetchHeadersViaDebugger(targetUrl) {
+    let tabId = null;
+    let attached = false;
+    let headers = {};
+    let status = 0;
+    let reason = '';
+    try {
+        const tab = await chrome.tabs.create({ url: targetUrl, active: false });
+        tabId = tab.id;
+        await chrome.debugger.attach({ tabId }, '1.3');
+        attached = true;
+        await chrome.debugger.sendCommand({ tabId }, 'Network.enable');
+        await chrome.debugger.sendCommand({ tabId }, 'Page.enable');
+
+        let resolveOnce;
+        const done = new Promise(res => { resolveOnce = res; });
+        const onEvent = (src, method, params) => {
+            if (src.tabId !== tabId) return;
+            if (method === 'Network.responseReceived' && params?.type === 'Document') {
+                try {
+                    const resp = params.response || {};
+                    status = resp.status || 0;
+                    const hs = resp.headers || {};
+                    const map = {};
+                    for (const k in hs) { map[k] = hs[k]; map[k.toLowerCase()] = hs[k]; }
+                    headers = map;
+                    resolveOnce();
+                } catch (_) { resolveOnce(); }
+            } else if (method === 'Page.loadEventFired') {
+                resolveOnce();
+            }
+        };
+        chrome.debugger.onEvent.addListener(onEvent);
+
+        // Navigate explicitly to trigger response
+        await chrome.debugger.sendCommand({ tabId }, 'Page.navigate', { url: targetUrl });
+        await Promise.race([done, new Promise(res => setTimeout(res, 6000))]);
+        chrome.debugger.onEvent.removeListener(onEvent);
+        reason = 'ok';
+    } catch (e) {
+        reason = e?.message || 'debugger error';
+    } finally {
+        try { if (attached && tabId) await chrome.debugger.detach({ tabId }); } catch {}
+        try { if (tabId) await chrome.tabs.remove(tabId); } catch {}
+    }
+    return { status, headers, reason };
+}
 
 
 class CircularMessageBuffer {
@@ -580,6 +628,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             return true;
         }
         switch (messageType) {
+            case 'fetchResponseHeaders':
+                (async () => {
+                    try {
+                        const targetUrl = message?.url;
+                        if (!targetUrl) { sendResponse({ success: false, error: 'Missing url' }); return; }
+                        const result = await fetchHeadersViaDebugger(targetUrl);
+                        sendResponse({ success: true, ...result });
+                    } catch (e) {
+                        sendResponse({ success: false, error: e?.message || 'Unknown error' });
+                    }
+                })();
+                return true;
             case "runtimeListenerCaptured":
                 if (payload) {
                     const { listenerCode, stackTrace, destinationUrl, context } = payload;

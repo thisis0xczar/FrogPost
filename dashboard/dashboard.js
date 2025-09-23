@@ -2691,7 +2691,7 @@ async function showUrlModificationModal(originalUrl, failureReason) {
 async function checkCSPHeaders(url) {
     try {
         log.info(`[CSP Check] Checking framing headers for: ${url}`);
-        let finalStatus = { canEmbed: true, reason: 'No blocking headers found', headers: {}, warnings: [] };
+        let finalStatus = { canEmbed: true, reason: 'No blocking headers found', headers: {}, warnings: [], testedAncestors: [] };
         let headResponse = null;
 
         // 1. Send HEAD request first
@@ -2709,7 +2709,7 @@ async function checkCSPHeaders(url) {
 
         // 2. Fallback to GET request if HEAD failed or no headers found
         let getResponse = null;
-        if (!headResponse || !headResponse.ok || !headResponse.headers.get('content-security-policy') && !headResponse.headers.get('x-frame-options')) {
+        if (!headResponse || !headResponse.ok || (!headResponse.headers.get('content-security-policy') && !headResponse.headers.get('x-frame-options'))) {
             try {
                 getResponse = await fetch(url, {
                     method: 'GET',
@@ -2718,47 +2718,132 @@ async function checkCSPHeaders(url) {
                     signal: AbortSignal.timeout(8000)
                 });
             } catch (getError) {
-                log.error(`[CSP Check] GET request also failed: ${getError.message}. Cannot check headers.`);
+                log.warn(`[CSP Check] GET request also failed: ${getError.message}. Will attempt debugger-assisted header read.`);
+            }
+        }
+        let response = getResponse || headResponse;
+        if (!response || !response.ok) {
+            // 2b. Use background debugger to fetch headers if normal fetch failed
+            const debugResult = await new Promise(resolve => {
+                try { chrome.runtime.sendMessage({ type: 'fetchResponseHeaders', url }, resolve); } catch (e) { resolve(null); }
+            });
+            if (debugResult && debugResult.success) {
+                finalStatus.headers = Object.assign({}, finalStatus.headers, debugResult.headers || {});
+                // Build a synthetic response-like reader
+                const lower = key => key && (key.toLowerCase ? key.toLowerCase() : String(key).toLowerCase());
+                const getHeader = name => debugResult.headers[lower(name)] || debugResult.headers[name] || null;
+                response = {
+                    ok: true,
+                    headers: { get: getHeader }
+                };
+            } else {
+                log.warn(`[CSP Check] Unable to read headers via fetch or debugger: ${debugResult?.error || 'unknown error'}`);
                 finalStatus.canEmbed = false;
-                finalStatus.reason = `Network error: ${getError.message}.`;
+                finalStatus.reason = `Network error: Could not retrieve headers`;
                 return finalStatus;
             }
         }
-        const response = getResponse || headResponse;
-        if (!response.ok) {
-            log.warn(`[CSP Check] Received non-OK status: ${response.status} for ${url}`);
-            finalStatus.canEmbed = false;
-            finalStatus.reason = `HTTP Error: ${response.status} ${response.statusText}`;
-            return finalStatus;
-        }
 
-        // 3. Check for X-Frame-Options (legacy)
-        const xFrameOptions = response.headers.get('x-frame-options');
-        if (xFrameOptions) {
-            const xfoLower = xFrameOptions.toLowerCase();
+        // Build set of ancestor origins to test against frame-ancestors
+        const resourceOrigin = new URL(url).origin;
+        const testedAncestors = new Set();
+        testedAncestors.add(window.location.origin);
+        try {
+            const override = typeof localStorage !== 'undefined' ? localStorage.getItem('frogpost_parent_origin_override') : null;
+            if (override) { const o = new URL(override).origin; if (o) testedAncestors.add(o); }
+        } catch (_) {}
+        finalStatus.testedAncestors = Array.from(testedAncestors);
+
+        // 3. Record X-Frame-Options (legacy); decide later if no CSP FA is present
+        let xfo = response.headers.get('x-frame-options') || response.headers.get('X-Frame-Options');
+        let xfoDecision = null;
+        if (xfo) {
+            const xfoLower = xfo.toLowerCase();
             finalStatus.headers['X-Frame-Options'] = xfoLower;
             if (xfoLower === 'deny') {
-                finalStatus.canEmbed = false;
-                finalStatus.reason = 'X-Frame-Options: DENY';
-            } else if (xfoLower === 'sameorigin' && (new URL(url).origin !== window.location.origin)) {
-                finalStatus.canEmbed = false;
-                finalStatus.reason = 'X-Frame-Options: SAMEORIGIN (cross-origin)';
+                xfoDecision = { canEmbed: false, reason: 'X-Frame-Options: DENY' };
+            } else if (xfoLower === 'sameorigin') {
+                const sameOrigin = Array.from(testedAncestors).some(a => a === resourceOrigin);
+                xfoDecision = sameOrigin ? { canEmbed: true, reason: 'X-Frame-Options: SAMEORIGIN (same-origin)' } : { canEmbed: false, reason: 'X-Frame-Options: SAMEORIGIN (cross-origin)' };
+            }
+        }
+
+        // If fetch succeeded but headers are not CORS-exposed, use debugger-assisted read
+        let cspHeader = response.headers.get('content-security-policy') || response.headers.get('Content-Security-Policy');
+        if (!xfo && !cspHeader) {
+            const debugResult2 = await new Promise(resolve => {
+                try { chrome.runtime.sendMessage({ type: 'fetchResponseHeaders', url }, resolve); } catch (e) { resolve(null); }
+            });
+            if (debugResult2 && debugResult2.success && debugResult2.headers) {
+                const lower = k => (k || '').toLowerCase();
+                const getH = name => debugResult2.headers[lower(name)] || debugResult2.headers[name] || null;
+                const xfoDbg = getH('x-frame-options');
+                const cspDbg = getH('content-security-policy');
+                if (xfoDbg) {
+                    xfo = xfoDbg;
+                    const xfoLower = xfo.toLowerCase();
+                    finalStatus.headers['X-Frame-Options'] = xfoLower;
+                    if (xfoLower === 'deny') xfoDecision = { canEmbed: false, reason: 'X-Frame-Options: DENY' };
+                    else if (xfoLower === 'sameorigin') {
+                        const sameOrigin = Array.from(testedAncestors).some(a => a === resourceOrigin);
+                        xfoDecision = sameOrigin ? { canEmbed: true, reason: 'X-Frame-Options: SAMEORIGIN (same-origin)' } : { canEmbed: false, reason: 'X-Frame-Options: SAMEORIGIN (cross-origin)' };
+                    }
+                }
+                if (cspDbg) cspHeader = cspDbg;
             }
         }
 
         // 4. Check for Content-Security-Policy (modern)
-        const cspHeader = response.headers.get('content-security-policy');
         if (cspHeader) {
             finalStatus.headers['Content-Security-Policy'] = cspHeader;
             const frameAncestorsMatch = cspHeader.match(/frame-ancestors\s+([^;]+)/i);
             if (frameAncestorsMatch) {
-                const frameAncestors = frameAncestorsMatch[1].trim().toLowerCase();
-                if (frameAncestors.includes("'none'")) {
+                const faRaw = frameAncestorsMatch[1].trim();
+                const tokens = faRaw.split(/\s+/).filter(Boolean);
+                const tokensLower = tokens.map(t => t.toLowerCase());
+
+                const hasNone = tokensLower.includes("'none'");
+                const hasStar = tokensLower.includes('*');
+                const hasSelf = tokensLower.includes("'self'");
+                const parentOrigins = Array.from(testedAncestors);
+
+                const matchHostSource = (parentOrigin, sourceToken) => {
+                    try {
+                        const p = new URL(parentOrigin);
+                        const s = sourceToken;
+                        if (/^[a-z]+:$/i.test(s)) { return (p.protocol === s.toLowerCase()); }
+                        const hasScheme = /^[a-z]+:\/\//i.test(s);
+                        const originToTest = hasScheme ? s : `https://${s}`;
+                        const su = new URL(originToTest);
+                        if (hasScheme && su.protocol !== p.protocol) return false;
+                        const sh = su.hostname.toLowerCase();
+                        const ph = p.hostname.toLowerCase();
+                        if (sh.startsWith('*.')) { const bare = sh.slice(2); return ph === bare || ph.endsWith(`.${bare}`); }
+                        return ph === sh;
+                    } catch(_) { return false; }
+                };
+
+                let allowed = false;
+                if (hasNone) allowed = false;
+                else if (hasStar) allowed = true;
+                else {
+                    allowed = parentOrigins.some(parentOrigin => {
+                        if (hasSelf && parentOrigin === resourceOrigin) return true;
+                        return tokensLower.some(tok => tok !== "'self'" && matchHostSource(parentOrigin, tok));
+                    });
+                }
+
+                if (!allowed) {
                     finalStatus.canEmbed = false;
-                    finalStatus.reason = 'CSP frame-ancestors: none';
-                } else if (frameAncestors.includes("'self'") && !frameAncestors.includes("*") && (new URL(url).origin !== window.location.origin)) {
-                    finalStatus.canEmbed = false;
-                    finalStatus.reason = 'CSP frame-ancestors: self (cross-origin)';
+                    finalStatus.reason = `CSP frame-ancestors restricts embedding`;
+                    finalStatus.warnings.push(`frame-ancestors evaluated against ancestors ${parentOrigins.join(', ')} with tokens [${tokens.join(' ')}]`);
+                } else {
+                    finalStatus.canEmbed = true;
+                    finalStatus.reason = `CSP frame-ancestors allows embedding for at least one ancestor`;
+                }
+
+                if (xfo) {
+                    finalStatus.warnings.push('CSP frame-ancestors present: user agents ignore X-Frame-Options.');
                 }
             }
         }
@@ -2773,14 +2858,9 @@ async function checkCSPHeaders(url) {
             }
         }
 
-        // 6. Handle conflicting headers and prioritization
-        if (cspHeader && finalStatus.headers['X-Frame-Options'] && finalStatus.canEmbed === false && finalStatus.reason.startsWith('X-Frame-Options')) {
-            const frameAncestorsMatch = cspHeader.match(/frame-ancestors\s+([^;]+)/i);
-            if (frameAncestorsMatch && !frameAncestorsMatch[1].includes("'none'")) {
-                finalStatus.canEmbed = true;
-                finalStatus.reason = "CSP frame-ancestors header overrides X-Frame-Options.";
-                finalStatus.warnings.push("CSP frame-ancestors header overrides X-Frame-Options in modern browsers.");
-            }
+        // 6. If CSP lacked frame-ancestors, apply XFO decision
+        if (!/frame-ancestors\s+[^;]+/i.test(cspHeader || '')) {
+            if (xfoDecision) { finalStatus.canEmbed = xfoDecision.canEmbed; finalStatus.reason = xfoDecision.reason; }
         }
 
         log.success(`[CSP Check] Final status for ${url}:`, finalStatus);
