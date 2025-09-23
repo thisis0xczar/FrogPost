@@ -1,6 +1,6 @@
 /**
  * FrogPost Extension
- * Originally Created by thisis0xczar/Lidor 
+ * Originally Created by thisis0xczar/Lidor
  * Refined on: 2025-09-17
  */
 
@@ -10,16 +10,53 @@ class HandlerExtractor {
         this.messages = [];
         this.messageKeys = new Set();
         this.messageTypes = new Set();
+        this.messageValues = new Set();
         this.functionDefinitions = new Map();
+        this.debugLevel = this._resolveDebugLevel(); // 0:none,1:basic,2:verbose,3:trace
     }
 
     _is(n, t) { return !!n && n.type === t; }
     _prop(o, k) { return (o && Object.prototype.hasOwnProperty.call(o, k)) ? o[k] : undefined; }
     _safeLog(...args) { try { console.debug(...args); } catch {} }
 
+    _resolveDebugLevel() {
+        try {
+            if (typeof HandlerExtractor.globalDebugLevel === 'number') return HandlerExtractor.globalDebugLevel;
+            if (typeof localStorage !== 'undefined') {
+                const raw = localStorage.getItem('frogpost_debug_level');
+                if (!raw) return 1;
+                const norm = String(raw).toLowerCase();
+                if (norm === 'off' || norm === '0') return 0;
+                if (norm === 'basic' || norm === '1') return 1;
+                if (norm === 'verbose' || norm === '2') return 2;
+                if (norm === 'trace' || norm === '3') return 3;
+            }
+        } catch (_) {}
+        return 1;
+    }
+
+    setDebugLevel(level) {
+        const n = Number(level);
+        this.debugLevel = Number.isFinite(n) ? Math.max(0, Math.min(3, n)) : this.debugLevel;
+        try { if (typeof localStorage !== 'undefined') localStorage.setItem('frogpost_debug_level', String(this.debugLevel)); } catch(_){}
+    }
+
+    static setGlobalDebugLevel(level) {
+        const n = Number(level);
+        HandlerExtractor.globalDebugLevel = Number.isFinite(n) ? Math.max(0, Math.min(3, n)) : 1;
+    }
+
+    _log(level, method, ...args) {
+        if (this.debugLevel < level) return;
+        try {
+            if (typeof log !== 'undefined' && typeof log[method] === 'function') return log[method](...args);
+        } catch(_) {}
+        try { console[method === 'success' ? 'log' : (method || 'log')](...args); } catch(_) {}
+    }
+
     _isNonPostMessageHandler(handlerCode, handlerFlags) {
         if (!handlerCode || typeof handlerCode !== 'string') return false;
-        
+
         // Check for common non-postMessage handler patterns
         const nonPostMessagePatterns = [
             // Positioning/UI related functions
@@ -33,31 +70,31 @@ class HandlerExtractor {
             // Function that doesn't access event.data
             /function.*\{[^}]*\}(?!.*event\.data)/i
         ];
-        
+
         // Check if handler code matches non-postMessage patterns
         for (const pattern of nonPostMessagePatterns) {
             if (pattern.test(handlerCode)) return true;
         }
-        
+
         // Check if handler doesn't access event.data at all
         if (!handlerCode.includes('event.data') && !handlerCode.includes('evt.data')) {
             return true;
         }
-        
+
         // Check if handler doesn't have any DOM manipulation or postMessage processing
         const domPatterns = [/innerHTML|outerHTML|insertAdjacentHTML|document\.write|eval|Function|createElement|appendChild|setAttribute|style\.|classList\./i];
         const processingPatterns = [/JSON\.parse|JSON\.stringify|switch.*case|if.*event\.data|\.type|\.action|\.command/i];
         const hasDOMManipulation = domPatterns.some(pattern => pattern.test(handlerCode));
         const hasProcessingLogic = processingPatterns.some(pattern => pattern.test(handlerCode));
-        
+
         // If no DOM manipulation AND no processing logic, likely not a postMessage handler
         if (!hasDOMManipulation && !hasProcessingLogic) return true;
-        
+
         // Check if handler is too complex for a simple postMessage handler
         if (handlerCode.length > 1000 && !handlerFlags.accessesEventDataConditionally) {
             return true;
         }
-        
+
         return false;
     }
 
@@ -106,10 +143,12 @@ class HandlerExtractor {
     initialize(endpoint, messages = []) {
         this.endpoint = endpoint;
         this.messages = messages || [];
+        this.debugLevel = this._resolveDebugLevel();
         this.messageKeys = this._extractKeysFromMessages(this.messages);
         this.messageTypes = this._extractMessageTypes(this.messages);
+        this.messageValues = this._extractMessageValues(this.messages);
         this.functionDefinitions.clear();
-        if(typeof log !== 'undefined') log.debug(`[Extractor Init] Initialized for ${endpoint}. Message count: ${this.messages.length}, Keys: ${this.messageKeys.size}, Types: ${this.messageTypes.size}`);
+        this._log(1, 'debug', `[Extractor Init] Initialized for ${endpoint}. Message count: ${this.messages.length}, Keys: ${this.messageKeys.size}, Types: ${this.messageTypes.size}, DebugLevel: ${this.debugLevel}`);
         return this;
     }
 
@@ -123,7 +162,7 @@ class HandlerExtractor {
                 }
             }
         });
-        if(typeof log !== 'undefined') log.debug(`[Extractor Scoring Context] Extracted message keys:`, Array.from(keys));
+        this._log(2, 'debug', `[Extractor Scoring Context] Extracted message keys:`, Array.from(keys));
         return keys;
     }
 
@@ -135,8 +174,33 @@ class HandlerExtractor {
                 types.add(kind);
             }
         });
-        if(typeof log !== 'undefined') log.debug(`[Extractor Scoring Context] Extracted message types/kinds:`, Array.from(types));
+        this._log(2, 'debug', `[Extractor Scoring Context] Extracted message types/kinds:`, Array.from(types));
         return types;
+    }
+
+    _extractMessageValues(messages) {
+        const values = new Set();
+        const collectValues = (obj) => {
+            if (!obj) return;
+            try {
+                Object.values(obj).forEach(v => {
+                    if (typeof v === 'string') values.add(v);
+                    else if (v && typeof v === 'object') {
+                        // Only go one level deeper to avoid heavy recursion
+                        Object.values(v).forEach(nv => { if (typeof nv === 'string') values.add(nv); });
+                    }
+                });
+            } catch (_) {}
+        };
+        (messages || []).forEach(msg => {
+            if (typeof msg?.data === 'string') values.add(msg.data);
+            else if (msg?.data && typeof msg.data === 'object') {
+                collectValues(msg.data);
+                if (msg.data.data && typeof msg.data.data === 'object') collectValues(msg.data.data);
+            }
+        });
+        this._log(2, 'debug', `[Extractor Scoring Context] Extracted message values (sample):`, Array.from(values).slice(0, 10));
+        return values;
     }
 
     analyzeScriptContent(content, sourceIdentifier) {
@@ -148,17 +212,17 @@ class HandlerExtractor {
 
         try {
             if (typeof acorn === 'undefined') throw new Error("Acorn not loaded");
-            if(typeof log !== 'undefined') log.debug(`[Extractor] Attempting AST parse (module) for: ${sourceIdentifier}`);
+            this._log(3, 'debug', `[Extractor] Attempting AST parse (module) for: ${sourceIdentifier}`);
             ast = acorn.parse(content, {
                 ecmaVersion: 'latest',
                 silent: true, // Keep silent to allow fallback
                 locations: true,
                 sourceType: 'module' // Attempt module parse
             });
-            if(typeof log !== 'undefined') log.debug(`[Extractor] AST parsing as MODULE SUCCESS for: ${sourceIdentifier}`);
+            this._log(3, 'debug', `[Extractor] AST parsing as MODULE SUCCESS for: ${sourceIdentifier}`);
 
         } catch (moduleError) {
-            if(typeof log !== 'undefined') log.warn(`[Extractor] AST module parse failed for ${sourceIdentifier}: ${moduleError.message}. Trying as script...`);
+            this._log(2, 'warn', `[Extractor] AST module parse failed for ${sourceIdentifier}: ${moduleError.message}. Trying as script...`);
             try {
                 ast = acorn.parse(content, {
                     ecmaVersion: 'latest',
@@ -166,10 +230,10 @@ class HandlerExtractor {
                     locations: true,
                     sourceType: 'script' // Fallback to script parse
                 });
-                if(typeof log !== 'undefined') log.debug(`[Extractor] AST parsing as SCRIPT SUCCESS for: ${sourceIdentifier}`);
+                this._log(3, 'debug', `[Extractor] AST parsing as SCRIPT SUCCESS for: ${sourceIdentifier}`);
             } catch (scriptError) {
                 parseError = scriptError;
-                if(typeof log !== 'undefined') log.error(`[Extractor] AST parsing FAILED for ${sourceIdentifier} (both module & script): ${scriptError.message}. Falling back to regex.`);
+                this._log(1, 'error', `[Extractor] AST parsing FAILED for ${sourceIdentifier} (both module & script): ${scriptError.message}. Falling back to regex.`);
                 ast = null;
             }
         }
@@ -181,14 +245,14 @@ class HandlerExtractor {
                 this._mapPrototypeMethods(ast);
                 handlers.push(...this.analyzeAst(ast, content, sourceIdentifier));
             } catch(walkError) {
-                if(typeof log !== 'undefined') log.error(`[Extractor] Error during AST walk for ${sourceIdentifier}:`, walkError);
+                this._log(1, 'error', `[Extractor] Error during AST walk for ${sourceIdentifier}:`, walkError);
                 handlers.push(...this.analyzeWithRegex(content, sourceIdentifier));
             }
         } else {
             handlers.push(...this.analyzeWithRegex(content, sourceIdentifier));
         }
 
-        if(typeof log !== 'undefined') log.debug(`[Extractor] Found ${handlers.length} potential structures in ${sourceIdentifier} (before scoring).`);
+        this._log(2, 'debug', `[Extractor] Found ${handlers.length} potential structures in ${sourceIdentifier} (before scoring).`);
         return handlers;
     }
 
@@ -241,7 +305,7 @@ class HandlerExtractor {
                 return flags;
             }
             visitedNodes.add(node);
-            if(typeof log !== 'undefined') log.debug(`[quickScanRec] Depth ${currentDepth}, Scanning node type ${node.type}`);
+            this._log(3, 'debug', `[quickScanRec] Depth ${currentDepth}, Scanning node type ${node.type}`);
 
 
             try {
@@ -256,14 +320,14 @@ class HandlerExtractor {
                             let resolvedCalleeDef = null;
                             const args = this._prop(callNode, 'arguments') || [];
                             const callee = this._prop(callNode, 'callee');
-                            
+
                             let isPassedEventArg = Array.isArray(args) && args.some(arg => arg?.type === 'Identifier' && arg?.name === eventParamName);
 
                             if (callee?.type === 'Identifier') {
                                 calleeName = this._prop(callee, 'name');
                                 if (calleeName) {
                                     resolvedCalleeDef = this.functionDefinitions.get(calleeName);
-                                    if(typeof log !== 'undefined' && resolvedCalleeDef) log.debug(`[quickScanRec] Depth ${currentDepth}: Found direct call to '${calleeName}', Definition found: ${!!resolvedCalleeDef.node}`);
+                                    if (resolvedCalleeDef) this._log(3, 'debug', `[quickScanRec] Depth ${currentDepth}: Found direct call to '${calleeName}', Definition found: ${!!resolvedCalleeDef.node}`);
                                 }
                             } else if (callee?.type === 'MemberExpression') {
                                 const calleeProp = this._prop(callee, 'property');
@@ -271,7 +335,6 @@ class HandlerExtractor {
                                     calleeName = this._prop(calleeProp, 'name');
                                     const objExpr = this._prop(callee, 'object');
                                     let objName = null;
-                                    let lookupKey = null;
 
                                     if(objExpr?.type === 'ThisExpression') objName = 'this';
                                     else if (objExpr?.type === 'Identifier') objName = this._prop(objExpr, 'name');
@@ -279,17 +342,17 @@ class HandlerExtractor {
                                     if (objName && calleeName) {
                                         lookupKey = `${objName}.${calleeName}`;
                                         resolvedCalleeDef = this.functionDefinitions.get(lookupKey);
-                                        if(typeof log !== 'undefined') log.debug(`[quickScanRec] Depth ${currentDepth}: Found method call '${lookupKey}', Definition found: ${!!resolvedCalleeDef?.node}`);
+                                        this._log(3, 'debug', `[quickScanRec] Depth ${currentDepth}: Found method call '${lookupKey}', Definition found: ${!!resolvedCalleeDef?.node}`);
 
                                         if (!resolvedCalleeDef) {
                                             const protoKey = Array.from(this.functionDefinitions.keys()).find(key => key.endsWith(`.${calleeName}`) && this.functionDefinitions.get(key)?.type === 'prototype');
                                             if(protoKey) {
                                                 resolvedCalleeDef = this.functionDefinitions.get(protoKey);
-                                                if(typeof log !== 'undefined') log.debug(`[quickScanRec] Depth ${currentDepth}: Found potential prototype method '${calleeName}' via key '${protoKey}', Definition found: ${!!resolvedCalleeDef?.node}`);
+                                                this._log(3, 'debug', `[quickScanRec] Depth ${currentDepth}: Found potential prototype method '${calleeName}' via key '${protoKey}', Definition found: ${!!resolvedCalleeDef?.node}`);
                                             }
                                         }
                                     } else {
-                                        if(typeof log !== 'undefined') log.debug(`[quickScanRec] Depth ${currentDepth}: Method call '${calleeName || 'unknown'}' on complex object type '${objExpr?.type || 'unknown'}', skipping lookup.`);
+                                        this._log(3, 'debug', `[quickScanRec] Depth ${currentDepth}: Method call '${calleeName || 'unknown'}' on complex object type '${objExpr?.type || 'unknown'}', skipping lookup.`);
                                     }
                                 }
                             }
@@ -301,15 +364,15 @@ class HandlerExtractor {
                             }
 
                             if (resolvedCalleeDef?.node && isPassedEventArg) {
-                                if(typeof log !== 'undefined') log.debug(`[quickScanRec] Depth ${currentDepth}: Recursing into '${calleeName || 'callee'}' because event param '${eventParamName}' was passed.`);
+                                this._log(3, 'debug', `[quickScanRec] Depth ${currentDepth}: Recursing into '${calleeName || 'callee'}' because event param '${eventParamName}' was passed.`);
                                 const nestedFlags = quickScanForPatternsRecursive(resolvedCalleeDef.node, eventParamName, currentDepth + 1, new Set(visitedNodes));
-                                if(typeof log !== 'undefined') log.debug(`[quickScanRec] Depth ${currentDepth}: Flags from recursive call to '${calleeName || 'callee'}':`, nestedFlags);
+                                this._log(3, 'debug', `[quickScanRec] Depth ${currentDepth}: Flags from recursive call to '${calleeName || 'callee'}':`, nestedFlags);
                                 for(const key in nestedFlags) {
                                     if (typeof flags[key] === 'boolean') flags[key] = flags[key] || nestedFlags[key];
                                     else if (typeof flags[key] === 'number') flags[key] += nestedFlags[key];
                                 }
                             } else if (resolvedCalleeDef?.node && !isPassedEventArg) {
-                                if(typeof log !== 'undefined') log.debug(`[quickScanRec] Depth ${currentDepth}: Found call to '${calleeName || 'callee'}' but event param '${eventParamName}' not passed, not recursing.`);
+                                this._log(3, 'debug', `[quickScanRec] Depth ${currentDepth}: Found call to '${calleeName || 'callee'}' but event param '${eventParamName}' not passed, not recursing.`);
                             }
                         } catch (e) {
                             this._safeLog('[quickScanRec] CallExpression error:', e?.message);
@@ -320,11 +383,11 @@ class HandlerExtractor {
                             if (!memNode) return;
                             const obj = this._prop(memNode, 'object');
                             const prop = this._prop(memNode, 'property');
-                            
+
                             let baseObjectIsEvent = obj?.type === 'Identifier' && obj?.name === eventParamName;
-                            let baseObjectIsDeeperEventData = obj?.type === 'MemberExpression' && 
-                                this._prop(obj, 'object')?.type === 'Identifier' && 
-                                this._prop(obj, 'object')?.name === eventParamName && 
+                            let baseObjectIsDeeperEventData = obj?.type === 'MemberExpression' &&
+                                this._prop(obj, 'object')?.type === 'Identifier' &&
+                                this._prop(obj, 'object')?.name === eventParamName &&
                                 this._prop(obj, 'property')?.name === 'data';
 
                             if (obj?.type === 'ThisExpression' || obj?.type === 'Identifier') {
@@ -342,8 +405,8 @@ class HandlerExtractor {
                                 let current = this._prop(memNode, 'parent'); let depth = 0;
                                 while (current && depth < 5) {
                                     const currentType = current?.type;
-                                    if (currentType === 'IfStatement' || currentType === 'BinaryExpression' || currentType === 'ConditionalExpression' || currentType === 'LogicalExpression') { 
-                                        flags.accessesEventOriginConditionally = true; break; 
+                                    if (currentType === 'IfStatement' || currentType === 'BinaryExpression' || currentType === 'ConditionalExpression' || currentType === 'LogicalExpression') {
+                                        flags.accessesEventOriginConditionally = true; break;
                                     }
                                     if (currentType === 'FunctionExpression' || currentType === 'FunctionDeclaration' || currentType === 'ArrowFunctionExpression') break;
                                     current = this._prop(current, 'parent'); depth++;
@@ -356,8 +419,8 @@ class HandlerExtractor {
                                 let current = this._prop(memNode, 'parent'); let depth = 0;
                                 while(current && depth < 5) {
                                     const currentType = current?.type;
-                                    if(currentType === 'IfStatement' || currentType === 'SwitchCase' || currentType === 'ConditionalExpression' || currentType === 'LogicalExpression' || currentType === 'BinaryExpression') { 
-                                        flags.accessesEventDataConditionally = true; break; 
+                                    if(currentType === 'IfStatement' || currentType === 'SwitchCase' || currentType === 'ConditionalExpression' || currentType === 'LogicalExpression' || currentType === 'BinaryExpression') {
+                                        flags.accessesEventDataConditionally = true; break;
                                     }
                                     if(currentType === 'FunctionExpression' || currentType === 'FunctionDeclaration' || currentType === 'ArrowFunctionExpression') break;
                                     current = this._prop(current, 'parent'); depth++;
@@ -375,8 +438,8 @@ class HandlerExtractor {
                             if (discriminant?.type === 'MemberExpression') {
                                 const discObj = this._prop(discriminant, 'object');
                                 const discProp = this._prop(discriminant, 'property');
-                                if (discObj?.type === 'MemberExpression' && 
-                                    this._prop(discObj, 'object')?.name === eventParamName && 
+                                if (discObj?.type === 'MemberExpression' &&
+                                    this._prop(discObj, 'object')?.name === eventParamName &&
                                     this._prop(discObj, 'property')?.name === 'data') {
                                     discriminantChecksEventData = true;
                                 } else if (discObj?.type === 'Identifier') {
@@ -399,11 +462,11 @@ class HandlerExtractor {
                     }
                 });
             } catch (e) {
-                if(typeof log !== 'undefined') log.warn(`[Extractor AST Pattern Scan] Error during scan depth ${currentDepth}: ${e?.message || String(e)}`);
+                this._log(2, 'warn', `[Extractor AST Pattern Scan] Error during scan depth ${currentDepth}: ${e?.message || String(e)}`);
             }
 
             flags.hasStrongSignal = flags.callsVerifier || flags.usesCallbackMap || flags.accessesEventOriginConditionally || flags.usesSwitchOnEventData || flags.accessesEventDataConditionally;
-            if(typeof log !== 'undefined') log.debug(`[quickScanRec] Depth ${currentDepth}, Node type ${node.type}. Final flags:`, flags);
+            this._log(3, 'debug', `[quickScanRec] Depth ${currentDepth}, Node type ${node.type}. Final flags:`, flags);
             return flags;
         };
 
@@ -430,12 +493,15 @@ class HandlerExtractor {
                             funcNode = funcDef?.node || null;
                             if (funcNode) {
                                 category += '-identifier';
-                                if(funcNode.params?.[0]?.type === 'Identifier') eventParamName = funcNode.params[0].name;
+                                if(funcNode.params?.[0]?.type === 'Identifier') eventParamName = funcDef.node.params[0].name;
                                 else if (funcNode.params?.length > 0) eventParamName = 'param0';
                                 handlerFlags = quickScanForPatternsRecursive(funcNode, eventParamName, 0);
                             }
                         }
-                        if (funcNode) foundHandlers.push({ category, source: sourceUrl, functionName, handlerNode: funcNode, fullScriptContent: scriptContent, handlerFlags, eventParamName });
+                        if (funcNode) {
+                            foundHandlers.push({ category, source: sourceUrl, functionName, handlerNode: funcNode, fullScriptContent: scriptContent, handlerFlags, eventParamName });
+                            this._log(2, 'debug', `[AST Detect] onmessage assignment candidate in ${sourceUrl} (${category}). Function: ${functionName || 'anonymous'}`);
+                        }
                     } catch (e) {
                         this._safeLog('[Extractor AST Pattern Scan] swallowed assign error:', e?.message);
                     }
@@ -510,6 +576,7 @@ class HandlerExtractor {
 
                         if (funcDef && funcDef.node) {
                             foundHandlers.push({ category, source: sourceUrl, functionName: functionName || funcDef.methodName, handlerNode: funcDef.node, fullScriptContent: scriptContent, handlerFlags, eventParamName });
+                            this._log(2, 'debug', `[AST Detect] addEventListener('message', ...) candidate in ${sourceUrl} (${category}). Function: ${functionName || funcDef.methodName || 'anonymous'}`);
                         }
                     } catch (e) {
                         this._safeLog('[Extractor AST Pattern Scan] swallowed node error:', e?.message);
@@ -517,7 +584,7 @@ class HandlerExtractor {
                 }
             });
         } catch (e) {
-            if(typeof log !== 'undefined') log.error(`[Extractor] Error walking AST for ${sourceUrl}:`, e);
+            this._log(1, 'error', `[Extractor] Error walking AST for ${sourceUrl}:`, e);
         }
         return foundHandlers;
     }
@@ -527,6 +594,7 @@ class HandlerExtractor {
         const { handlerNode, category, source, fullScriptContent, functionName, handlerFlags = {}, eventParamName } = handlerInfo;
         const handlerCode = handlerInfo.handler || fullScriptContent;
         let score = 0;
+        const dbg = this.debugLevel >= 3 ? { contributions: [], notes: [] } : null;
         const MIN_CODE_LENGTH_ESTIMATE = 25;
         const MAX_CODE_LENGTH_ESTIMATE = 30000;
         const MIN_COMPLEXITY_LENGTH = 65;
@@ -542,7 +610,7 @@ class HandlerExtractor {
         const SWITCH_BONUS = 140;
         const CONDITIONAL_DATA_ACCESS_BONUS = 75;
         const ORIGIN_CHECK_STRUCTURE_BONUS = 90;
-        
+
         // New bonuses for better handler detection
         const POSTMESSAGE_HANDLER_BONUS = 200;  // Strong indicator
         const DOM_SINK_BONUS = 150;             // Has DOM manipulation
@@ -560,40 +628,32 @@ class HandlerExtractor {
         let handlerCodeLength = handlerNode?.end && handlerNode?.start ? handlerNode.end - handlerNode.start : (handlerCode?.length || 0);
         if (handlerCodeLength < MIN_CODE_LENGTH_ESTIMATE) return 0;
 
-        let baseScore = 5; score += baseScore;
+        let baseScore = 5; score += baseScore; if (dbg) dbg.contributions.push({rule:'BASE', delta:baseScore});
         let featureScore = 0;
         let hasStrongSignal = handlerFlags.hasStrongSignal || false;
 
-        if (handlerFlags.looksLikeScheduler) featureScore += SCHEDULER_PENALTY;
-        if (handlerFlags.mentionsPostMessageNull) featureScore += POSTMESSAGE_NULL_PENALTY;
-        
+        if (handlerFlags.looksLikeScheduler) { featureScore += SCHEDULER_PENALTY; if (dbg) dbg.contributions.push({rule:'SCHEDULER_PENALTY', delta:SCHEDULER_PENALTY}); }
+        if (handlerFlags.mentionsPostMessageNull) { featureScore += POSTMESSAGE_NULL_PENALTY; if (dbg) dbg.contributions.push({rule:'POSTMESSAGE_NULL_PENALTY', delta:POSTMESSAGE_NULL_PENALTY}); }
+
         // Check if this looks like a non-postMessage handler
         const isNonPostMessageHandler = this._isNonPostMessageHandler(handlerCode, handlerFlags);
-        if (isNonPostMessageHandler) featureScore += NON_POSTMESSAGE_PENALTY;
+        if (isNonPostMessageHandler) { featureScore += NON_POSTMESSAGE_PENALTY; if (dbg) dbg.contributions.push({rule:'NON_POSTMESSAGE_PENALTY', delta:NON_POSTMESSAGE_PENALTY}); }
 
-        if (handlerFlags.callsVerifier) featureScore += VERIFIER_BONUS;
-        if (handlerFlags.usesCallbackMap) featureScore += CALLBACK_MAP_BONUS;
-        if (handlerFlags.accessesEventOriginConditionally) featureScore += CONDITIONAL_ORIGIN_ACCESS_BONUS;
-        if (handlerFlags.usesSwitchOnEventData) featureScore += SWITCH_BONUS;
-        if (handlerFlags.accessesEventDataConditionally) featureScore += CONDITIONAL_DATA_ACCESS_BONUS;
+        if (handlerFlags.callsVerifier) { featureScore += VERIFIER_BONUS; if (dbg) dbg.contributions.push({rule:'VERIFIER_BONUS', delta:VERIFIER_BONUS}); }
+        if (handlerFlags.usesCallbackMap) { featureScore += CALLBACK_MAP_BONUS; if (dbg) dbg.contributions.push({rule:'CALLBACK_MAP_BONUS', delta:CALLBACK_MAP_BONUS}); }
+        if (handlerFlags.accessesEventOriginConditionally) { featureScore += CONDITIONAL_ORIGIN_ACCESS_BONUS; if (dbg) dbg.contributions.push({rule:'CONDITIONAL_ORIGIN_ACCESS_BONUS', delta:CONDITIONAL_ORIGIN_ACCESS_BONUS}); }
+        if (handlerFlags.usesSwitchOnEventData) { featureScore += SWITCH_BONUS; if (dbg) dbg.contributions.push({rule:'SWITCH_BONUS', delta:SWITCH_BONUS}); }
+        if (handlerFlags.accessesEventDataConditionally) { featureScore += CONDITIONAL_DATA_ACCESS_BONUS; if (dbg) dbg.contributions.push({rule:'CONDITIONAL_DATA_ACCESS_BONUS', delta:CONDITIONAL_DATA_ACCESS_BONUS}); }
 
-        if (handlerFlags.accessesCommonDataFields > 0) featureScore += (handlerFlags.accessesCommonDataFields * COMMON_DATA_FIELD_BONUS);
-        if (handlerFlags.accessesAnyDataField && !handlerFlags.accessesEventDataConditionally && handlerFlags.accessesCommonDataFields === 0) featureScore += ANY_DATA_FIELD_BONUS;
-        if (handlerFlags.accessesOriginField && !handlerFlags.accessesEventOriginConditionally) featureScore += ORIGIN_FIELD_BONUS;
-        
+        if (handlerFlags.accessesCommonDataFields > 0) { const d = (handlerFlags.accessesCommonDataFields * COMMON_DATA_FIELD_BONUS); featureScore += d; if (dbg) dbg.contributions.push({rule:'COMMON_DATA_FIELDS', delta:d}); }
+        if (handlerFlags.accessesAnyDataField && !handlerFlags.accessesEventDataConditionally && handlerFlags.accessesCommonDataFields === 0) { featureScore += ANY_DATA_FIELD_BONUS; if (dbg) dbg.contributions.push({rule:'ANY_DATA_FIELD_BONUS', delta:ANY_DATA_FIELD_BONUS}); }
+        if (handlerFlags.accessesOriginField && !handlerFlags.accessesEventOriginConditionally) { featureScore += ORIGIN_FIELD_BONUS; if (dbg) dbg.contributions.push({rule:'ORIGIN_FIELD_BONUS', delta:ORIGIN_FIELD_BONUS}); }
+
         // Apply new pattern-based bonuses
-        if (/addEventListener.*message|window\.onmessage|message.*event/i.test(handlerCode)) {
-            featureScore += POSTMESSAGE_HANDLER_BONUS;
-        }
-        if (/innerHTML|outerHTML|insertAdjacentHTML|document\.write|createElement/i.test(handlerCode)) {
-            featureScore += DOM_SINK_BONUS;
-        }
-        if (/JSON\.parse|JSON\.stringify/i.test(handlerCode)) {
-            featureScore += JSON_PROCESSING_BONUS;
-        }
-        if (/\.type|\.action|\.command|switch.*case|if.*event\.data\./i.test(handlerCode)) {
-            featureScore += TYPE_CHECKING_BONUS;
-        }
+        if (/addEventListener.*message|window\.onmessage|message.*event/i.test(handlerCode)) { featureScore += POSTMESSAGE_HANDLER_BONUS; if (dbg) dbg.contributions.push({rule:'POSTMESSAGE_HANDLER_BONUS', delta:POSTMESSAGE_HANDLER_BONUS}); }
+        if (/innerHTML|outerHTML|insertAdjacentHTML|document\.write|createElement/i.test(handlerCode)) { featureScore += DOM_SINK_BONUS; if (dbg) dbg.contributions.push({rule:'DOM_SINK_BONUS', delta:DOM_SINK_BONUS}); }
+        if (/JSON\.parse|JSON\.stringify/i.test(handlerCode)) { featureScore += JSON_PROCESSING_BONUS; if (dbg) dbg.contributions.push({rule:'JSON_PROCESSING_BONUS', delta:JSON_PROCESSING_BONUS}); }
+        if (/\.type|\.action|\.command|switch.*case|if.*event\.data\./i.test(handlerCode)) { featureScore += TYPE_CHECKING_BONUS; if (dbg) dbg.contributions.push({rule:'TYPE_CHECKING_BONUS', delta:TYPE_CHECKING_BONUS}); }
 
         if (handlerNode && typeof acorn !== 'undefined' && typeof acorn.walk !== 'undefined') {
             try {
@@ -623,11 +683,13 @@ class HandlerExtractor {
                     }
                 });
 
-                featureScore += foundSpecificKeys.size * SPECIFIC_KEY_MATCH_BONUS;
-                featureScore += foundSpecificTypes.size * SPECIFIC_TYPE_MATCH_BONUS;
-                if (usesPostMessageCall && !handlerFlags.mentionsPostMessageNull) featureScore += POSTMESSAGE_CALL_BONUS;
-                if (hasOriginCheckStructure) { featureScore += ORIGIN_CHECK_STRUCTURE_BONUS; hasStrongSignal = true; }
-                if (usesJsonParse) featureScore += JSON_PARSE_BONUS;
+                const keysDelta = foundSpecificKeys.size * SPECIFIC_KEY_MATCH_BONUS;
+                const typesDelta = foundSpecificTypes.size * SPECIFIC_TYPE_MATCH_BONUS;
+                featureScore += keysDelta; if (dbg && keysDelta) dbg.contributions.push({rule:'SPECIFIC_KEY_MATCH_BONUS', delta:keysDelta, details:Array.from(foundSpecificKeys)});
+                featureScore += typesDelta; if (dbg && typesDelta) dbg.contributions.push({rule:'SPECIFIC_TYPE_MATCH_BONUS', delta:typesDelta, details:Array.from(foundSpecificTypes)});
+                if (usesPostMessageCall && !handlerFlags.mentionsPostMessageNull) { featureScore += POSTMESSAGE_CALL_BONUS; if (dbg) dbg.contributions.push({rule:'POSTMESSAGE_CALL_BONUS', delta:POSTMESSAGE_CALL_BONUS}); }
+                if (hasOriginCheckStructure) { featureScore += ORIGIN_CHECK_STRUCTURE_BONUS; hasStrongSignal = true; if (dbg) dbg.contributions.push({rule:'ORIGIN_CHECK_STRUCTURE_BONUS', delta:ORIGIN_CHECK_STRUCTURE_BONUS}); }
+                if (usesJsonParse) { featureScore += JSON_PARSE_BONUS; if (dbg) dbg.contributions.push({rule:'JSON_PARSE_BONUS', delta:JSON_PARSE_BONUS}); }
 
             } catch (e) { }
         }
@@ -637,7 +699,7 @@ class HandlerExtractor {
         }
 
         if (handlerCodeLength < MIN_COMPLEXITY_LENGTH && !hasStrongSignal && featureScore < (VERIFIER_BONUS / 2)) {
-            featureScore += SIMPLICITY_PENALTY;
+            featureScore += SIMPLICITY_PENALTY; if (dbg) dbg.contributions.push({rule:'SIMPLICITY_PENALTY', delta:SIMPLICITY_PENALTY});
         }
 
         if (!handlerNode && handlerCode) {
@@ -654,18 +716,19 @@ class HandlerExtractor {
             if (handlerCode.match(/unstable_now|MessageChannel/)) featureScore += SCHEDULER_PENALTY / 2;
         }
 
-        if (handlerCodeLength > MAX_CODE_LENGTH_ESTIMATE && featureScore < 200) featureScore -= 150;
-        else if (handlerCodeLength > MAX_CODE_LENGTH_ESTIMATE) featureScore -= 50;
+        if (handlerCodeLength > MAX_CODE_LENGTH_ESTIMATE && featureScore < 200) { featureScore -= 150; if (dbg) dbg.contributions.push({rule:'OVERSIZE_CODE_PENALTY_HEAVY', delta:-150}); }
+        else if (handlerCodeLength > MAX_CODE_LENGTH_ESTIMATE) { featureScore -= 50; if (dbg) dbg.contributions.push({rule:'OVERSIZE_CODE_PENALTY_LIGHT', delta:-50}); }
 
         score += featureScore;
 
-        if (category?.includes('runtime')) score += 150;
-        else if (category?.includes('debugger') || category?.includes('breakpoint')) score += 75;
-        else if (category?.includes('ast-event-listener') || category?.includes('ast-onmessage')) score += 50;
-        else if (category?.includes('inline-onmessage-attribute')) score += 5;
-        else if (category?.includes('regex')) score += 1;
-
-        return Math.max(0, score);
+        if (category?.includes('runtime')) { score += 150; if (dbg) dbg.contributions.push({rule:'CATEGORY_RUNTIME', delta:150}); }
+        else if (category?.includes('debugger') || category?.includes('breakpoint')) { score += 75; if (dbg) dbg.contributions.push({rule:'CATEGORY_DEBUGGER', delta:75}); }
+        else if (category?.includes('ast-event-listener') || category?.includes('ast-onmessage')) { score += 50; if (dbg) dbg.contributions.push({rule:'CATEGORY_AST', delta:50}); }
+        else if (category?.includes('inline-onmessage-attribute')) { score += 5; if (dbg) dbg.contributions.push({rule:'CATEGORY_INLINE', delta:5}); }
+        else if (category?.includes('regex')) { score += 1; if (dbg) dbg.contributions.push({rule:'CATEGORY_REGEX', delta:1}); }
+        const finalScore = Math.max(0, score);
+        if (dbg) this._log(3, 'debug', `[Score] ${source || 'inline'} (${category}) => ${finalScore}`, { functionName, flags: handlerFlags, breakdown: dbg.contributions });
+        return finalScore;
     }
 
 
@@ -743,7 +806,7 @@ class HandlerExtractor {
                 boostedScore = Math.max(0, boostedScore);
             }
 
-            if(typeof log !== 'undefined') log.debug(`[getBestHandler Map] Candidate ${index}: Source=${handlerInfo.source?.substring(handlerInfo.source?.lastIndexOf('/')+1)}, BaseScore=${originalScore}, FinalScore=${boostedScore}`);
+            this._log(2, 'debug', `[getBestHandler Map] Candidate ${index}: Source=${handlerInfo.source?.substring(handlerInfo.source?.lastIndexOf('/')+1)}, BaseScore=${originalScore}, FinalScore=${boostedScore}`);
             return { ...handlerInfo, score: boostedScore };
         }).filter(h => h.score > 0);
 
@@ -752,7 +815,7 @@ class HandlerExtractor {
             return null;
         }
 
-        if(typeof log !== 'undefined') log.debug("[getBestHandler] Scored Candidates (After Boost, Pre-sort):", JSON.stringify(scoredHandlers.map(h => ({ score: h.score, category: h.category, source: h.source?.substring(h.source?.lastIndexOf('/')+1), name: h.functionName || 'N/A', flags: h.handlerFlags })), null, 2));
+        this._log(2, 'debug', "[getBestHandler] Scored Candidates (After Boost, Pre-sort):", JSON.stringify(scoredHandlers.map(h => ({ score: h.score, category: h.category, source: h.source?.substring(h.source?.lastIndexOf('/')+1), name: h.functionName || 'N/A', flags: h.handlerFlags })), null, 2));
 
         const categoryPriority = { 'runtime': 1, 'debugger': 2, 'breakpoint': 3, 'ast-event-listener': 4, 'ast-onmessage': 5, 'regex': 7, 'inline-onmessage-attribute': 8 };
 
@@ -809,7 +872,7 @@ class HandlerExtractor {
         }
 
         const bestLen = bestHandlerInfo.handlerNode ? bestHandlerInfo.handlerNode.end - bestHandlerInfo.handlerNode.start : finalHandlerCode.length;
-        if(typeof log !== 'undefined') log.debug(`[getBestHandler] Selected Handler: Score=${bestHandlerInfo.score}, Category=${bestHandlerInfo.category}, Source=${bestHandlerInfo.source}, EstLen=${bestLen}, Name=${bestHandlerInfo.functionName || 'N/A'}, Flags=${JSON.stringify(bestHandlerInfo.handlerFlags)}`);
+        this._log(1, 'debug', `[getBestHandler] Selected Handler: Score=${bestHandlerInfo.score}, Category=${bestHandlerInfo.category}, Source=${bestHandlerInfo.source}, EstLen=${bestLen}, Name=${bestHandlerInfo.functionName || 'N/A'}, Flags=${JSON.stringify(bestHandlerInfo.handlerFlags)}`);
 
         return bestHandlerInfo;
     }
@@ -887,17 +950,17 @@ class HandlerExtractor {
 
         try {
             if(typeof log !== 'undefined') log.debug('[Debugger Tab] Creating temporary background tab for:', targetUrl);
-            
+
             // Create tab with special parameter to mark it as handler extraction
             const analysisUrl = targetUrl + (targetUrl.includes('?') ? '&' : '?') + 'frogpost_handler_extraction=true';
             const tab = await chrome.tabs.create({ url: analysisUrl, active: false });
             tabId = tab.id;
             if (!tabId) throw new Error("Failed to create target tab.");
             if(typeof log !== 'undefined') log.debug(`[Debugger Tab] Created target tab ID: ${tabId}`);
-            
+
             // Mark this tab as a handler extraction tab
             await chrome.storage.local.set({ [`handler-extraction-tab-${tabId}`]: true });
-            
+
             await new Promise(res => setTimeout(res, 2000)); // Increased for better page load
 
             await chrome.debugger.attach({ tabId }, "1.3");
@@ -970,12 +1033,11 @@ class HandlerExtractor {
 
             if (tabId) {
                 if(typeof log !== 'undefined') log.debug(`[Debugger Tab] Attempting to remove temporary tab: ${tabId}`);
-                try { 
+                try {
                     // Clean up the handler extraction flag
                     await chrome.storage.local.remove(`handler-extraction-tab-${tabId}`);
-                    
-                    await chrome.tabs.remove(tabId); 
-                    if(typeof log !== 'undefined') log.debug(`[Debugger Tab] Removed temporary tab: ${tabId}`); 
+
+                    await chrome.tabs.remove(tabId);
                 }
                 catch (removeError) { if(typeof log !== 'undefined') log.error(`[Debugger Tab] Error removing temporary tab ${tabId}:`, removeError); }
             }
@@ -1068,13 +1130,13 @@ class HandlerExtractor {
                         }).then(result => {
                             if (result && result.breakpointId) {
                                 breakpointMap.set(result.breakpointId, handlerInfo);
-                                if(typeof log !== 'undefined') log.debug(`[Breakpoint Exec] Set breakpoint ${result.breakpointId} for handler candidate at ${handlerInfo.source}:${location.lineNumber}`);
+                                if(typeof log !== 'undefined') log.debug(`[Breakpoint Exec] Set breakpoint ${result.breakpointId} for handler at ${handlerInfo.source}:${location.lineNumber}`);
                             } else {
                                 if(typeof log !== 'undefined') log.warn(`[Breakpoint Exec] Failed to set breakpoint for handler at ${handlerInfo.source}:${location.lineNumber}`);
                             }
                             return result;
                         }).catch(err => {
-                            // Handle "already exists" errors gracefully 
+                            // Handle "already exists" errors gracefully
                             if (err && (err.code === -32000 || /already exists/i.test(err.message||''))) {
                                 if(typeof log !== 'undefined') log.info(`[Breakpoint Exec] Breakpoint already exists at ${handlerInfo.source}:${location.lineNumber} - continuing.`);
                             } else {
@@ -1095,33 +1157,33 @@ class HandlerExtractor {
             if(typeof log !== 'undefined') log.debug(`[Breakpoint Exec] Finished attempting to set ${breakpointMap.size} breakpoints.`);
 
             if (breakpointMap.size === 0) {
-                if(typeof log !== 'undefined') log.warn(`[Breakpoint Exec] No breakpoints could be set. Potential handlers:`, potentialHandlers.map(h => ({ 
-                    category: h.category, 
+                if(typeof log !== 'undefined') log.warn(`[Breakpoint Exec] No breakpoints could be set. Potential handlers:`, potentialHandlers.map(h => ({
+                    category: h.category,
                     source: h.source?.substring(h.source?.lastIndexOf('/')+1),
-                    hasLocation: !!h.handlerNode?.loc?.start 
+                    hasLocation: !!h.handlerNode?.loc?.start
                 })));
                 throw new Error("Could not set any breakpoints for potential handlers.");
             }
 
             if(typeof log !== 'undefined') log.debug(`[Breakpoint Exec] Injecting postMessage probes with targetOrigin: ${targetOrigin}`);
-            
+
             // Send both probes in parallel for faster execution
             const jsonProbe = JSON.stringify(testMessageData || { "FrogPost": "BreakpointTest" });
             const strProbe = 'FrogPost::BreakpointTest';
-            
+
             const probePromises = [
-                chrome.debugger.sendCommand({ tabId }, "Runtime.evaluate", { 
-                    expression: `window.postMessage(${jsonProbe}, '${targetOrigin}');` 
+                chrome.debugger.sendCommand({ tabId }, "Runtime.evaluate", {
+                    expression: `window.postMessage(${jsonProbe}, '${targetOrigin}');`
                 }),
-                chrome.debugger.sendCommand({ tabId }, "Runtime.evaluate", { 
-                    expression: `window.postMessage('${strProbe}', '${targetOrigin}');` 
+                chrome.debugger.sendCommand({ tabId }, "Runtime.evaluate", {
+                    expression: `window.postMessage('${strProbe}', '${targetOrigin}');`
                 })
             ];
-            
+
             // Adaptive delay based on number of breakpoints set
             const breakpointDelay = Math.min(200 + (breakpointMap.size * 50), 500);
             await new Promise(resolve => setTimeout(resolve, breakpointDelay));
-            
+
             await Promise.all(probePromises);
             if(typeof log !== 'undefined') log.debug(`[Breakpoint Exec] Both probes sent in parallel.`);
 
@@ -1129,7 +1191,7 @@ class HandlerExtractor {
             const maxWaitTime = 2000; // Reduced from 3000
             const checkInterval = 50;  // Reduced from 100 for faster checking
             let waitedTime = 0;
-            
+
             while (waitedTime < maxWaitTime && !confirmedHandler) {
                 await new Promise(resolve => setTimeout(resolve, checkInterval));
                 waitedTime += checkInterval;
@@ -1159,8 +1221,9 @@ class HandlerExtractor {
             }
             if (tabId) {
                 try {
-                    // Clean up the handler-extraction flag then remove the tab
-                    try { await chrome.storage.local.remove(`handler-extraction-tab-${tabId}`); } catch {}
+                    // Clean up the handler extraction flag
+                    await chrome.storage.local.remove(`handler-extraction-tab-${tabId}`);
+
                     await chrome.tabs.remove(tabId);
                 }
                 catch (removeError) { if(typeof log !== 'undefined') log.error(`[Breakpoint Exec] Error removing temp tab ${tabId}:`, removeError); }
@@ -1171,3 +1234,75 @@ class HandlerExtractor {
 
 }
 
+// New methods added to support dashboard calls
+HandlerExtractor.prototype.extractStaticallyWithContext = async function(targetUrl, messageKeys, messageTypes, messageValues) {
+    const handlers = new Set();
+    try {
+        this._log(1, 'debug', `[Static Context] Fetching HTML for: ${targetUrl}`);
+        const res = await fetch(targetUrl, { credentials: 'omit', cache: 'no-store' });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const html = await res.text();
+
+        // Extract external script src URLs
+        const srcRegex = /<script[^>]*\bsrc=["']([^"']+)["'][^>]*><\/script>/gi;
+        const srcs = new Set();
+        let m;
+        while ((m = srcRegex.exec(html)) !== null) {
+            try {
+                const absolute = new URL(m[1], targetUrl).href;
+                // Skip extension and data URLs
+                if (!absolute.startsWith('chrome-extension://') && !absolute.startsWith('data:')) srcs.add(absolute);
+            } catch (_) {}
+        }
+
+        // Extract inline scripts
+        const inlineRegex = /<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/gi;
+        let im;
+        let inlineIndex = 0;
+        while ((im = inlineRegex.exec(html)) !== null) {
+            const content = im[1] || '';
+            if (content.trim().length < 20) { inlineIndex++; continue; }
+            const sourceId = `${new URL(targetUrl).origin}/inline_${inlineIndex}.js`;
+            const found = this.analyzeScriptContent(content, sourceId);
+            found.forEach(h => handlers.add(h));
+            inlineIndex++;
+        }
+
+        this._log(1, 'debug', `[Static Context] Found ${srcs.size} external script(s). Fetching...`, Array.from(srcs).slice(0, 30));
+        const fetchLimit = 40; // Avoid fetching too many scripts
+        let fetchedCount = 0;
+        for (const src of srcs) {
+            if (fetchedCount >= fetchLimit) break;
+            try {
+                const sres = await fetch(src, { credentials: 'omit', cache: 'no-store' });
+                if (!sres.ok) { fetchedCount++; continue; }
+                const js = await sres.text();
+                const found = this.analyzeScriptContent(js, src);
+                found.forEach(h => handlers.add(h));
+                this._log(2, 'debug', `[Static Context] Analyzed ${src}. Found ${found.length} candidate(s).`);
+            } catch (_) { /* ignore individual script failures */ }
+            fetchedCount++;
+        }
+        this._log(1, 'success', `[Static Context] Extraction complete. Candidates: ${handlers.size}`);
+    } catch (e) {
+        this._log(1, 'error', `[Static Context] Error: ${e?.message || e}`);
+    }
+    return Array.from(handlers);
+};
+
+HandlerExtractor.prototype.extractWithStrictIframe = async function(targetUrl, messageKeys, messageTypes, messageValues) {
+    // Minimal strict mode: leverage debugger-based dynamic extraction to approximate iframe monitoring
+    try {
+        this._log(1, 'debug', `[Strict Iframe] Starting dynamic extraction for: ${targetUrl}`);
+        const dynamicHandlers = await this.extractDynamicallyViaDebugger(targetUrl);
+        if (Array.isArray(dynamicHandlers) && dynamicHandlers.length > 0) {
+            this._log(1, 'success', `[Strict Iframe] Dynamic extraction returned ${dynamicHandlers.length} candidate(s).`);
+            return dynamicHandlers;
+        }
+        this._log(1, 'warn', `[Strict Iframe] No dynamic candidates found. Returning empty set.`);
+        return [];
+    } catch (e) {
+        this._log(1, 'error', `[Strict Iframe] Error: ${e?.message || e}`);
+        return [];
+    }
+};

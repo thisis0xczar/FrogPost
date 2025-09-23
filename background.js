@@ -14,8 +14,16 @@ try {
     console.error("Background.js: Failed to import required scripts (Acorn, Extractor, etc).", e);
 }
 
-const log = { debug: (...args) => console.debug("BG:", ...args), info: (...args) => console.info("BG:", ...args), warn: (...args) => console.warn("BG:", ...args), error: (...args) => console.error("BG:", ...args), handler: (...args) => console.log("BG HANDLER:", ...args), scan: (...args) => console.log("BG SCAN:", ...args), };
+let debugMode = false; // Flag to control debug logging
 
+const log = {
+    debug: (...args) => { if (debugMode) console.debug("BG:", ...args); },
+    info: (...args) => { if (debugMode) console.info("BG:", ...args); },
+    warn: (...args) => { if (debugMode) console.warn("BG:", ...args); },
+    error: (...args) => { if (debugMode) console.error("BG:", ...args); },
+    handler: (...args) => { if (debugMode) console.log("BG HANDLER:", ...args); },
+    scan: (...args) => { if (debugMode) console.log("BG SCAN:", ...args); },
+};
 /**
  * BoundedMap - Prevents memory leaks by limiting Map size
  * Automatically removes oldest entries when limit is reached

@@ -1,6 +1,6 @@
 /**
  * FrogPost Extension
- * Originally Created by thisis0xczar/Lidor 
+ * Originally Created by thisis0xczar/Lidor
  * Refined on: 2025-09-17
  */
 
@@ -27,7 +27,7 @@
                 console.log('Looking for iframe on page...');
                 const iframe = document.querySelector('iframe');
                 console.log('Found iframe:', iframe);
-                
+
                 if (iframe && iframe.contentWindow) {
                     console.log('Sending postMessage to iframe:', request.message);
                     iframe.contentWindow.postMessage(request.message, '*');
@@ -53,6 +53,24 @@
                 } catch (e) {}
             }
         } else if (event.data && event.data.type === '__FROGPOST_SET_INDEX__') {
+            return;
+        } else if (event.data && event.data.type && event.data.type.startsWith('frogPostDOMAgent')) {
+            // Check if this is a message from our DOM agent
+            try {
+                // Forward to background script (only if chrome.runtime is available)
+                if (chrome?.runtime?.sendMessage) {
+                    chrome.runtime.sendMessage({
+                        type: event.data.type,
+                        payload: event.data.data
+                    }).catch(error => {
+                        console.error('FrogPost DOM Agent Forwarder: Error sending message to background:', error);
+                    });
+                } else {
+                    console.warn('FrogPost DOM Agent Forwarder: chrome.runtime not available, skipping message forwarding');
+                }
+            } catch (error) {
+                console.error('FrogPost DOM Agent Forwarder: Error processing message:', error);
+            }
             return;
         } else {
             const messageInternalType = event.data?.type;
@@ -174,13 +192,13 @@
     // Throttle mutation processing to prevent performance issues
     let mutationThrottleTimeout = null;
     const mutationQueue = [];
-    
+
     const processMutations = () => {
         if (mutationQueue.length === 0) return;
-        
+
         let currentPayloadIndex = lastKnownPayloadIndexFromFuzzer;
         const mutationsToProcess = mutationQueue.splice(0, 10); // Process max 10 mutations at a time
-        
+
         for (const mutation of mutationsToProcess) {
             const suspiciousDetail = isSuspiciousMutation(mutation);
             if (suspiciousDetail) {
@@ -192,17 +210,17 @@
                 } catch (e) { console.warn("FrogPost Monitor: Failed to send mutation message", e); }
             }
         }
-        
+
         // Continue processing if there are more mutations
         if (mutationQueue.length > 0) {
             mutationThrottleTimeout = setTimeout(processMutations, 50);
         }
     };
-    
+
     const observerCallback = (mutationsList, observer) => {
         // Add mutations to queue
         mutationQueue.push(...mutationsList);
-        
+
         // Throttle processing to prevent excessive CPU usage
         if (!mutationThrottleTimeout) {
             mutationThrottleTimeout = setTimeout(processMutations, 100);
@@ -211,9 +229,9 @@
 
     const observer = new MutationObserver(observerCallback);
     // Optimized config: reduced scope and added throttling
-    const config = { 
-        attributes: true, 
-        childList: true, 
+    const config = {
+        attributes: true,
+        childList: true,
         subtree: false, // Only observe direct children, not entire subtree
         attributeOldValue: false,
         attributeFilter: ['onerror', 'onload', 'onclick', 'onmouseover', 'onfocus', 'onpageshow', 'onwheel', 'ontoggle', 'onbegin', 'formaction', 'srcdoc', 'background', 'style'] // Only watch specific attributes
@@ -250,7 +268,7 @@
             this.iframeHandlers = new Map();
             this.originalMethods = {};
             this.isMonitoring = true;
-            
+
             this.initialize();
         }
 
@@ -272,7 +290,7 @@
         overrideAddEventListener() {
             const self = this;
             this.originalMethods.addEventListener = EventTarget.prototype.addEventListener;
-            
+
             EventTarget.prototype.addEventListener = function(type, listener, options) {
                 if (type === 'message' && self.isMonitoring) {
                     self.detectMessageHandler(this, listener, options);
@@ -287,7 +305,7 @@
         overridePostMessage() {
             const self = this;
             this.originalMethods.postMessage = window.postMessage;
-            
+
             window.postMessage = function(message, targetOrigin, transfer) {
                 if (self.isMonitoring) {
                     self.logPostMessage(message, targetOrigin, transfer);
@@ -319,7 +337,7 @@
 
                 this.detectedHandlers.set(handlerInfo.id, handlerInfo);
                 this.reportHandlerDetection(handlerInfo);
-                
+
                 console.log('FrogPost: Real-time handler detected', handlerInfo);
             } catch (error) {
                 console.error('FrogPost: Error detecting handler', error);
@@ -365,13 +383,13 @@
                 if (hasMessageListeners) {
                     this.reportExistingListeners();
                 }
-                
+
                 // Also check for onmessage handlers
                 if (window.onmessage && typeof window.onmessage === 'function') {
                     console.log('FrogPost: Found existing onmessage handler');
                     this.detectMessageHandler(window, window.onmessage, null);
                 }
-                
+
                 // Check for any existing addEventListener calls we might have missed
                 setTimeout(() => {
                     this.scanForExistingHandlers();
@@ -389,7 +407,7 @@
                 // This is a simplified scan - we can't easily detect all existing listeners
                 // but we can check for common patterns
                 console.log('FrogPost: Scanning for existing message handlers...');
-                
+
                 // Check if there are any message event listeners on common targets
                 const targets = [window, document];
                 targets.forEach(target => {
@@ -408,7 +426,7 @@
          */
         setupIframeMonitoring() {
             const self = this;
-            
+
             // Monitor for new iframes
             const observer = new MutationObserver((mutations) => {
                 mutations.forEach((mutation) => {
@@ -472,7 +490,7 @@
                 }
 
                 const source = listener.toString();
-                
+
                 // Check for FrogPost extension patterns (more specific to avoid false positives)
                 const extensionPatterns = [
                     'frogPostIframeHandler',
@@ -509,7 +527,7 @@
                         'realTimeMessageSent',
                         'realTimeDetectorReady'
                     ];
-                    
+
                     if (extensionTypes.includes(message.type)) {
                         return true;
                     }
@@ -595,9 +613,9 @@
         checkExistingListeners(target) {
             try {
                 // This is a simplified check - full detection requires debugger
-                return target.onmessage !== null || 
-                       (target._listeners && target._listeners.message) ||
-                       false;
+                return target.onmessage !== null ||
+                    (target._listeners && target._listeners.message) ||
+                    false;
             } catch (error) {
                 return false;
             }
@@ -716,7 +734,7 @@
          */
         stop() {
             this.isMonitoring = false;
-            
+
             // Restore original methods
             if (this.originalMethods.addEventListener) {
                 EventTarget.prototype.addEventListener = this.originalMethods.addEventListener;
@@ -729,7 +747,7 @@
 
     // Initialize the real-time detector
     const detector = new RealTimeHandlerDetector();
-    
+
     // Listen for iframe handler reports
     window.addEventListener('message', (event) => {
         if (event.data && event.data.type === 'frogPostIframeHandler') {

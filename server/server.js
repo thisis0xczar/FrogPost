@@ -89,7 +89,6 @@ const app = express();
 const server = http.createServer(app);
 
 app.use(cors());
-app.use(express.json({ limit: '50mb' }));
 app.use('/fuzzer', express.static(path.join(rootDir, 'fuzzer')));
 app.use(express.static(rootDir));
 
@@ -97,7 +96,31 @@ const port = 1337;
 let testData = null;
 let serverReady = false;
 
-app.post('/current-config', (req, res) => {
+// Lightweight, route-scoped JSON parser to avoid raw-body/iconv-lite issues
+function safeJson(req, res, next) {
+  if (req.method !== 'POST') return next();
+  const contentType = String(req.headers['content-type'] || '').toLowerCase();
+  if (!contentType.includes('application/json')) { req.body = {}; return next(); }
+  let raw = '';
+  req.setEncoding('utf8');
+  req.on('data', chunk => {
+    raw += chunk;
+    if (raw.length > 50 * 1024 * 1024) { // 50MB limit
+      res.status(413).type('text/plain').send('Payload too large');
+      try { req.destroy(); } catch(_) {}
+    }
+  });
+  req.on('end', () => {
+    if (!raw) { req.body = {}; return next(); }
+    try { req.body = JSON.parse(raw); return next(); }
+    catch (e) { return res.status(400).type('text/plain').send(`Invalid JSON: ${e.message}`); }
+  });
+  req.on('error', err => {
+    return res.status(400).type('text/plain').send(`Read error: ${err.message}`);
+  });
+}
+
+app.post('/current-config', safeJson, (req, res) => {
     testData = req.body;
     res.type('json').send(JSON.stringify({ success: true }));
 });
@@ -118,7 +141,7 @@ app.get('/', (req, res) => {
 
 // Old separate endpoints removed - replaced by /llm/unified-analyze
 
-app.post('/llm/unified-analyze', async (req, res) => {
+app.post('/llm/unified-analyze', safeJson, async (req, res) => {
   try {
     const { provider, model, apiKey } = req.body || {};
     const handlerCode = req.body?.context?.handlerCode || '';
