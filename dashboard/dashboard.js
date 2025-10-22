@@ -1,7 +1,7 @@
 /**
  * FrogPost Extension
  * Originally Created by thisis0xczar/Lidor 
- * Refined on: 2025-09-17
+ * Refined on: 2025-10-22
  */
 
 class SensitiveDataDetector {
@@ -755,7 +755,6 @@ const CALLBACK_URL_STORAGE_KEY = 'callback_url';
 const launchInProgressEndpoints = new Set();
 let uiUpdateTimer = null;
 const DEBOUNCE_DELAY = 150;
-let showOnlySilentIframes = false;
 let debuggerApiModeEnabled = false;
 const DEBUGGER_MODE_STORAGE_KEY = 'debuggerApiModeEnabled';
 const HANDLER_CONFIDENCE_THRESHOLD = 100;
@@ -770,6 +769,9 @@ function printBanner() {
                  |___/
 `, 'color: #4dd051; font-weight: bold;');
     log.info('Initializing dashboard...');
+    console.log('%c💡 Helper Functions:', 'color: #4dd051; font-weight: bold;');
+    console.log('%c  • clearFailedEndpoint(endpointKey) - Retry a previously failed endpoint', 'color: #999;');
+    console.log('%c  • clearAllFailedEndpoints() - Clear all failed endpoint cache', 'color: #999;');
 }
 
 function displayCurrentVersion() {
@@ -1129,7 +1131,6 @@ window.escapeHTML = escapeHTML;
 
 async function sendMessageTo(targetKey, button) {
     let success = false;
-    let iframe = null;
     
     try {
         if (!targetKey || !button) {
@@ -1156,95 +1157,87 @@ async function sendMessageTo(targetKey, button) {
         
         try {
             const targetUrl = new URL(targetKey);
-            const domainPattern = `*://${targetUrl.hostname}/*`;
-            const tabs = await chrome.tabs.query({ url: domainPattern });
-            console.log('Found webpage tabs for sendMessageTo:', tabs);
             
-            if (tabs.length > 0) {
-                const webpageTab = tabs[0];
-                console.log('Sending message to content script on webpage tab:', webpageTab.id);
-                const response = await chrome.tabs.sendMessage(webpageTab.id, {
-                    action: 'sendPostMessageToIframe',
-                    message: data,
-                    targetUrl: targetKey
-                });
-                
-                console.log('Content script response for sendMessageTo:', response);
-                
-                if (response && response.success) {
-                    console.log('Message sent to webpage iframe via content script:', data);
-                    return true;
-                } else {
-                    throw new Error(response?.error || 'Content script failed');
+            // Try 1: Look for tabs matching the target hostname (for main frames)
+            const domainPattern = `*://${targetUrl.hostname}/*`;
+            let tabs = await chrome.tabs.query({ url: domainPattern });
+            console.log('[FrogPost] Tabs matching', targetUrl.hostname, ':', tabs.length);
+            
+            // Try 2: If no match, it's likely an iframe - try ALL tabs with http/https
+            if (tabs.length === 0) {
+                console.log('[FrogPost] No direct match - target is likely an iframe. Checking all tabs...');
+                tabs = await chrome.tabs.query({ url: ['http://*/*', 'https://*/*'] });
+                console.log('[FrogPost] Found', tabs.length, 'total tabs to check');
+            }
+            
+            if (tabs.length === 0) {
+                throw new Error('No web pages open');
+            }
+            
+            // Try sending to each tab until one succeeds
+            let lastError = null;
+            let attemptsCount = 0;
+            for (const tab of tabs) {
+                try {
+                    // Skip chrome:// and other special URLs
+                    if (!tab.url || tab.url.startsWith('chrome://') || tab.url.startsWith('about:') || 
+                        tab.url.startsWith('chrome-extension://') || tab.url.startsWith('file://')) {
+                        continue;
+                    }
+                    
+                    attemptsCount++;
+                    console.log('[FrogPost] Trying tab', attemptsCount, ':', tab.id, '-', tab.url?.substring(0, 50));
+                    
+                    const response = await chrome.tabs.sendMessage(tab.id, {
+                        action: 'sendPostMessageToIframe',
+                        message: data,
+                        targetUrl: targetKey
+                    });
+                    
+                    console.log('[FrogPost] Response from tab', tab.id, ':', response);
+                    
+                    if (response && response.success) {
+                        console.log('[FrogPost] ✓ Message sent successfully via tab:', tab.id, response.debug || '');
+                        success = true;
+                        break;
+                    } else {
+                        lastError = response?.error || 'No iframe found';
+                        console.log('[FrogPost] Tab', tab.id, 'failed:', lastError);
+                    }
+                } catch (err) {
+                    // Content script not loaded or connection failed - this is expected, try next tab
+                    if (err.message && err.message.includes('Receiving end does not exist')) {
+                        console.log('[FrogPost] Tab', tab.id, 'has no content script, skipping');
+                    } else {
+                        console.log('[FrogPost] Tab', tab.id, 'error:', err.message);
+                    }
+                    lastError = err.message;
+                    continue;
                 }
-            } else {
-                console.log('No webpage tab found for sendMessageTo content script approach');
+            }
+            
+            if (!success) {
+                if (attemptsCount === 0) {
+                    throw new Error('No accessible web pages found. Please reload the target page.');
+                } else {
+                    throw new Error(`Tried ${attemptsCount} tabs but couldn't find iframe for ${targetUrl.hostname}. Try reloading the page.`);
+                }
             }
         } catch (error) {
-            console.log('Failed to send via content script in sendMessageTo, falling back to iframe method:', error);
-        }
-        
-        iframe = document.querySelector(`iframe[src*="${targetKey}"]`) || 
-                 document.querySelector(`iframe[src*="${new URL(targetKey).pathname}"]`) ||
-                 document.querySelector('iframe');
-        
-        if (!iframe) {
-            iframe = document.createElement('iframe');
-            iframe.style.display = 'none';
-            iframe.src = targetKey;
-            document.body.appendChild(iframe);
-            
-            await new Promise((resolve, reject) => {
-                const timer = setTimeout(() => {
-                    reject(new Error("Iframe load timeout"));
-                }, 5000);
-                
-                iframe.onload = () => {
-                    clearTimeout(timer);
-                    resolve();
-                };
-                
-                iframe.onerror = () => {
-                    clearTimeout(timer);
-                    reject(new Error("Iframe load error"));
-                };
-            });
-        }
-        
-        if (iframe.contentWindow) {
-            const targetOrigin = '*';
-            
-            console.log('Sending message to:', targetKey, 'Origin:', targetOrigin);
-            
-            iframe.contentWindow.postMessage(data, targetOrigin);
-            success = true;
-            
-            console.log('Message sent successfully:', data);
-        } else {
-            throw new Error("Iframe content window not accessible");
+            console.error('[FrogPost] Send failed:', error.message);
+            throw error;
         }
         
     } catch (error) {
-        console.error("Error in sendMessageTo:", error);
+        console.error("[FrogPost] Error in sendMessageTo:", error);
         success = false;
     } finally {
         button.classList.toggle('success', success);
         button.classList.toggle('error', !success);
         
-        const existingIframe = document.querySelector(`iframe[src*="${targetKey}"]`) || 
-                              document.querySelector(`iframe[src*="${new URL(targetKey).pathname}"]`) ||
-                              document.querySelector('iframe');
-        if (iframe && !existingIframe) {
-            setTimeout(() => {
-                if (document.body.contains(iframe)) {
-                    document.body.removeChild(iframe);
-                }
-            }, 2000);
-        }
-        
         setTimeout(() => {
             button.classList.remove('success', 'error');
-        }, 1000);
+        }, 1500);
     }
     
     return success;
@@ -1267,90 +1260,82 @@ async function sendMessageFromModal(targetKey, editedDataString, buttonElement, 
     buttonElement.disabled = true;
     buttonElement.classList.remove('success', 'error');
     
-    let iframe = null;
-    
     try {
-        try {
-            const targetUrl = new URL(targetKey);
-            const domainPattern = `*://${targetUrl.hostname}/*`;
-            const tabs = await chrome.tabs.query({ url: domainPattern });
-            console.log('Found webpage tabs:', tabs);
-            
-            if (tabs.length > 0) {
-                const webpageTab = tabs[0];
-                console.log('Sending message to content script on webpage tab:', webpageTab.id);
-                const response = await chrome.tabs.sendMessage(webpageTab.id, {
+        const targetUrl = new URL(targetKey);
+        
+        // Try 1: Look for tabs matching the target hostname (for main frames)
+        const domainPattern = `*://${targetUrl.hostname}/*`;
+        let tabs = await chrome.tabs.query({ url: domainPattern });
+        console.log('[FrogPost] Tabs matching', targetUrl.hostname, ':', tabs.length);
+        
+        // Try 2: If no match, it's likely an iframe - try ALL tabs with http/https
+        if (tabs.length === 0) {
+            console.log('[FrogPost] No direct match - target is likely an iframe. Checking all tabs...');
+            tabs = await chrome.tabs.query({ url: ['http://*/*', 'https://*/*'] });
+            console.log('[FrogPost] Found', tabs.length, 'total tabs to check');
+        }
+        
+        if (tabs.length === 0) {
+            throw new Error('No web pages open');
+        }
+        
+        // Try sending to each tab until one succeeds
+        let lastError = null;
+        let sent = false;
+        let attemptsCount = 0;
+        for (const tab of tabs) {
+            try {
+                // Skip chrome:// and other special URLs
+                if (!tab.url || tab.url.startsWith('chrome://') || tab.url.startsWith('about:') || 
+                    tab.url.startsWith('chrome-extension://') || tab.url.startsWith('file://')) {
+                    continue;
+                }
+                
+                attemptsCount++;
+                console.log('[FrogPost] Trying tab', attemptsCount, ':', tab.id, '-', tab.url?.substring(0, 50));
+                
+                const response = await chrome.tabs.sendMessage(tab.id, {
                     action: 'sendPostMessageToIframe',
                     message: dataToSend,
                     targetUrl: targetKey
                 });
                 
-                console.log('Content script response:', response);
+                console.log('[FrogPost] Response from tab', tab.id, ':', response);
                 
                 if (response && response.success) {
+                    console.log('[FrogPost] ✓ Edited message sent successfully via tab:', tab.id, response.debug || '');
                     buttonElement.textContent = 'Sent ✓';
                     buttonElement.classList.add('success');
-                    console.log('Message sent to webpage iframe via content script:', dataToSend);
-                    
                     await new Promise(res => setTimeout(res, 1000));
-                    return true;
+                    sent = true;
+                    break;
                 } else {
-                    throw new Error(response?.error || 'Content script failed');
+                    lastError = response?.error || 'No iframe found';
+                    console.log('[FrogPost] Tab', tab.id, 'failed:', lastError);
                 }
-            } else {
-                console.log('No webpage tab found for content script approach');
+            } catch (err) {
+                // Content script not loaded or connection failed - this is expected, try next tab
+                if (err.message && err.message.includes('Receiving end does not exist')) {
+                    console.log('[FrogPost] Tab', tab.id, 'has no content script, skipping');
+                } else {
+                    console.log('[FrogPost] Tab', tab.id, 'error:', err.message);
+                }
+                lastError = err.message;
+                continue;
             }
-        } catch (error) {
-            console.log('Failed to send via content script, falling back to iframe method:', error);
         }
         
-        iframe = document.querySelector(`iframe[src*="${targetKey}"]`) || 
-                 document.querySelector(`iframe[src*="${new URL(targetKey).pathname}"]`) ||
-                 document.querySelector('iframe');
-        
-        if (!iframe) {
-            iframe = document.createElement('iframe');
-            iframe.style.display = 'none';
-            iframe.src = targetKey;
-            document.body.appendChild(iframe);
-            
-            await new Promise((resolve, reject) => {
-                const timeoutId = setTimeout(() => {
-                    reject(new Error("Iframe load timeout"));
-                }, 5000);
-                
-                iframe.onload = () => {
-                    clearTimeout(timeoutId);
-                    resolve();
-                };
-                
-                iframe.onerror = (err) => {
-                    clearTimeout(timeoutId);
-                    reject(new Error("Iframe load error"));
-                };
-            });
+        if (!sent) {
+            if (attemptsCount === 0) {
+                throw new Error('No accessible web pages found. Please reload the target page.');
+            } else {
+                throw new Error(`Tried ${attemptsCount} tabs but couldn't find iframe for ${targetUrl.hostname}. Try reloading the page.`);
+            }
         }
         
-        if (iframe.contentWindow) {
-            const targetOrigin = '*';
-            
-            console.log('Sending message from modal to:', targetKey, 'Origin:', targetOrigin);
-            
-            iframe.contentWindow.postMessage(dataToSend, targetOrigin);
-            
-            buttonElement.textContent = 'Sent ✓';
-            buttonElement.classList.add('success');
-            
-            console.log('Message sent successfully from modal:', dataToSend);
-            
-            await new Promise(res => setTimeout(res, 1000));
-            return true;
-        } else {
-            throw new Error("Iframe content window not accessible");
-        }
-        
+        return true;
     } catch (error) {
-        console.error(`Error sending message from modal to ${targetKey}:`, error);
+        console.error('[FrogPost] Error in sendMessageFromModal:', error);
         buttonElement.textContent = 'Error ✕';
         buttonElement.classList.add('error');
         
@@ -1358,15 +1343,6 @@ async function sendMessageFromModal(targetKey, editedDataString, buttonElement, 
         return false;
         
     } finally {
-        const existingIframe = document.querySelector(`iframe[src*="${targetKey}"]`) || 
-                              document.querySelector(`iframe[src*="${new URL(targetKey).pathname}"]`) ||
-                              document.querySelector('iframe');
-        if (iframe && !existingIframe) {
-            if (iframe.parentNode) {
-                iframe.parentNode.removeChild(iframe);
-            }
-        }
-        
         if (buttonElement && !buttonElement.classList.contains('success')) {
             buttonElement.disabled = false;
             buttonElement.textContent = originalButtonText;
@@ -1628,7 +1604,7 @@ function createActionButtonContainer(endpointKey) {
         updateReportButton(reportButton, reportInfo || (canReport ? 'default' : 'disabled'), endpointKey);
     }
 
-    playButton.addEventListener("click", (e) => { e.stopPropagation(); handlePlayButton(endpointKey, playButton); });
+    playButton.addEventListener("click", (e) => { e.stopPropagation(); handlePlayButtonWithTimeout(endpointKey, playButton); });
     traceButton.addEventListener("click", (e) => { e.stopPropagation(); if (!traceButton.hasAttribute('disabled') && !traceButton.classList.contains('checking')) window.handleTraceButton(endpointKey, traceButton); });
     reportButton.addEventListener("click", (e) => { e.stopPropagation(); if (!reportButton.classList.contains('disabled')) handleReportButton(endpointKey); });
 
@@ -2107,6 +2083,12 @@ async function showSafetyConsentDialog(sensitivityAnalysis, costAnalysis) {
 function createEndpointGroupElement(parentKey, childKeysSet, filterText) {
     const hostElement = document.createElement("div");
     hostElement.className = "endpoint-host";
+    
+    // Check if group is collapsed
+    const isCollapsed = collapsedGroups.has(parentKey);
+    if (isCollapsed) {
+        hostElement.classList.add('collapsed');
+    }
 
     const hostRow = document.createElement("div");
     hostRow.className = "host-row";
@@ -2114,6 +2096,16 @@ function createEndpointGroupElement(parentKey, childKeysSet, filterText) {
     if (parentKey === window.frogPostState.activeUrl) {
         hostRow.classList.add('active');
     }
+    
+    // Add collapse/expand button
+    const collapseBtn = document.createElement("button");
+    collapseBtn.className = "group-collapse-btn";
+    collapseBtn.innerHTML = isCollapsed ? "▶" : "▼";
+    collapseBtn.title = isCollapsed ? "Expand group" : "Collapse group";
+    collapseBtn.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        await toggleGroupCollapse(parentKey);
+    });
 
     const hostName = document.createElement("span");
     hostName.className = "host-name";
@@ -2128,6 +2120,7 @@ function createEndpointGroupElement(parentKey, childKeysSet, filterText) {
 
     const parentButtonContainer = createActionButtonContainer(parentKey);
 
+    hostRow.appendChild(collapseBtn);
     hostRow.appendChild(hostName);
     hostRow.appendChild(parentButtonContainer);
     hostElement.appendChild(hostRow);
@@ -2140,14 +2133,7 @@ function createEndpointGroupElement(parentKey, childKeysSet, filterText) {
 
     sortedChildKeys.forEach((childKey) => {
         const childMatchesFilter = !filterText || childKey.toLowerCase().includes(filterText);
-        const isChildSilent = getMessageCount(childKey) === 0;
-
-        let showChild = false;
-        if (showOnlySilentIframes) {
-            showChild = isChildSilent && childMatchesFilter;
-        } else {
-            showChild = childMatchesFilter;
-        }
+        let showChild = childMatchesFilter;
 
         if (showChild) {
             const iframeRow = document.createElement("div");
@@ -2214,6 +2200,11 @@ function updateDashboardUI() {
         if (msg.destinationUrl && msg.destinationUrl.includes('frogpost_handler_extraction=true')) return;
         if (msg.topLevelUrl && msg.topLevelUrl.includes('frogpost_handler_extraction=true')) return;
         
+        // Filter out ignored endpoints
+        if (msg.origin && isEndpointIgnored(getStorageKeyForUrl(msg.origin))) return;
+        if (msg.destinationUrl && isEndpointIgnored(getStorageKeyForUrl(msg.destinationUrl))) return;
+        if (msg.topLevelUrl && isEndpointIgnored(getStorageKeyForUrl(msg.topLevelUrl))) return;
+        
         if (!msg.topLevelUrl) {
             if(msg.origin) allKnownKeys.add(getStorageKeyForUrl(msg.origin));
             if(msg.destinationUrl) allKnownKeys.add(getStorageKeyForUrl(msg.destinationUrl));
@@ -2254,6 +2245,18 @@ function updateDashboardUI() {
     let displayedEndpointCount = 0;
     const renderedKeys = new Set();
 
+    // Render Custom URLs group first if it exists
+    if (customUrlsList && customUrlsList.length > 0) {
+        const customUrlsSet = new Set(customUrlsList.map(url => getStorageKeyForUrl(url)));
+        const customUrlsGroupElement = createEndpointGroupElement('Custom URLs', customUrlsSet, filterText);
+        if (customUrlsGroupElement) {
+            customUrlsGroupElement.classList.add('custom-urls-group');
+            fragment.appendChild(customUrlsGroupElement);
+            displayedEndpointCount++;
+            customUrlsSet.forEach(key => renderedKeys.add(key));
+        }
+    }
+
     const sortedTopLevelKeys = Array.from(groupsByTopLevel.keys()).filter(k => !isLocalDevUrl(k)).sort();
 
     sortedTopLevelKeys.forEach(topLevelKey => {
@@ -2265,12 +2268,6 @@ function updateDashboardUI() {
         const childrenMatchFilter = !filterText || Array.from(childKeysSet).some(childKey => childKey.toLowerCase().includes(filterText));
 
         let showGroup = topLevelMatchesFilter || childrenMatchFilter;
-
-        if (showOnlySilentIframes) {
-            const isTopLevelConsideredSilent = getMessageCount(topLevelKey) === 0;
-            const hasVisibleSilentChild = Array.from(childKeysSet).some(ck => getMessageCount(ck) === 0 && (!filterText || ck.toLowerCase().includes(filterText)));
-            showGroup = hasVisibleSilentChild;
-        }
 
         if (showGroup) {
             const endpointGroupElement = createEndpointGroupElement(topLevelKey, childKeysSet, filterText);
@@ -2287,8 +2284,7 @@ function updateDashboardUI() {
         if (isLocalDevUrl(key)) return;
         if (!renderedKeys.has(key)) {
             const matchesFilter = !filterText || key.toLowerCase().includes(filterText);
-            const isSilent = getMessageCount(key) === 0;
-            let showStandalone = matchesFilter && (!showOnlySilentIframes || isSilent);
+            let showStandalone = matchesFilter;
 
             if (showStandalone) {
                 const endpointGroupElement = createEndpointGroupElement(key, new Set(), filterText);
@@ -2311,7 +2307,7 @@ function updateDashboardUI() {
     } else {
         noEndpointsDiv.style.display = 'block';
         const hasAnyData = window.frogPostState.messages.length > 0 || knownHandlerEndpoints.size > 0 || window.frogPostState.loadedData.urls.size > 0;
-        if (filterText || showOnlySilentIframes) {
+        if (filterText) {
             noEndpointsDiv.textContent = `No endpoints match active filters.`;
         } else if (hasAnyData) {
             noEndpointsDiv.textContent = "No endpoint groups to display based on captured messages.";
@@ -2361,12 +2357,42 @@ function initializeMessageHandling() {
 
                         if (!isTestMessage) {
                             const existingIndex = window.frogPostState.messages.findIndex(m => m.messageId === newMsg.messageId);
+                            const isNewEndpoint = existingIndex < 0;
+                            
                             if (existingIndex >= 0) {
                                 window.frogPostState.messages[existingIndex] = newMsg;
                             } else {
                                 window.frogPostState.messages.push(newMsg);
                             }
                             needsUiUpdate = true;
+                            
+                            // Trigger Auto Pilot for new iframe if enabled
+                            if (isNewEndpoint && autoPilotEnabled && !urlScanInProgress) {
+                                const endpointKey = getStorageKeyForUrl(newMsg.origin || newMsg.destinationUrl);
+                                // Skip if already scanned/scanning, is localhost, or currently being scanned
+                                if (endpointKey && 
+                                    !endpointKey.startsWith('http://127.0.0.1:1337/') && 
+                                    !autoPilotScannedEndpoints.has(endpointKey) &&
+                                    !autoPilotActiveScans.has(endpointKey)) {
+                                    
+                                    // Mark as scanning immediately to prevent duplicate triggers
+                                    autoPilotScannedEndpoints.add(endpointKey);
+                                    autoPilotActiveScans.add(endpointKey); // Per-endpoint lock
+                                    
+                                    // Persist to storage immediately to prevent duplicate scans on refresh
+                                    chrome.storage.sync.set({ 
+                                        [AUTOPILOT_SCANNED_KEY]: Array.from(autoPilotScannedEndpoints) 
+                                    }).catch(err => log.warn('[Auto Pilot] Failed to save scanned endpoints:', err));
+                                    
+                                    // Trigger scan immediately (no delay needed with per-endpoint locks)
+                                    triggerAutoPilotScan(endpointKey).catch(err => {
+                                        log.error(`[Auto Pilot] Failed to auto-scan ${endpointKey}:`, err);
+                                    }).finally(() => {
+                                        // Release per-endpoint lock when done
+                                        autoPilotActiveScans.delete(endpointKey);
+                                    });
+                                }
+                            }
                         }
                     }
                     break;
@@ -2500,10 +2526,14 @@ function setupUIControls() {
         requestUiUpdate(); 
     });
     document.getElementById("exportMessages")?.addEventListener("click", () => { const sanitizedMessages = window.frogPostState.messages.map(msg => ({ origin: msg.origin, destinationUrl: msg.destinationUrl, timestamp: msg.timestamp, data: sanitizeMessageData(msg.data), messageType: msg.messageType, messageId: msg.messageId })); const blob = new Blob([JSON.stringify(sanitizedMessages, null, 2)], { type: "application/json" }); const url = URL.createObjectURL(blob); const a = document.createElement("a"); a.href = url; a.download = "frogpost_messages.json"; a.click(); URL.revokeObjectURL(url); });
-    document.getElementById("checkAll")?.addEventListener("click", checkAllEndpoints); const debugButton = document.getElementById("debugToggle"); if (debugButton) { debugButton.addEventListener("click", toggleDebugMode); debugButton.textContent = debugMode ? 'Debug: ON' : 'Debug: OFF'; debugButton.className = debugMode ? 'control-button debug-on' : 'control-button debug-off'; }
+ const debugButton = document.getElementById("debugToggle"); if (debugButton) { debugButton.addEventListener("click", toggleDebugMode); debugButton.textContent = debugMode ? 'Debug: ON' : 'Debug: OFF'; debugButton.className = debugMode ? 'control-button debug-on' : 'control-button debug-off'; }
     document.getElementById("refreshMessages")?.addEventListener("click", () => { chrome.runtime.sendMessage({ type: "fetchInitialState" }, (response) => { if (response?.success) { if (response.messages) { window.frogPostState.messages.length = 0; window.frogPostState.messages.push(...response.messages); } if (response.handlerEndpointKeys) { knownHandlerEndpoints.clear(); endpointsWithHandlers.clear(); response.handlerEndpointKeys.forEach(key => { knownHandlerEndpoints.add(key); endpointsWithHandlers.add(key); }); } log.info("Dashboard refreshed."); requestUiUpdate(); } else log.error("Failed refresh:", response?.error); }); });
     const uploadPayloadsButton = document.getElementById("uploadCustomPayloadsBtn"); const payloadFileInput = document.getElementById("customPayloadsFile"); if(uploadPayloadsButton && payloadFileInput){ uploadPayloadsButton.addEventListener('click', () => payloadFileInput.click()); payloadFileInput.addEventListener('change', handlePayloadFileSelect); }
     document.getElementById("clearCustomPayloadsBtn")?.addEventListener('click', clearCustomPayloads);
+    
+    // Auto Pilot & URL List button listeners
+    document.getElementById("uploadUrlListBtn")?.addEventListener("click", showUploadUrlModal);
+    document.getElementById("autoPilotToggle")?.addEventListener("click", toggleAutoPilot);
     document.getElementById("openOptionsBtn")?.addEventListener("click", () => { if (chrome.runtime.openOptionsPage) chrome.runtime.openOptionsPage(); else window.open(chrome.runtime.getURL("../options/options.html")); });
     const debuggerModeBtn = document.getElementById('toggleDebuggerApiMode');
     if (debuggerModeBtn) {
@@ -2877,7 +2907,56 @@ async function checkCSPHeaders(url) {
     }
 }
 
-async function handlePlayButton(endpoint, button, skipCheck = false) {
+// Timeout configuration for Play extraction process
+const PLAY_TIMEOUT_MS = 45000; // 45 seconds total timeout per endpoint
+
+// Wrapper function with timeout and failed endpoint check
+async function handlePlayButtonWithTimeout(endpoint, button, skipCheck = false, silentMode = false, hideFromUser = false) {
+    const endpointKey = button.getAttribute('data-endpoint') || endpoint;
+    
+    // Check if endpoint previously failed
+    const failureInfo = isEndpointFailed(endpointKey);
+    if (failureInfo) {
+        const elapsed = Math.round((Date.now() - failureInfo.timestamp) / 1000 / 60);
+        log.warn(`[Play] Skipping ${endpointKey} - previously failed: ${failureInfo.reason} (${elapsed}m ago)`);
+        
+        updateButton(button, 'error', { 
+            errorMessage: `Skipped: ${failureInfo.reason}`,
+            previouslyFailed: true
+        });
+        
+        if (!silentMode && !hideFromUser) {
+            showToastNotification(`⏭️ Skipped (failed ${elapsed}m ago): ${failureInfo.reason}`, 'warning', 4000);
+        }
+        return;
+    }
+    
+    // Wrap the actual handler with a timeout
+    const timeoutPromise = new Promise((_, reject) => {
+        setTimeout(() => reject(new Error(`Timeout: Play extraction exceeded ${PLAY_TIMEOUT_MS / 1000}s`)), PLAY_TIMEOUT_MS);
+    });
+    
+    try {
+        await Promise.race([
+            handlePlayButton(endpoint, button, skipCheck, silentMode, hideFromUser),
+            timeoutPromise
+        ]);
+    } catch (error) {
+        if (error.message.includes('Timeout')) {
+            log.error(`[Play] Timeout for ${endpointKey}: ${error.message}`);
+            await markEndpointAsFailed(endpointKey, 'Timeout (45s exceeded)');
+            updateButton(button, 'error', { errorMessage: 'Timeout (45s)' });
+            if (!silentMode && !hideFromUser) {
+                showToastNotification(`⏱️ Timeout: ${endpointKey} took too long`, 'error', 5000);
+            }
+        } else {
+            // Re-throw non-timeout errors
+            throw error;
+        }
+    }
+}
+
+async function handlePlayButton(endpoint, button, skipCheck = false, silentMode = false, hideFromUser = false) {
     const originalFullEndpoint = endpoint;
     const endpointKey = button.getAttribute('data-endpoint');
     if (!endpointKey) {
@@ -2893,8 +2972,10 @@ async function handlePlayButton(endpoint, button, skipCheck = false) {
         launchInProgressEndpoints.add(endpointKey);
         let launchSuccess = false;
         try {
-            updateButton(button, 'launching', currentStateInfo.options);
-            showToastNotification("Preparing Fuzzer Environment...", "info", 3000);
+            if (!hideFromUser) {
+                updateButton(button, 'launching', currentStateInfo.options);
+                showToastNotification("Preparing Fuzzer Environment...", "info", 3000);
+            }
             const successfulUrlStorageKey = `successful-url-${endpointKey}`;
             let successfulUrlResult = await new Promise(resolve => chrome.storage.local.get(successfulUrlStorageKey, resolve));
             let successfulUrl = successfulUrlResult[successfulUrlStorageKey];
@@ -3002,36 +3083,44 @@ async function handlePlayButton(endpoint, button, skipCheck = false) {
                 log.warn(`[Play] No pre-detected handler found in local storage for extension URL ${analysisStorageKey}. The 'Play' action for extensions currently relies on prior auto-detection.`);
             }
         } else if (!skipCheck) {
-            updateButton(button, 'csp');
-            showToastNotification("Checking CSP compatibility for iframe embedding...", "info", 3000);
+            if (!hideFromUser) {
+                updateButton(button, 'csp');
+            }
+            if (!silentMode && !hideFromUser) {
+                showToastNotification("Checking CSP compatibility for iframe embedding...", "info", 3000);
+            }
             const cspResult = await checkCSPHeaders(endpointUrlForAnalysis);
             log.info(`[Play] Enhanced CSP check result:`, cspResult);
 
             if (!cspResult.canEmbed) {
                 log.warn(`[Play] Embedding check failed for ${endpointUrlForAnalysis}: ${cspResult.reason}`);
+                
+                // In silent mode (Auto Pilot / URL Upload), skip without showing modal
+                if (silentMode) {
+                    log.info(`[Play] Silent mode (Auto Pilot/URL Upload): Skipping CSP-blocked endpoint ${endpointUrlForAnalysis}`);
+                    await markEndpointAsFailed(endpointKey, `CSP: ${cspResult.reason}`);
+                    return; // Don't proceed with handler extraction
+                }
+                
+                // In normal mode (manual Play button), ALWAYS show the query modal for CSP failures
                 showToastNotification(`Embedding blocked by: ${cspResult.reason}`, 'error');
-                const isExplicitlyBlocked = cspResult.reason?.includes('DENY') || cspResult.reason?.includes("'none'");
-
-                if (!isExplicitlyBlocked) {
-                    const modalResult = await showUrlModificationModal(endpointUrlForAnalysis, cspResult.reason);
-                    if (modalResult.action === 'retry' && modalResult.modifiedUrl) {
-                        log.info("[Play] User modified URL after header block. Retrying check...");
-                        endpointUrlForAnalysis = modalResult.modifiedUrl;
-                        analysisStorageKey = getStorageKeyForUrl(endpointUrlForAnalysis);
-                        launchInProgressEndpoints.delete(endpointKey);
-                        await handlePlayButton(endpointUrlForAnalysis, button, false);
-                        return;
-                    } else if (modalResult.action === 'continue') {
-                        log.warn(`[Play] User chose to continue analysis despite header restriction: ${cspResult.reason}`);
-                        proceedSilentlyOnError = true;
-                        updateButton(button, 'warning', { errorMessage: `Proceeding despite block: ${cspResult.reason}` });
-                    } else {
-                        updateButton(button, 'start');
-                        throw new Error("Analysis stopped due to embedding restriction.");
-                    }
+                const modalResult = await showUrlModificationModal(endpointUrlForAnalysis, cspResult.reason);
+                
+                if (modalResult.action === 'retry' && modalResult.modifiedUrl) {
+                    log.info("[Play] User modified URL after CSP block. Retrying check...");
+                    endpointUrlForAnalysis = modalResult.modifiedUrl;
+                    analysisStorageKey = getStorageKeyForUrl(endpointUrlForAnalysis);
+                    launchInProgressEndpoints.delete(endpointKey);
+                    await handlePlayButton(endpointUrlForAnalysis, button, false, silentMode);
+                    return;
+                } else if (modalResult.action === 'continue') {
+                    log.warn(`[Play] User chose to continue analysis despite CSP block: ${cspResult.reason}`);
+                    proceedSilentlyOnError = true;
+                    updateButton(button, 'warning', { errorMessage: `Proceeding despite block: ${cspResult.reason}` });
                 } else {
-                    updateButton(button, 'error', { errorMessage: `Embedding blocked: ${cspResult.reason}` });
-                    throw new Error(`Embedding blocked by policy: ${cspResult.reason}`);
+                    // User cancelled
+                    updateButton(button, 'start');
+                    return;
                 }
             }
 
@@ -3069,8 +3158,6 @@ async function handlePlayButton(endpoint, button, skipCheck = false) {
         const successfulUrlStorageKey = `successful-url-${analysisStorageKey}`;
         await chrome.storage.local.set({ [successfulUrlStorageKey]: successfullyAnalyzedUrl });
 
-        const extractor = new HandlerExtractor().initialize(successfullyAnalyzedUrl, originalMessages);
-
         analysisErrorMsg = '';
 
         if (isExtensionUrl){
@@ -3079,48 +3166,66 @@ async function handlePlayButton(endpoint, button, skipCheck = false) {
             }
         } else {
             try {
-                // Enhanced extraction: Try iframe-based first, fallback to static
-                updateButton(button, 'analyze', { message: 'Loading page in iframe...' });
-                showToastNotification("Loading page dynamically to capture webpack chunks...", "info", 5000);
-
-                // Enhanced hybrid approach: Use monitored dynamic scripts + static analysis
-                updateButton(button, 'analyze', { message: 'Collecting webpack chunks...' });
-                showToastNotification("🔧 Starting strict iframe extraction with CSP detection...", "info", 3000);
-
-                // Use strict iframe-based analysis with CSP detection and webpack monitoring
-                potentialHandlers = await extractor.extractWithStrictIframe(successfullyAnalyzedUrl, extractor.messageKeys, extractor.messageTypes, extractor.messageValues);
-
-                if (potentialHandlers && potentialHandlers.length > 0) {
-                    log.success(`[Strict Iframe] Successfully extracted ${potentialHandlers.length} handlers using iframe+webpack monitoring`);
-                } else {
-                    log.warn(`[Strict Iframe] No handlers found with strict iframe method - trying hybrid fallback`);
-
-                    // Fallback to hybrid static + dynamic analysis
-                    showToastNotification("Falling back to hybrid analysis (static + monitored dynamic scripts)...", "info", 2000);
-                    potentialHandlers = await extractor.extractStaticallyWithContext(successfullyAnalyzedUrl, extractor.messageKeys, extractor.messageTypes, extractor.messageValues);
-
-                    if (potentialHandlers && potentialHandlers.length > 0) {
-                        log.success(`[Hybrid Fallback] Successfully extracted ${potentialHandlers.length} handlers using enhanced static+dynamic analysis`);
-                    } else {
-                        log.warn(`[Hybrid Fallback] No handlers found with fallback method either`);
-                    }
+                // ============================================================
+                // FROGPOST APPROACH: Check for pre-extracted handlers FIRST
+                // ============================================================
+                if (!hideFromUser) {
+                    updateButton(button, 'analyze', { message: 'Checking for pre-captured handlers...' });
+                    showToastNotification("🐸 Checking runtime telemetry...", "info", 2000);
                 }
 
-                if (potentialHandlers.length > 0) {
-                    log.info(`[Play] Static handler extraction found ${potentialHandlers.length} handlers.`);
-                    showToastNotification(`✅ Found ${potentialHandlers.length} handlers`, "success", 4000);
+                // Try to retrieve pre-extracted handler from DOM agent telemetry
+                const preExtractedResult = await chrome.runtime.sendMessage({
+                    type: 'getPreExtractedHandler',
+                    payload: { endpointKey: analysisStorageKey }
+                });
 
-                    // Select best handler using scoring (no breakpoint validation)
-                    foundHandlerObject = extractor.getBestHandler(potentialHandlers);
-                    if (foundHandlerObject) {
-                        log.info(`[Play] Selected best handler via context-aware scoring.`);
-                    } else {
-                        log.warn(`[Play] No suitable handler found after scoring.`);
+                if (preExtractedResult?.success && preExtractedResult?.handler) {
+                    // SUCCESS: Found pre-extracted handler from DOM agent!
+                    foundHandlerObject = preExtractedResult.handler;
+                    log.success(`[FrogPost] Retrieved pre-extracted handler from DOM agent telemetry!`);
+                    log.info(`[FrogPost] Handler source: ${foundHandlerObject.source}, Score: ${foundHandlerObject.score}`);
+                    
+                    if (!hideFromUser) {
+                        showToastNotification("✅ Handler retrieved from telemetry", "success", 3000);
                     }
                 } else {
-                    log.warn("[Play] Static handler extraction found no handlers.");
-                    showToastNotification("⚠️ No handlers found", "warning", 4000);
-                    foundHandlerObject = null;
+                    // Fallback: No pre-extracted handler found
+                    log.warn("[Play] No pre-extracted handler found in telemetry. Using slim fallback...");
+                    
+                    if (!hideFromUser) {
+                        updateButton(button, 'analyze', { message: 'Using fallback extraction...' });
+                        showToastNotification("⚠️ No telemetry found. Using AST fallback...", "warning", 3000);
+                    }
+
+                    // Initialize slim extractor for fallback
+                    const extractor = new HandlerExtractor().initialize(successfullyAnalyzedUrl, originalMessages);
+
+                    // SLIM FALLBACK: AST-only analysis (no debugger, no iframe loading)
+                    potentialHandlers = await extractor.extractStaticallyWithContext(
+                        successfullyAnalyzedUrl, 
+                        extractor.messageKeys, 
+                        extractor.messageTypes, 
+                        extractor.messageValues
+                    );
+
+                    if (potentialHandlers && potentialHandlers.length > 0) {
+                        log.info(`[Slim Fallback] Found ${potentialHandlers.length} handlers via AST analysis`);
+                        foundHandlerObject = extractor.getBestHandler(potentialHandlers);
+                        
+                        if (foundHandlerObject) {
+                            log.info(`[Slim Fallback] Selected best handler via scoring`);
+                            if (!hideFromUser) {
+                                showToastNotification(`✅ Handler found via fallback`, "success", 3000);
+                            }
+                        }
+                    } else {
+                        log.warn("[Play] Slim fallback found no handlers");
+                        foundHandlerObject = null;
+                        if (!hideFromUser) {
+                            showToastNotification("⚠️ No handlers found", "warning", 4000);
+                        }
+                    }
                 }
 
             } catch (discoveryError) {
@@ -3128,7 +3233,9 @@ async function handlePlayButton(endpoint, button, skipCheck = false) {
                 analysisErrorMsg = discoveryError.message;
                 potentialHandlers = [];
                 foundHandlerObject = null;
-                showToastNotification("Handler extraction failed", "error", 4000);
+                if (!hideFromUser) {
+                    showToastNotification("Handler extraction failed", "error", 4000);
+                }
             }
         }
 
@@ -4948,7 +5055,15 @@ async function displayReport(reportData, panel) {
             content.appendChild(structureSection);
         }
 
-        const bottomButtonContainer = document.createElement('div'); bottomButtonContainer.style.cssText = 'margin-top:20px; display: flex; justify-content: center; gap: 15px;'; const exportJsonBtn = document.createElement('button'); exportJsonBtn.textContent = 'Export JSON'; exportJsonBtn.className = 'control-button secondary-button'; exportJsonBtn.addEventListener('click', (e) => { e.stopPropagation(); try { const jsonData = JSON.stringify(reportData, null, 2); const blob = new Blob([jsonData], { type: 'application/json' }); const url = URL.createObjectURL(blob); const a = document.createElement('a'); const safeFilename = (analysisStorageKey || 'frogpost_report').replace(/[^a-z0-9_\-.]/gi, '_'); a.href = url; a.download = `${safeFilename}.json`; document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url); } catch (exportError) { alert("Failed to export report as JSON."); } }); const closeBtnInside = document.createElement('button'); closeBtnInside.textContent = 'Close Report'; closeBtnInside.className = 'control-button secondary-button'; closeBtnInside.onclick = () => { document.querySelector('.trace-panel-backdrop')?.remove(); panel.remove(); }; bottomButtonContainer.appendChild(exportJsonBtn); bottomButtonContainer.appendChild(closeBtnInside); content.appendChild(bottomButtonContainer);
+        const bottomButtonContainer = document.createElement('div'); bottomButtonContainer.style.cssText = 'margin-top:20px; display: flex; justify-content: center; gap: 15px;'; 
+        
+        const exportJsonBtn = document.createElement('button'); exportJsonBtn.textContent = 'Export JSON'; exportJsonBtn.className = 'control-button secondary-button'; exportJsonBtn.addEventListener('click', (e) => { e.stopPropagation(); try { const jsonData = JSON.stringify(reportData, null, 2); const blob = new Blob([jsonData], { type: 'application/json' }); const url = URL.createObjectURL(blob); const a = document.createElement('a'); const safeFilename = (analysisStorageKey || 'frogpost_report').replace(/[^a-z0-9_\-.]/gi, '_'); a.href = url; a.download = `${safeFilename}.json`; document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url); } catch (exportError) { alert("Failed to export report as JSON."); } }); 
+        
+        const ignoreBtn = document.createElement('button'); ignoreBtn.textContent = '🚫 Add to Ignore List'; ignoreBtn.className = 'control-button danger-button'; ignoreBtn.title = 'Hide this endpoint from results'; ignoreBtn.addEventListener('click', async (e) => { e.stopPropagation(); if (confirm(`Add "${analysisStorageKey}" to ignore list?\n\nThis endpoint will be hidden from the dashboard until removed from the ignore list.`)) { await addToIgnoreList(analysisStorageKey); showToastNotification(`Endpoint added to ignore list`, 'success', 3000); } }); 
+        
+        const closeBtnInside = document.createElement('button'); closeBtnInside.textContent = 'Close Report'; closeBtnInside.className = 'control-button secondary-button'; closeBtnInside.onclick = () => { document.querySelector('.trace-panel-backdrop')?.remove(); panel.remove(); }; 
+        
+        bottomButtonContainer.appendChild(exportJsonBtn); bottomButtonContainer.appendChild(ignoreBtn); bottomButtonContainer.appendChild(closeBtnInside); content.appendChild(bottomButtonContainer);
         attachReportEventListeners(panel, reportData);
 
     } catch (renderError) {
@@ -5051,13 +5166,6 @@ async function restoreLastReport(endpointKey) {
   }
 }
 
-async function checkAllEndpoints() {
-    const endpointButtons = document.querySelectorAll('.iframe-row .iframe-check-button');
-    for (const button of endpointButtons) {
-        const endpointKey = button.getAttribute('data-endpoint');
-        if (endpointKey && !button.classList.contains('green') && !button.classList.contains('success')) {
-            try { await handlePlayButton(endpointKey, button);
-                await new Promise(resolve => setTimeout(resolve, 500)); } catch {} } } }
 
 async function populateInitialHandlerStates() {
     log.debug("Populating initial handler states...");
@@ -5119,10 +5227,22 @@ async function checkServerStatus() {
 }
 
 function updateServerStatusUI() {
-    const inline = document.getElementById('server-status-inline');
+    const badge = document.getElementById('server-status-badge');
+    if (!badge) return;
+    
     const isRunning = serverStatus.running;
-    if (inline) {
-        inline.innerHTML = `<span style="width:8px;height:8px;border-radius:50%;display:inline-block;background:${isRunning ? '#22c55e' : '#ef4444'}"></span><span>${isRunning ? 'Server: ✅ Running' : 'Server: ❌ Stopped'}</span>`;
+    const statusText = badge.querySelector('.status-text');
+    
+    // Remove all status classes
+    badge.classList.remove('online', 'offline', 'checking');
+    
+    // Add appropriate class
+    if (isRunning) {
+        badge.classList.add('online');
+        if (statusText) statusText.textContent = 'Server: Online';
+    } else {
+        badge.classList.add('offline');
+        if (statusText) statusText.textContent = 'Server: Offline';
     }
 }
 
@@ -5174,9 +5294,86 @@ function addServerStatusToUI() {
     document.head.appendChild(style);
 }
 
+// Clean extension storage on load (development/testing)
+async function cleanExtensionStorage() {
+    try {
+        log.info('[Storage Cleanup] Starting extension storage cleanup...');
+        
+        // Get all storage keys
+        const allLocalStorage = await chrome.storage.local.get(null);
+        const allSessionStorage = await chrome.storage.session.get(null);
+        const allSyncStorage = await chrome.storage.sync.get(null);
+        
+        // Keys to preserve (settings that should persist)
+        // Note: Auto Pilot state is intentionally NOT preserved - it resets to OFF on load
+        const preserveKeys = [
+            AUTOPILOT_WARNING_SHOWN_KEY,
+            DEBUGGER_MODE_STORAGE_KEY,
+            'llm_provider',
+            'llm_model',
+            'llm_api_key'
+        ];
+        
+        // Clear local storage except preserved keys
+        const localKeysToRemove = Object.keys(allLocalStorage).filter(key => !preserveKeys.includes(key));
+        if (localKeysToRemove.length > 0) {
+            await chrome.storage.local.remove(localKeysToRemove);
+            log.info(`[Storage Cleanup] Cleared ${localKeysToRemove.length} local storage keys`);
+        }
+        
+        // Clear session storage except preserved keys
+        const sessionKeysToRemove = Object.keys(allSessionStorage).filter(key => !preserveKeys.includes(key));
+        if (sessionKeysToRemove.length > 0) {
+            await chrome.storage.session.remove(sessionKeysToRemove);
+            log.info(`[Storage Cleanup] Cleared ${sessionKeysToRemove.length} session storage keys`);
+        }
+        
+        // Clear sync storage except preserved keys
+        const syncKeysToRemove = Object.keys(allSyncStorage).filter(key => !preserveKeys.includes(key));
+        if (syncKeysToRemove.length > 0) {
+            await chrome.storage.sync.remove(syncKeysToRemove);
+            log.info(`[Storage Cleanup] Cleared ${syncKeysToRemove.length} sync storage keys`);
+        }
+        
+        // Clear in-memory state
+        window.frogPostState.messages.length = 0;
+        knownHandlerEndpoints.clear();
+        endpointsWithHandlers.clear();
+        endpointsWithDetectedHandlers.clear();
+        buttonStates.clear();
+        reportButtonStates.clear();
+        traceButtonStates.clear();
+        launchInProgressEndpoints.clear();
+        customUrlsList = [];
+        ignoredEndpoints.clear();
+        autoPilotScannedEndpoints.clear();
+        autoPilotActiveScans.clear();
+        
+        // Reset Auto Pilot to OFF by default on load (do this AFTER cleanup)
+        autoPilotEnabled = false;
+        autoPilotScanInProgress = false; // Deprecated, kept for compatibility
+        await chrome.storage.sync.set({ 
+            [AUTOPILOT_ENABLED_KEY]: false,
+            [AUTOPILOT_SCANNED_KEY]: [],
+            [URL_SCAN_IN_PROGRESS_KEY]: false 
+        });
+        
+        log.success('[Storage Cleanup] Extension storage cleaned successfully');
+        log.info('[Storage Cleanup] Auto Pilot reset to OFF');
+    } catch (error) {
+        log.error('[Storage Cleanup] Failed to clean storage:', error);
+    }
+}
+
 window.addEventListener('DOMContentLoaded', async () => {
     printBanner();
     displayCurrentVersion();
+    
+    // Clean storage on load (comment out in production if needed)
+    await cleanExtensionStorage();
+    
+    // Initialize Auto Pilot state
+    await initializeAutoPilot();
     
     await checkServerStatus();
     updateServerStatusUI();
@@ -5192,13 +5389,6 @@ window.addEventListener('DOMContentLoaded', async () => {
     const filterInput = document.getElementById('endpointFilterInput');
     if (filterInput) { filterInput.addEventListener('input', requestUiUpdate); }
     else { log.error("Could not find endpoint filter input element (#endpointFilterInput)"); }
-    const silentFilterToggle = document.getElementById('silentFilterToggle');
-    if (silentFilterToggle) {
-        const textSpan = silentFilterToggle.querySelector('.button-text');
-        if (textSpan) textSpan.textContent = showOnlySilentIframes ? 'Silent Listeners On' : 'Silent Listeners Off';
-        silentFilterToggle.classList.toggle('active', showOnlySilentIframes);
-        silentFilterToggle.addEventListener('click', () => { showOnlySilentIframes = !showOnlySilentIframes; silentFilterToggle.classList.toggle('active', showOnlySilentIframes); const textSpan = silentFilterToggle.querySelector('.button-text'); if (textSpan) textSpan.textContent = showOnlySilentIframes ? 'Silent Listeners On' : 'Silent Listeners Off'; log.info(`Silent iframe filter ${showOnlySilentIframes ? 'ON (Showing ONLY Silent)' : 'OFF (Showing All)'}.`); requestUiUpdate(); });
-    } else { log.error("Could not find silent filter toggle button (#silentFilterToggle)"); }
 
     initializeMessageHandling();
     addTraceReportStyles();
@@ -5650,7 +5840,15 @@ async function renderReportUI(traceReportData, initialPayloads = null) {
             content.appendChild(structureSection);
         }
 
-        const bottomButtonContainer = document.createElement('div'); bottomButtonContainer.style.cssText = 'margin-top:20px; display: flex; justify-content: center; gap: 15px;'; const exportJsonBtn = document.createElement('button'); exportJsonBtn.textContent = 'Export JSON'; exportJsonBtn.className = 'control-button secondary-button'; exportJsonBtn.addEventListener('click', (e) => { e.stopPropagation(); try { const jsonData = JSON.stringify(reportData, null, 2); const blob = new Blob([jsonData], { type: 'application/json' }); const url = URL.createObjectURL(blob); const a = document.createElement('a'); const safeFilename = (analysisStorageKey || 'frogpost_report').replace(/[^a-z0-9_\-.]/gi, '_'); a.href = url; a.download = `${safeFilename}.json`; document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url); } catch (exportError) { alert("Failed to export report as JSON."); } }); const closeBtnInside = document.createElement('button'); closeBtnInside.textContent = 'Close Report'; closeBtnInside.className = 'control-button secondary-button'; closeBtnInside.onclick = () => { document.querySelector('.trace-panel-backdrop')?.remove(); panel.remove(); }; bottomButtonContainer.appendChild(exportJsonBtn); bottomButtonContainer.appendChild(closeBtnInside); content.appendChild(bottomButtonContainer);
+        const bottomButtonContainer = document.createElement('div'); bottomButtonContainer.style.cssText = 'margin-top:20px; display: flex; justify-content: center; gap: 15px;'; 
+        
+        const exportJsonBtn = document.createElement('button'); exportJsonBtn.textContent = 'Export JSON'; exportJsonBtn.className = 'control-button secondary-button'; exportJsonBtn.addEventListener('click', (e) => { e.stopPropagation(); try { const jsonData = JSON.stringify(reportData, null, 2); const blob = new Blob([jsonData], { type: 'application/json' }); const url = URL.createObjectURL(blob); const a = document.createElement('a'); const safeFilename = (analysisStorageKey || 'frogpost_report').replace(/[^a-z0-9_\-.]/gi, '_'); a.href = url; a.download = `${safeFilename}.json`; document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url); } catch (exportError) { alert("Failed to export report as JSON."); } }); 
+        
+        const ignoreBtn = document.createElement('button'); ignoreBtn.textContent = '🚫 Add to Ignore List'; ignoreBtn.className = 'control-button danger-button'; ignoreBtn.title = 'Hide this endpoint from results'; ignoreBtn.addEventListener('click', async (e) => { e.stopPropagation(); if (confirm(`Add "${analysisStorageKey}" to ignore list?\n\nThis endpoint will be hidden from the dashboard until removed from the ignore list.`)) { await addToIgnoreList(analysisStorageKey); showToastNotification(`Endpoint added to ignore list`, 'success', 3000); } }); 
+        
+        const closeBtnInside = document.createElement('button'); closeBtnInside.textContent = 'Close Report'; closeBtnInside.className = 'control-button secondary-button'; closeBtnInside.onclick = () => { document.querySelector('.trace-panel-backdrop')?.remove(); panel.remove(); }; 
+        
+        bottomButtonContainer.appendChild(exportJsonBtn); bottomButtonContainer.appendChild(ignoreBtn); bottomButtonContainer.appendChild(closeBtnInside); content.appendChild(bottomButtonContainer);
         attachReportEventListeners(panel, reportData);
 
     } catch (renderError) {
@@ -5725,6 +5923,920 @@ async function frogpostDownloadPostMessageJSON() {
         await chrome.runtime.sendMessage({ type: 'frogpost.pm.collectAndDownload', tabId: tab.id, filename: `frogpost-postmessage-report-${Date.now()}.json` });
     } catch (e) {
         console.error('[FrogPost] Download postMessage JSON failed:', e);
+    }
+}
+
+// ====== Auto Pilot & URL List Upload Features ======
+
+// Global state for Auto Pilot and URL List scanning
+let autoPilotEnabled = false;
+let urlScanInProgress = false;
+let autoPilotScanInProgress = false; // DEPRECATED: No longer used
+let customUrlsList = [];
+let autoPilotMonitorInterval = null;
+let autoPilotScannedEndpoints = new Set(); // Track ALL endpoints scanned by Auto Pilot
+let autoPilotActiveScans = new Set(); // Track currently scanning endpoints (per-endpoint lock)
+const CUSTOM_URLS_STORAGE_KEY = 'customUrlList';
+const AUTOPILOT_ENABLED_KEY = 'autoPilotEnabled';
+const AUTOPILOT_WARNING_SHOWN_KEY = 'autoPilotWarningShown';
+const URL_SCAN_IN_PROGRESS_KEY = 'urlScanInProgress';
+const AUTOPILOT_SCANNED_KEY = 'autoPilotScannedEndpoints';
+
+// Ignore list for endpoints
+let ignoredEndpoints = new Set();
+const IGNORED_ENDPOINTS_STORAGE_KEY = 'ignoredEndpoints';
+
+// Failed endpoints cache (to prevent retrying failed CSP checks or timeouts)
+let failedEndpoints = new Map(); // Map<endpointKey, {reason: string, timestamp: number}>
+const FAILED_ENDPOINTS_STORAGE_KEY = 'failedEndpoints';
+const FAILED_ENDPOINT_CACHE_DURATION = 24 * 60 * 60 * 1000; // 24 hours
+
+// Collapsed groups state
+let collapsedGroups = new Set();
+const COLLAPSED_GROUPS_STORAGE_KEY = 'collapsedGroups';
+
+// Load ignored endpoints from localStorage
+async function loadIgnoredEndpoints() {
+    try {
+        const result = await chrome.storage.local.get([IGNORED_ENDPOINTS_STORAGE_KEY]);
+        ignoredEndpoints = new Set(result[IGNORED_ENDPOINTS_STORAGE_KEY] || []);
+        log.info(`[Ignore List] Loaded ${ignoredEndpoints.size} ignored endpoint(s)`);
+    } catch (error) {
+        log.error('[Ignore List] Failed to load:', error);
+    }
+}
+
+// Save ignored endpoints to localStorage
+async function saveIgnoredEndpoints() {
+    try {
+        await chrome.storage.local.set({ [IGNORED_ENDPOINTS_STORAGE_KEY]: Array.from(ignoredEndpoints) });
+        log.info(`[Ignore List] Saved ${ignoredEndpoints.size} ignored endpoint(s)`);
+    } catch (error) {
+        log.error('[Ignore List] Failed to save:', error);
+    }
+}
+
+// Load failed endpoints from localStorage
+async function loadFailedEndpoints() {
+    try {
+        const result = await chrome.storage.local.get([FAILED_ENDPOINTS_STORAGE_KEY]);
+        const stored = result[FAILED_ENDPOINTS_STORAGE_KEY] || {};
+        const now = Date.now();
+        
+        // Load and clean expired entries
+        failedEndpoints = new Map();
+        for (const [key, value] of Object.entries(stored)) {
+            if (value && value.timestamp && (now - value.timestamp < FAILED_ENDPOINT_CACHE_DURATION)) {
+                failedEndpoints.set(key, value);
+            }
+        }
+        
+        log.info(`[Failed Cache] Loaded ${failedEndpoints.size} failed endpoint(s)`);
+    } catch (error) {
+        log.error('[Failed Cache] Failed to load:', error);
+    }
+}
+
+// Save failed endpoints to localStorage
+async function saveFailedEndpoints() {
+    try {
+        const obj = Object.fromEntries(failedEndpoints);
+        await chrome.storage.local.set({ [FAILED_ENDPOINTS_STORAGE_KEY]: obj });
+        log.debug(`[Failed Cache] Saved ${failedEndpoints.size} failed endpoint(s)`);
+    } catch (error) {
+        log.error('[Failed Cache] Failed to save:', error);
+    }
+}
+
+// Mark endpoint as failed
+async function markEndpointAsFailed(endpointKey, reason) {
+    failedEndpoints.set(endpointKey, {
+        reason: reason,
+        timestamp: Date.now()
+    });
+    await saveFailedEndpoints();
+    log.info(`[Failed Cache] Marked ${endpointKey} as failed: ${reason}`);
+}
+
+// Check if endpoint previously failed
+function isEndpointFailed(endpointKey) {
+    const failureInfo = failedEndpoints.get(endpointKey);
+    if (!failureInfo) return null;
+    
+    // Check if cache is still valid
+    const now = Date.now();
+    if (now - failureInfo.timestamp > FAILED_ENDPOINT_CACHE_DURATION) {
+        failedEndpoints.delete(endpointKey);
+        saveFailedEndpoints(); // Clean up expired entry
+        return null;
+    }
+    
+    return failureInfo;
+}
+
+// Clear failed endpoint (for manual retry)
+async function clearFailedEndpoint(endpointKey) {
+    if (failedEndpoints.has(endpointKey)) {
+        failedEndpoints.delete(endpointKey);
+        await saveFailedEndpoints();
+        log.info(`[Failed Cache] Cleared failed status for ${endpointKey}`);
+    }
+}
+
+// Load collapsed groups state
+async function loadCollapsedGroups() {
+    try {
+        const result = await chrome.storage.local.get([COLLAPSED_GROUPS_STORAGE_KEY]);
+        collapsedGroups = new Set(result[COLLAPSED_GROUPS_STORAGE_KEY] || []);
+    } catch (error) {
+        log.error('[Collapsed Groups] Failed to load:', error);
+    }
+}
+
+// Save collapsed groups state
+async function saveCollapsedGroups() {
+    try {
+        await chrome.storage.local.set({ 
+            [COLLAPSED_GROUPS_STORAGE_KEY]: Array.from(collapsedGroups) 
+        });
+    } catch (error) {
+        log.error('[Collapsed Groups] Failed to save:', error);
+    }
+}
+
+// Toggle collapse state for a group
+async function toggleGroupCollapse(groupKey) {
+    if (collapsedGroups.has(groupKey)) {
+        collapsedGroups.delete(groupKey);
+    } else {
+        collapsedGroups.add(groupKey);
+    }
+    await saveCollapsedGroups();
+    requestUiUpdate();
+}
+
+// Add endpoint to ignore list
+async function addToIgnoreList(endpointKey) {
+    if (!endpointKey) return false;
+    
+    ignoredEndpoints.add(endpointKey);
+    await saveIgnoredEndpoints();
+    log.info(`[Ignore List] Added: ${endpointKey}`);
+    
+    // Close any open reports for this endpoint
+    document.querySelector('.trace-results-panel')?.remove();
+    document.querySelector('.trace-panel-backdrop')?.remove();
+    
+    // Update UI to hide the endpoint
+    requestUiUpdate();
+    
+    return true;
+}
+
+// Remove endpoint from ignore list
+async function removeFromIgnoreList(endpointKey) {
+    if (!endpointKey) return false;
+    
+    ignoredEndpoints.delete(endpointKey);
+    await saveIgnoredEndpoints();
+    log.info(`[Ignore List] Removed: ${endpointKey}`);
+    
+    // Update UI to show the endpoint again
+    requestUiUpdate();
+    
+    return true;
+}
+
+// Check if endpoint is ignored
+function isEndpointIgnored(endpointKey) {
+    return ignoredEndpoints.has(endpointKey);
+}
+
+// Parse and validate URLs from text
+function parseAndValidateUrls(text) {
+    const lines = text.split('\n').map(line => line.trim()).filter(line => line && !line.startsWith('#'));
+    const validUrls = [];
+    const invalidUrls = [];
+    
+    lines.forEach(line => {
+        try {
+            const url = new URL(line);
+            if (url.protocol === 'http:' || url.protocol === 'https:') {
+                validUrls.push(line);
+            } else {
+                invalidUrls.push(line);
+            }
+        } catch (e) {
+            invalidUrls.push(line);
+        }
+    });
+    
+    return { validUrls, invalidUrls };
+}
+
+// Show URL List upload modal
+function showUploadUrlModal() {
+    const container = document.getElementById('urlListModalContainer');
+    if (!container) return;
+    
+    // Create backdrop
+    const backdrop = document.createElement('div');
+    backdrop.className = 'modal-backdrop';
+    
+    // Create modal
+    const modal = document.createElement('div');
+    modal.className = 'url-list-modal';
+    
+    // Modal header
+    const header = document.createElement('div');
+    header.className = 'url-list-modal-header';
+    header.innerHTML = `
+        <h4>📋 Upload URL List for Batch Scanning</h4>
+        <button class="close-modal-btn" aria-label="Close">&times;</button>
+    `;
+    
+    // Modal body
+    const body = document.createElement('div');
+    body.className = 'url-list-modal-body';
+    body.innerHTML = `
+        <p>Enter URLs to scan (one per line). FrogPost will automatically run Play+Trace on each URL.</p>
+        <textarea class="url-list-textarea" placeholder="https://example.com/page1
+https://example.com/page2
+https://example.com/page3" id="urlListTextarea"></textarea>
+        <div class="url-list-file-upload">
+            <p style="margin: 0; color: var(--text-secondary);">Or click to upload a .txt file with URLs</p>
+            <input type="file" id="urlListFileInput" accept=".txt" />
+        </div>
+    `;
+    
+    // Modal footer
+    const footer = document.createElement('div');
+    footer.className = 'url-list-modal-footer';
+    footer.innerHTML = `
+        <button class="control-button secondary-button" id="cancelUrlList">Cancel</button>
+        <button class="control-button primary-button" id="startUrlScan">Start Scan</button>
+    `;
+    
+    modal.appendChild(header);
+    modal.appendChild(body);
+    modal.appendChild(footer);
+    
+    container.innerHTML = '';
+    container.appendChild(backdrop);
+    container.appendChild(modal);
+    
+    // Event listeners
+    const closeBtn = header.querySelector('.close-modal-btn');
+    const cancelBtn = footer.querySelector('#cancelUrlList');
+    const startBtn = footer.querySelector('#startUrlScan');
+    const textarea = body.querySelector('#urlListTextarea');
+    const fileInput = body.querySelector('#urlListFileInput');
+    const fileUploadDiv = body.querySelector('.url-list-file-upload');
+    
+    const closeModal = () => {
+        container.innerHTML = '';
+    };
+    
+    closeBtn.addEventListener('click', closeModal);
+    cancelBtn.addEventListener('click', closeModal);
+    backdrop.addEventListener('click', closeModal);
+    
+    // File upload handler
+    fileUploadDiv.addEventListener('click', () => fileInput.click());
+    fileInput.addEventListener('change', (e) => {
+        const file = e.target.files[0];
+        if (file) {
+            const reader = new FileReader();
+            reader.onload = (event) => {
+                textarea.value = event.target.result;
+            };
+            reader.readAsText(file);
+        }
+    });
+    
+    // Start scan handler
+    startBtn.addEventListener('click', async () => {
+        const text = textarea.value.trim();
+        if (!text) {
+            showToastNotification('Please enter at least one URL', 'warning');
+            return;
+        }
+        
+        const { validUrls, invalidUrls } = parseAndValidateUrls(text);
+        
+        if (invalidUrls.length > 0) {
+            const proceed = confirm(`Found ${invalidUrls.length} invalid URL(s):\n${invalidUrls.slice(0, 5).join('\n')}${invalidUrls.length > 5 ? '\n...' : ''}\n\nProceed with ${validUrls.length} valid URL(s)?`);
+            if (!proceed) return;
+        }
+        
+        if (validUrls.length === 0) {
+            showToastNotification('No valid URLs found', 'error');
+            return;
+        }
+        
+        closeModal();
+        await startBatchUrlScan(validUrls);
+    });
+}
+
+// Start batch URL scanning
+async function startBatchUrlScan(urls) {
+    if (urlScanInProgress) {
+        showToastNotification('A URL scan is already in progress', 'warning');
+        return;
+    }
+    
+    urlScanInProgress = true;
+    await chrome.storage.local.set({ [URL_SCAN_IN_PROGRESS_KEY]: true });
+    
+    // Store custom URLs
+    customUrlsList = urls;
+    await chrome.storage.local.set({ [CUSTOM_URLS_STORAGE_KEY]: urls });
+    
+    // Temporarily disable Auto Pilot
+    const autoPilotWasEnabled = autoPilotEnabled;
+    if (autoPilotEnabled) {
+        await disableAutoPilot(true); // true = silent disable
+    }
+    
+    showToastNotification(`Starting batch scan of ${urls.length} URL(s)...`, 'info', 3000);
+    
+    // Update UI to show Custom URLs group
+    requestUiUpdate();
+    
+    // Scan each URL sequentially
+    let successCount = 0;
+    let failCount = 0;
+    
+    log.info(`[Batch Scan] ═══════════════════════════════════════════════════`);
+    log.info(`[Batch Scan] Starting sequential scan of ${urls.length} URLs`);
+    log.info(`[Batch Scan] ═══════════════════════════════════════════════════`);
+    
+    for (let i = 0; i < urls.length; i++) {
+        const url = urls[i];
+        const urlNum = i + 1;
+        
+        // Clear, organized progress message
+        log.info(`\n[Batch Scan] ─────────────────────────────────────────────────`);
+        log.info(`[Batch Scan] 📍 URL ${urlNum}/${urls.length}: ${url}`);
+        log.info(`[Batch Scan] ─────────────────────────────────────────────────`);
+        
+        updateAutoPilotFooter(`Scanning ${urlNum}/${urls.length}: ${url}`);
+        
+        try {
+            // Get the endpoint key
+            const endpointKey = getStorageKeyForUrl(url);
+            log.info(`[Batch Scan] [${urlNum}/${urls.length}] Endpoint key: ${endpointKey}`);
+            
+            // CRITICAL: Check CSP headers BEFORE attempting to scan
+            // This prevents false positives from endpoints that block framing
+            log.info(`[Batch Scan] [${urlNum}/${urls.length}] Step 1/3: Checking CSP headers...`);
+            const cspResult = await checkCSPHeaders(endpointKey);
+            
+            if (!cspResult.canEmbed) {
+                log.warn(`[Batch Scan] [${urlNum}/${urls.length}] ❌ CSP blocks framing: ${cspResult.reason}`);
+                log.debug(`[Batch Scan] [${urlNum}/${urls.length}] CSP Headers:`, cspResult.headers);
+                
+                // Store CSP error state so button shows correctly when UI updates
+                buttonStates.set(endpointKey, { 
+                    state: 'error', 
+                    options: { errorMessage: `CSP Blocked: ${cspResult.reason}` } 
+                });
+                
+                // Update button immediately if it exists
+                let button = document.querySelector(`.iframe-check-button[data-endpoint="${endpointKey}"]`);
+                if (button) {
+                    updateButton(button, 'error', { errorMessage: `CSP Blocked: ${cspResult.reason}` });
+                }
+                
+                // Trigger UI update to ensure button is rendered with error state
+                requestUiUpdate();
+                
+                failCount++;
+                log.warn(`[Batch Scan] [${urlNum}/${urls.length}] Skipped (CSP blocked) - Moving to next URL\n`);
+                continue; // Skip to next URL
+            }
+            
+            log.success(`[Batch Scan] [${urlNum}/${urls.length}] ✓ CSP check passed`);
+            
+            // Find or create button element for this URL
+            let button = document.querySelector(`.iframe-check-button[data-endpoint="${endpointKey}"]`);
+            
+            if (!button) {
+                // Create a temporary button for scanning
+                button = document.createElement('button');
+                button.className = 'iframe-check-button';
+                button.setAttribute('data-endpoint', endpointKey);
+            }
+            
+            // CRITICAL: Reset button state to prevent Launch from being triggered
+            // Batch scan should ONLY do Play+Trace, NEVER Launch
+            buttonStates.delete(endpointKey);
+            
+            // Run Play with silent mode and hide from user (skipCheck=false, silentMode=true, hideFromUser=true)
+            log.info(`[Batch Scan] [${urlNum}/${urls.length}] Step 2/3: Running Play (handler extraction)...`);
+            await handlePlayButtonWithTimeout(endpointKey, button, false, true, true);
+            
+            // Wait for handler extraction to complete with polling
+            log.info(`[Batch Scan] [${urlNum}/${urls.length}] Waiting for handler extraction...`);
+            let handlerCheckAttempts = 0;
+            const maxAttempts = 10;
+            let hasHandler = false;
+            
+            while (handlerCheckAttempts < maxAttempts) {
+                await new Promise(resolve => setTimeout(resolve, 500));
+                hasHandler = endpointsWithDetectedHandlers.has(endpointKey);
+                handlerCheckAttempts++;
+                
+                if (hasHandler) {
+                    log.success(`[Batch Scan] [${urlNum}/${urls.length}] ✓ Handler detected after ${handlerCheckAttempts * 0.5}s`);
+                    break;
+                }
+            }
+            
+            if (!hasHandler) {
+                log.warn(`[Batch Scan] [${urlNum}/${urls.length}] ⚠ No handler detected after ${maxAttempts * 0.5}s`);
+            }
+            
+            if (hasHandler) {
+                // Find trace button
+                let traceButton = document.querySelector(`.iframe-trace-button[data-endpoint="${endpointKey}"]`);
+                
+                if (!traceButton) {
+                    traceButton = document.createElement('button');
+                    traceButton.className = 'iframe-trace-button';
+                    traceButton.setAttribute('data-endpoint', endpointKey);
+                }
+                
+                // Run Trace with silent mode
+                log.info(`[Batch Scan] [${urlNum}/${urls.length}] Step 3/3: Running Trace (analysis)...`);
+                if (window.handleTraceButton) {
+                    await window.handleTraceButton(endpointKey, traceButton, true);
+                }
+                
+                // Wait for trace to complete
+                await new Promise(resolve => setTimeout(resolve, 2000));
+                
+                successCount++;
+                log.success(`[Batch Scan] [${urlNum}/${urls.length}] ✅ COMPLETED SUCCESSFULLY`);
+            } else {
+                log.warn(`[Batch Scan] [${urlNum}/${urls.length}] ⏭ Skipping Trace (no handler found)`);
+                failCount++;
+            }
+            
+        } catch (error) {
+            failCount++;
+            log.error(`[Batch Scan] [${urlNum}/${urls.length}] ❌ ERROR: ${error.message}`);
+        }
+        
+        // Delay between URLs to ensure clean separation
+        if (i < urls.length - 1) {
+            log.info(`[Batch Scan] Waiting before next URL...\n`);
+            await new Promise(resolve => setTimeout(resolve, 1500));
+        }
+    }
+    
+    log.info(`\n[Batch Scan] ═══════════════════════════════════════════════════`);
+    log.info(`[Batch Scan] Scan Complete: ${successCount} succeeded, ${failCount} failed`);
+    log.info(`[Batch Scan] ═══════════════════════════════════════════════════`);
+    
+    // Cleanup
+    urlScanInProgress = false;
+    await chrome.storage.local.set({ [URL_SCAN_IN_PROGRESS_KEY]: false });
+    hideAutoPilotFooter();
+    
+    // Re-enable Auto Pilot if it was enabled before
+    if (autoPilotWasEnabled) {
+        await enableAutoPilot(true); // true = silent enable
+    }
+    
+    showToastNotification(`Batch scan complete: ${successCount} succeeded, ${failCount} failed`, successCount > 0 ? 'success' : 'warning', 5000);
+    
+    // Refresh UI
+    requestUiUpdate();
+}
+
+// Show Auto Pilot warning dialog
+function showAutoPilotWarning() {
+    return new Promise((resolve) => {
+        const overlay = document.createElement('div');
+        overlay.className = 'modal-backdrop';
+        overlay.style.cssText = `
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.7); z-index: 10000;
+            display: flex; align-items: center; justify-content: center;
+        `;
+        
+        const modal = document.createElement('div');
+        modal.style.cssText = `
+            background: var(--bg-primary); border-radius: 12px; padding: 24px;
+            max-width: 500px; width: 90%; box-shadow: 0 10px 30px rgba(0,0,0,0.3);
+            border: 2px solid #3498db;
+        `;
+        
+        modal.innerHTML = `
+            <h3 style="margin: 0 0 16px 0; color: #3498db; font-size: 18px;">
+                🤖 Auto Pilot Mode
+            </h3>
+            <div style="margin-bottom: 20px; line-height: 1.6; color: var(--text-secondary);">
+                <p><strong style="color: var(--text-primary);">Warning:</strong> When Auto Pilot is enabled, FrogPost will automatically run <strong>Play + Trace</strong> on every new iframe that is intercepted.</p>
+                <p>This mode will:</p>
+                <ul style="margin: 8px 0; padding-left: 20px;">
+                    <li>Automatically analyze new iframes in the background</li>
+                    <li>Suppress CSP error popups (silent mode)</li>
+                    <li>Show progress in a footer bar</li>
+                    <li>NOT run the Launch/Fuzzer step automatically</li>
+                </ul>
+                <p style="margin-top: 12px;"><strong style="color: #f39c12;">Note:</strong> This feature is designed for security research. Use responsibly.</p>
+            </div>
+            <div style="display: flex; justify-content: flex-end; gap: 10px;">
+                <button id="autopilotWarningCancel" class="control-button secondary-button" style="padding: 8px 20px;">Cancel</button>
+                <button id="autopilotWarningAccept" class="control-button primary-button" style="padding: 8px 20px;">Enable Auto Pilot</button>
+            </div>
+        `;
+        
+        overlay.appendChild(modal);
+        document.body.appendChild(overlay);
+        
+        const acceptBtn = modal.querySelector('#autopilotWarningAccept');
+        const cancelBtn = modal.querySelector('#autopilotWarningCancel');
+        
+        acceptBtn.addEventListener('click', () => {
+            document.body.removeChild(overlay);
+            resolve(true);
+        });
+        
+        cancelBtn.addEventListener('click', () => {
+            document.body.removeChild(overlay);
+            resolve(false);
+        });
+    });
+}
+
+// Scan existing intercepted endpoints when Auto Pilot is enabled
+// SIMPLIFIED: Scan all unmarked endpoints
+async function scanUnmarkedEndpoints() {
+    // CRITICAL: Only one scan at a time - prevent concurrent scans
+    if (!autoPilotEnabled || urlScanInProgress || autoPilotScanInProgress) {
+        return;
+    }
+    
+    // Lock to prevent concurrent scans
+    autoPilotScanInProgress = true;
+    
+    try {
+        log.debug('[Auto Pilot] Checking for unmarked endpoints...');
+            
+        // Step 1: Collect ALL current endpoints
+        const allEndpoints = new Set();
+        
+        // From messages
+        window.frogPostState.messages.forEach(msg => {
+            // Skip localhost/extension/special URLs
+            if (msg.origin && (msg.origin.startsWith('http://127.0.0.1:1337/') || msg.origin.startsWith('chrome-extension://') || msg.origin.startsWith('about:') || isLocalDevUrl(msg.origin) || msg.origin.includes('frogpost_handler_extraction=true'))) return;
+            if (msg.destinationUrl && (msg.destinationUrl.startsWith('http://127.0.0.1:1337/') || msg.destinationUrl.startsWith('about:') || isLocalDevUrl(msg.destinationUrl) || msg.destinationUrl.includes('frogpost_handler_extraction=true'))) return;
+            if (msg.topLevelUrl && (msg.topLevelUrl.startsWith('http://127.0.0.1:1337/') || msg.topLevelUrl.startsWith('chrome-extension://') || msg.topLevelUrl.startsWith('about:') || isLocalDevUrl(msg.topLevelUrl) || msg.topLevelUrl.includes('frogpost_handler_extraction=true'))) return;
+            
+            // Add endpoints
+            if (msg.topLevelUrl) {
+                const key = getStorageKeyForUrl(msg.topLevelUrl);
+                if (key && key !== 'null' && key !== 'about:blank' && !isEndpointIgnored(key)) allEndpoints.add(key);
+            }
+            if (msg.origin) {
+                const key = getStorageKeyForUrl(msg.origin);
+                if (key && key !== 'null' && key !== 'about:blank' && !isEndpointIgnored(key)) allEndpoints.add(key);
+            }
+            if (msg.destinationUrl) {
+                const key = getStorageKeyForUrl(msg.destinationUrl);
+                if (key && key !== 'null' && key !== 'about:blank' && !isEndpointIgnored(key)) allEndpoints.add(key);
+            }
+        });
+        
+        // From loadedData.urls
+        if (window.frogPostState.loadedData && window.frogPostState.loadedData.urls) {
+            window.frogPostState.loadedData.urls.forEach(url => {
+                // Skip special URLs
+                if (url.startsWith('about:') || url.startsWith('chrome-extension://') || url.startsWith('http://127.0.0.1:1337/')) return;
+                
+                const key = getStorageKeyForUrl(url);
+                if (key && key !== 'null' && key !== 'about:blank' && !isLocalDevUrl(url) && !isEndpointIgnored(key)) {
+                    allEndpoints.add(key);
+                }
+            });
+        }
+        
+        // Step 2: Filter out already scanned endpoints (ONLY check marker)
+        const unmarkedEndpoints = Array.from(allEndpoints).filter(key => 
+            !autoPilotScannedEndpoints.has(key) && !launchInProgressEndpoints.has(key)
+        );
+        
+        if (unmarkedEndpoints.length === 0) {
+            log.debug(`[Auto Pilot] No new endpoints to scan (${allEndpoints.size} total, ${autoPilotScannedEndpoints.size} already scanned)`);
+            return; // Lock will be released in finally
+        }
+        
+        log.info(`[Auto Pilot] Found ${unmarkedEndpoints.length} unmarked endpoint(s) to scan (${allEndpoints.size} total)`);
+        
+        // Step 3: Scan each unmarked endpoint
+        for (let i = 0; i < unmarkedEndpoints.length; i++) {
+            const endpointKey = unmarkedEndpoints[i];
+            
+            // Mark as scanned IMMEDIATELY (before scanning) to prevent duplicates
+            autoPilotScannedEndpoints.add(endpointKey);
+            
+            // Persist to storage
+            await chrome.storage.sync.set({ 
+                [AUTOPILOT_SCANNED_KEY]: Array.from(autoPilotScannedEndpoints) 
+            });
+            
+            // Update footer
+            updateAutoPilotFooter(`Auto Pilot: ${i + 1}/${unmarkedEndpoints.length} - ${endpointKey}`);
+            
+            // Scan the endpoint
+            try {
+                await triggerAutoPilotScan(endpointKey, false);
+                
+                // Small delay between scans to avoid overwhelming the system
+                await new Promise(resolve => setTimeout(resolve, 500));
+            } catch (err) {
+                log.error(`[Auto Pilot] Failed to scan ${endpointKey}:`, err.message);
+            }
+        }
+    
+        hideAutoPilotFooter();
+        log.info(`[Auto Pilot] Completed scanning ${unmarkedEndpoints.length} endpoint(s)`);
+        
+    } catch (error) {
+        log.error('[Auto Pilot] Error during scanning:', error);
+    } finally {
+        // Always release lock
+        autoPilotScanInProgress = false;
+    }
+}
+
+// Enable Auto Pilot
+async function enableAutoPilot(silent = false) {
+    // Check if warning has been shown
+    const storage = await chrome.storage.sync.get([AUTOPILOT_WARNING_SHOWN_KEY]);
+    const warningShown = storage[AUTOPILOT_WARNING_SHOWN_KEY] || false;
+    
+    if (!silent && !warningShown) {
+        const accepted = await showAutoPilotWarning();
+        if (!accepted) return;
+        await chrome.storage.sync.set({ [AUTOPILOT_WARNING_SHOWN_KEY]: true });
+    }
+    
+    autoPilotEnabled = true;
+    await chrome.storage.sync.set({ [AUTOPILOT_ENABLED_KEY]: true });
+    
+    // Update button
+    const button = document.getElementById('autoPilotToggle');
+    if (button) {
+        button.textContent = '🤖 Auto Pilot: ON';
+        button.classList.remove('autopilot-off');
+        button.classList.add('autopilot-on');
+    }
+    
+    if (!silent) {
+        showToastNotification('🤖 Auto Pilot enabled! Scanning endpoints...', 'success', 3000);
+    }
+    
+    log.info('[Auto Pilot] Enabled');
+    
+    // Immediately scan any existing unmarked endpoints
+    await scanUnmarkedEndpoints();
+    
+    // Start continuous monitoring (checks every 3 seconds for new unmarked endpoints)
+    startAutoPilotMonitoring();
+}
+
+// SIMPLIFIED: Monitor for new unmarked endpoints
+function startAutoPilotMonitoring() {
+    // Clear any existing interval
+    if (autoPilotMonitorInterval) {
+        clearInterval(autoPilotMonitorInterval);
+    }
+    
+    // Check for new unmarked endpoints every 3 seconds
+    autoPilotMonitorInterval = setInterval(async () => {
+        if (!autoPilotEnabled || urlScanInProgress) return;
+        await scanUnmarkedEndpoints();
+    }, 3000);
+    
+    log.info('[Auto Pilot] Monitoring started - checking for new endpoints every 3 seconds');
+}
+
+// Disable Auto Pilot
+async function disableAutoPilot(silent = false) {
+    autoPilotEnabled = false;
+    await chrome.storage.sync.set({ [AUTOPILOT_ENABLED_KEY]: false });
+    
+    // Stop monitoring for new endpoints
+    if (autoPilotMonitorInterval) {
+        clearInterval(autoPilotMonitorInterval);
+        autoPilotMonitorInterval = null;
+        log.debug('[Auto Pilot] Stopped monitoring for new endpoints');
+    }
+    
+    // Release any active scan lock
+    autoPilotScanInProgress = false;
+    
+    // Clear scanned endpoints list and persist to storage
+    autoPilotScannedEndpoints.clear();
+    await chrome.storage.sync.set({ [AUTOPILOT_SCANNED_KEY]: [] });
+    
+    // Update button
+    const button = document.getElementById('autoPilotToggle');
+    if (button) {
+        button.textContent = '🤖 Auto Pilot: OFF';
+        button.classList.remove('autopilot-on');
+        button.classList.add('autopilot-off');
+    }
+    
+    if (!silent) {
+        showToastNotification('Auto Pilot disabled', 'info', 2000);
+    }
+    
+    log.info('[Auto Pilot] Disabled');
+}
+
+// Toggle Auto Pilot
+async function toggleAutoPilot() {
+    if (autoPilotEnabled) {
+        await disableAutoPilot();
+    } else {
+        await enableAutoPilot();
+    }
+}
+
+// Update Auto Pilot footer
+function updateAutoPilotFooter(message) {
+    const footer = document.getElementById('autoPilotFooter');
+    if (!footer) return;
+    
+    footer.className = 'autopilot-footer-bar';
+    footer.style.display = 'flex';
+    footer.innerHTML = `
+        <div class="autopilot-footer-content">
+            <div class="autopilot-footer-spinner"></div>
+            <span>Auto Pilot: ${message || 'Scanning...'}</span>
+        </div>
+        <button class="autopilot-footer-close" onclick="hideAutoPilotFooter()">Dismiss</button>
+    `;
+}
+
+// Hide Auto Pilot footer
+function hideAutoPilotFooter() {
+    const footer = document.getElementById('autoPilotFooter');
+    if (footer) {
+        footer.style.display = 'none';
+    }
+}
+window.hideAutoPilotFooter = hideAutoPilotFooter;
+
+// Initialize Auto Pilot state on load
+async function initializeAutoPilot() {
+    const storage = await chrome.storage.sync.get([AUTOPILOT_ENABLED_KEY, AUTOPILOT_SCANNED_KEY]);
+    const stored = storage[AUTOPILOT_ENABLED_KEY] || false;
+    const storedScanned = storage[AUTOPILOT_SCANNED_KEY];
+    
+    // Restore scanned endpoints from storage (persistent tracking)
+    if (storedScanned && Array.isArray(storedScanned)) {
+        autoPilotScannedEndpoints = new Set(storedScanned);
+        log.info(`[Auto Pilot Init] Restored ${autoPilotScannedEndpoints.size} previously scanned endpoint(s)`);
+    }
+    
+    log.info(`[Auto Pilot Init] Stored value: ${stored}, setting autoPilotEnabled to: ${stored}`);
+    
+    autoPilotEnabled = stored;
+    const button = document.getElementById('autoPilotToggle');
+    if (button) {
+        if (stored) {
+            log.warn('[Auto Pilot Init] State is ON - this should not happen on clean load!');
+            button.textContent = '🤖 Auto Pilot: ON';
+            button.classList.remove('autopilot-off');
+            button.classList.add('autopilot-on');
+        } else {
+            log.info('[Auto Pilot Init] State is OFF (correct default)');
+            button.textContent = '🤖 Auto Pilot: OFF';
+            button.classList.remove('autopilot-on');
+            button.classList.add('autopilot-off');
+        }
+    }
+    
+    // Load custom URLs list
+    const urlStorage = await chrome.storage.local.get([CUSTOM_URLS_STORAGE_KEY]);
+    customUrlsList = urlStorage[CUSTOM_URLS_STORAGE_KEY] || [];
+    
+    // Load ignored endpoints
+    await loadIgnoredEndpoints();
+    
+    // Load failed endpoints cache
+    await loadFailedEndpoints();
+    
+    // Load collapsed groups
+    await loadCollapsedGroups();
+}
+
+// Expose functions to global scope
+window.addToIgnoreList = addToIgnoreList;
+window.removeFromIgnoreList = removeFromIgnoreList;
+window.isEndpointIgnored = isEndpointIgnored;
+window.clearFailedEndpoint = clearFailedEndpoint;
+window.clearAllFailedEndpoints = async function() {
+    failedEndpoints.clear();
+    await saveFailedEndpoints();
+    log.success('[Failed Cache] Cleared all failed endpoints');
+    requestUiUpdate();
+};
+window.toggleGroupCollapse = toggleGroupCollapse;
+
+// Trigger Auto Pilot scan for new iframe
+async function triggerAutoPilotScan(endpointKey, manageFooter = true) {
+    if (!autoPilotEnabled || urlScanInProgress) return;
+    
+    log.info(`[Auto Pilot] Scanning: ${endpointKey}`);
+    if (manageFooter) {
+        updateAutoPilotFooter(`Scanning: ${endpointKey}`);
+    }
+    
+    try {
+        // CRITICAL: Check CSP headers BEFORE attempting to scan
+        // This prevents false positives from endpoints that block framing
+        log.debug(`[Auto Pilot] Checking CSP for ${endpointKey}...`);
+        const cspResult = await checkCSPHeaders(endpointKey);
+        
+        if (!cspResult.canEmbed) {
+            log.warn(`[Auto Pilot] Skipping ${endpointKey} - CSP blocks framing: ${cspResult.reason}`);
+            log.debug(`[Auto Pilot] CSP Headers:`, cspResult.headers);
+            
+            // Store CSP error state so button shows correctly when UI updates
+            buttonStates.set(endpointKey, { 
+                state: 'error', 
+                options: { errorMessage: `CSP Blocked: ${cspResult.reason}` } 
+            });
+            
+            // Update button immediately if it exists
+            let button = document.querySelector(`.iframe-check-button[data-endpoint="${endpointKey}"]`);
+            if (button) {
+                updateButton(button, 'error', { errorMessage: `CSP Blocked: ${cspResult.reason}` });
+            }
+            
+            // Trigger UI update to ensure button is rendered with error state
+            requestUiUpdate();
+            
+            return; // Skip this endpoint entirely
+        }
+        
+        log.debug(`[Auto Pilot] CSP check passed for ${endpointKey}`);
+        
+        // Find or create buttons
+        let button = document.querySelector(`.iframe-check-button[data-endpoint="${endpointKey}"]`);
+        if (!button) {
+            button = document.createElement('button');
+            button.className = 'iframe-check-button';
+            button.setAttribute('data-endpoint', endpointKey);
+        }
+        
+        // CRITICAL: Reset button state to prevent Launch from being triggered
+        // Auto Pilot should ONLY do Play+Trace, NEVER Launch
+        buttonStates.delete(endpointKey);
+        
+        // Run Play with silent mode AND hideFromUser mode (silentMode=true, hideFromUser=true)
+        await handlePlayButtonWithTimeout(endpointKey, button, false, true, true);
+        
+        // Wait a bit for handler extraction to complete
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        
+        // Check if handler was found by checking endpointsWithDetectedHandlers (updated immediately)
+        const hasHandler = endpointsWithDetectedHandlers.has(endpointKey);
+        
+        if (hasHandler) {
+            log.info(`[Auto Pilot] Handler detected for ${endpointKey}, running Trace...`);
+            
+            // Run Trace with silent mode
+            let traceButton = document.querySelector(`.iframe-trace-button[data-endpoint="${endpointKey}"]`);
+            if (!traceButton) {
+                traceButton = document.createElement('button');
+                traceButton.className = 'iframe-trace-button';
+                traceButton.setAttribute('data-endpoint', endpointKey);
+            }
+            
+            if (window.handleTraceButton) {
+                await window.handleTraceButton(endpointKey, traceButton, true);
+            }
+            
+            log.success(`[Auto Pilot] Completed Play+Trace for ${endpointKey}`);
+        } else {
+            log.warn(`[Auto Pilot] No handler found for ${endpointKey}, skipping Trace`);
+        }
+        
+    } catch (error) {
+        log.error(`[Auto Pilot] Failed to scan ${endpointKey}:`, error.message);
+    } finally {
+        if (manageFooter) {
+            hideAutoPilotFooter();
+        }
     }
 }
 

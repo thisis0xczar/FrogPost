@@ -1,7 +1,7 @@
 /**
  * FrogPost Extension
  * Originally Created by thisis0xczar/Lidor 
- * Refined on: 2025-09-17
+ * Refined on: 2025-10-22
  */
 (function(global) {
     const JWT_REGEX = /eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g;
@@ -422,10 +422,12 @@
             }
         }
         setNestedValue(obj, path, value) {
-            if (!obj || typeof obj !== 'object' || !path) {
-                if(typeof obj === 'string') return value;
-                return;
+            // Use shared utility function
+            if (typeof window !== 'undefined' && window.FrogPostUtils) {
+                return window.FrogPostUtils.setNestedValue(obj, path, value);
             }
+            // Fallback for environments where shared utils not loaded
+            if (!obj || typeof obj !== 'object' || !path) return;
             const parts = path.match(/([^[.\]]+)|\[['"`]?([^\]'"`]+)['"`]?\]/g) || [];
             let current = obj;
             for (let i = 0; i < parts.length - 1; i++) {

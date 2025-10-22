@@ -27,16 +27,15 @@
         <div class="version-info">
             <span>Version: <span id="current-version-display">Loading...</span></span>
             <button id="check-version-button" class="control-button secondary-button" title="Check for updates on GitHub">Check Version</button>
-            <span id="server-status-inline" style="margin-left: 12px; display: inline-flex; align-items: center; gap: 6px; font-size: 12px;"></span>
+            <div id="server-status-badge" class="server-status-badge" title="FrogPost Server Status">
+                <span class="status-indicator"></span>
+                <span class="status-text">Server: Checking...</span>
+            </div>
             <span id="update-status-display" style="margin-left: 10px; font-size: 0.9em;"></span>
         </div>
         <div class="header-controls">
-            <input type="file" id="customPayloadsFile" accept=".txt" style="display: none;">
-            <span id="customPayloadStatus" style="font-size: 12px; margin-left: 10px;"></span>
-            <button id="uploadCustomPayloadsBtn" class="control-button secondary">Upload Payloads</button>
-            <button id="clearCustomPayloadsBtn" class="control-button secondary-button" style="display: none;">Clear Payloads</button>
-            <button id="openOptionsBtn" class="control-button secondary">Custom Rules / Settings</button>
-            <button id="checkAll" class="control-button" aria-label="Check All Endpoints">Check All</button>
+            <button id="uploadUrlListBtn" class="control-button url-upload-button" aria-label="Upload URL List" title="Upload a list of URLs for batch scanning">📋 Upload URL List</button>
+            <button id="autoPilotToggle" class="control-button autopilot-button autopilot-off" aria-label="Toggle Auto Pilot Mode" title="Automatically scan new iframes">🤖 Auto Pilot: OFF</button>
             <button id="clearMessages" class="control-button" aria-label="Clear Messages">Clear All</button>
             <button id="exportMessages" class="control-button" aria-label="Export Messages">Export</button>
             <button id="refreshMessages" class="control-button" aria-label="Refresh Messages">Refresh</button>
@@ -50,9 +49,6 @@
             <div id="endpointsList" class="panel">
                 <div class="endpoint-filter-container">
                     <input type="text" id="endpointFilterInput" placeholder="Filter endpoints...">
-                    <button id="silentFilterToggle" class="control-button secondary-button filter-toggle-button" title="Toggle Silent Iframes (0 messages)">
-                        <span class="button-icon">🤫</span> <span class="button-text">Silent Listeners</span>
-                    </button>
                 </div>
                 <div class='no-endpoints'>Loading captured communications...</div>
             </div>
@@ -78,6 +74,15 @@
                     </div>
                     <div id="callback-status" class="callback-status"></div>
                 </div>
+                <h3 style="margin-top: 20px;">Payloads & Rules</h3>
+                <div class="sidebar-controls">
+                    <input type="file" id="customPayloadsFile" accept=".txt" style="display: none;">
+                    <button id="uploadCustomPayloadsBtn" class="control-button secondary-button" style="width: 100%;">📤 Upload Custom Payloads</button>
+                    <button id="clearCustomPayloadsBtn" class="control-button secondary-button" style="display: none; width: 100%; margin-top: 8px;">Clear Payloads</button>
+                    <div id="customPayloadStatus" style="font-size: 11px; margin-top: 8px; padding: 8px; border-radius: 4px; text-align: center;"></div>
+                    <button id="openOptionsBtn" class="control-button secondary-button" style="width: 100%; margin-top: 12px;">⚙️ Custom Rules / Settings</button>
+                </div>
+
                 <h3 style="margin-top: 20px;">Advanced</h3>
                 <div class="sidebar-controls">
                     <button id="toggleDebuggerApiMode" class="control-button secondary debugger-mode-off" title="Attach debugger to web pages on load to find handlers (EXPERIMENTAL)">
@@ -129,6 +134,8 @@
     <div id="fullPayloadModalContainer"></div>
     <div id="editMessageModalContainer"></div>
     <div id="urlModificationModalContainer"></div>
+    <div id="urlListModalContainer"></div>
+    <div id="autoPilotFooter" style="display: none;"></div>
 
 </div>
 </body>

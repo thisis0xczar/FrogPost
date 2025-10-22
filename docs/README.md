@@ -2,7 +2,7 @@
 
 FrogPost is a Chrome extension for security testing of `postMessage` communications between iframes. It combines static analysis, dynamic testing, and optional AI assistance to identify vulnerabilities in message-handling implementations.
 
-#### Current Version: FrogPost v2.0.1
+#### Current Version: FrogPost v3.0.0
 
 <p align="center" width="100%">
     <img width="15%" src="media/frog-logo.png">
@@ -40,6 +40,8 @@ bash setup.sh
 2. Click the FrogPost extension icon
 3. Click **Analyze Handler** to detect vulnerabilities
 4. Click **Launch Fuzzer** to test with payloads
+5. Optional: Enable **Auto Pilot** for continuous automated scanning
+6. Optional: Use **Upload URL List** for bulk endpoint testing
 
 ### **Step 4: Enable AI Features (Optional)**
 1. Click extension icon → **Options**
@@ -51,9 +53,11 @@ bash setup.sh
 
 ## 🎯 Core Features
 
-- **Live Monitoring**: Captures `postMessage` traffic between iframes
-- **Handler Analysis**: Detects and analyzes message handlers for vulnerabilities
+- **Live Monitoring**: Captures `postMessage` traffic between iframes in real-time
+- **Handler Analysis**: Detects and analyzes message handlers for vulnerabilities using runtime interception
 - **Payload Testing**: Launches crafted payloads to test security
+- **Auto Pilot Mode**: Automatically scans new endpoints as they appear, testing them without manual intervention
+- **URL List Upload**: Bulk import and scan multiple URLs from a text file for automated testing
 - **AI Enhancement**: Optional LLM-powered analysis (requires server)
 
 ### **What FrogPost Detects**
@@ -62,6 +66,31 @@ bash setup.sh
 - Prototype pollution vulnerabilities
 - XSS injection points in postMessage handlers
 - Security misconfigurations in iframe communication
+
+### **Auto Pilot Mode**
+Enable automated scanning for continuous monitoring:
+1. Click the **Auto Pilot** toggle in the dashboard
+2. FrogPost will automatically detect and scan new endpoints as they appear
+3. Each endpoint is tested once with full handler analysis and fuzzing
+4. Results are displayed in real-time without manual interaction
+
+**Use Cases**:
+- Continuous monitoring during application navigation
+- Automated testing of dynamic iframe loading
+- Hands-free security assessment of complex applications
+
+### **URL List Upload**
+Bulk test multiple endpoints efficiently:
+1. Prepare a text file with one URL per line
+2. Click **"Upload URL List"** in the dashboard
+3. Select your file and let FrogPost process all URLs
+4. All endpoints are opened, analyzed, and tested automatically
+
+**Features**:
+- Batch processing of hundreds of URLs
+- Automatic tab management and cleanup
+- Parallel endpoint scanning
+- Results aggregation in the main dashboard
 
 ---
 
@@ -122,6 +151,8 @@ bash setup.sh stop
 - **Extension crashes**: Refresh the page and try again
 - **No messages captured**: Ensure the site has iframe communication
 - **Analysis fails**: Check browser console for error details
+- **Auto Pilot not scanning**: Ensure endpoints are not in the ignored list and haven't been scanned already
+- **URL Upload fails**: Verify file format (one URL per line, plain text)
 
 ---
 

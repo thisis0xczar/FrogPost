@@ -152,6 +152,10 @@ body {
 .host-row:hover { background-color: #3a3a3a; }
 .host-row.active { background-color: #3a3a3a; box-shadow: inset 3px 0 0 var(--accent-primary); }
 .host-name { flex: 1; word-break: break-all; padding-right: 10px; font-weight: 500; color: var(--text-primary); font-family: var(--font-mono); font-size: 0.9em; }
+.group-collapse-btn { background: none; border: none; color: var(--text-secondary); font-size: 12px; cursor: pointer; padding: 2px 8px; margin-right: 8px; transition: color 0.2s ease, transform 0.2s ease; flex-shrink: 0; }
+.group-collapse-btn:hover { color: var(--text-primary); transform: scale(1.15); }
+.endpoint-host.collapsed .iframe-container { display: none; }
+.endpoint-host.collapsed .group-collapse-btn { color: var(--text-muted); }
 .iframe-container { margin-left: 15px; border-left: 1px solid var(--border-color); padding-left: 15px; margin-top: 8px; }
 .iframe-row { margin: 5px 0; padding: 8px 12px; background: var(--bg-secondary); border-radius: 4px; border: 1px solid var(--border-color); display: flex; align-items: center; justify-content: space-between; transition: all 0.15s ease; cursor: pointer; }
 .iframe-row:hover { background-color: #3a3a3a; }
@@ -720,6 +724,42 @@ body {
 .control-button.debug-off { background-color: transparent; color: var(--accent-secondary); border-color: var(--accent-secondary); }
 .control-button.debug-off:hover { background-color: rgba(240, 113, 120, 0.1); }
 
+/* URL Upload Button - Orange/Purple Gradient */
+.control-button.url-upload-button {
+    background: linear-gradient(135deg, #f39c12 0%, #9b59b6 100%);
+    color: white;
+    border: 1px solid transparent;
+    font-weight: 600;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+}
+.control-button.url-upload-button:hover {
+    background: linear-gradient(135deg, #e67e22 0%, #8e44ad 100%);
+    transform: translateY(-1px);
+    box-shadow: 0 3px 6px rgba(0, 0, 0, 0.3);
+}
+
+/* Auto Pilot Button - Blue/Cyan Gradient */
+.control-button.autopilot-button {
+    background: linear-gradient(135deg, #3498db 0%, #1abc9c 100%);
+    color: white;
+    border: 1px solid transparent;
+    font-weight: 600;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+}
+.control-button.autopilot-button:hover {
+    background: linear-gradient(135deg, #2980b9 0%, #16a085 100%);
+    transform: translateY(-1px);
+    box-shadow: 0 3px 6px rgba(0, 0, 0, 0.3);
+}
+.control-button.autopilot-button.autopilot-on {
+    background: linear-gradient(135deg, #27ae60 0%, #2ecc71 100%);
+    animation: pulse-autopilot 2s infinite;
+}
+@keyframes pulse-autopilot {
+    0%, 100% { box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2); }
+    50% { box-shadow: 0 0 15px rgba(46, 204, 113, 0.6); }
+}
+
 .iframe-check-button, .iframe-trace-button, .iframe-report-button {
     border: 1px solid var(--border-color); color: var(--text-secondary); background-color: var(--bg-secondary); position: relative; width: 28px; min-width: 28px; height: 28px; padding: 0; border-radius: 4px; display: flex; align-items: center; justify-content: center; cursor: pointer; transition: all 0.15s ease; box-sizing: border-box; font-size: 14px; line-height: 1; text-align: center; }
 .iframe-check-button.success, .iframe-check-button.green, .iframe-trace-button.green, .iframe-report-button.default, .iframe-report-button.green { color: var(--accent-primary); border-color: var(--accent-primary); }
@@ -1034,46 +1074,15 @@ body {
     /* You might need to adjust the height or max-height depending on layout */
 }
 
-/* Adjust filter container to allow button */
+/* Endpoint filter container */
 .endpoint-filter-container {
-    display: flex; /* Use flexbox for alignment */
-    align-items: center; /* Vertically center items */
-    gap: 10px; /* Add space between input and button */
-    padding: 10px 15px 5px 15px;
+    padding: 10px 15px;
     border-bottom: 1px solid var(--border-color);
     background-color: var(--bg-secondary);
-    /* Remove sticky position if filter should scroll */
-    /* position: sticky; */
-    /* top: 0; */
 }
 
 #endpointFilterInput {
-    flex-grow: 1; /* Allow input to take available space */
-    /* Input styles from previous steps */
-    width: auto; /* Override width: 100% if needed due to flex */
-}
-
-.filter-toggle-button {
-    flex-shrink: 0; /* Prevent button from shrinking */
-    padding: 5px 8px; /* Adjust padding */
-    font-size: 12px; /* Adjust font size */
-    line-height: 1.2;
-    white-space: nowrap; /* Prevent text wrapping */
-}
-
-.filter-toggle-button .button-icon {
-    margin-right: 4px; /* Space between icon and text */
-    display: inline-block; /* Ensure icon displays correctly */
-}
-
-/* Style for when the silent filter is ON */
-.filter-toggle-button.active {
-    background-color: var(--accent-primary);
-    color: var(--bg-primary);
-    border-color: var(--accent-primary);
-}
-.filter-toggle-button.active:hover {
-    background-color: var(--accent-primary-hover);
+    width: 100%;
 }
 .version-info {
     padding: 5px 10px;
@@ -1087,5 +1096,245 @@ body {
     padding: 2px 6px;
     font-size: 0.9em;
     margin-left: 5px;
+}
+
+/* Server Status Badge */
+.server-status-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 12px;
+    border-radius: 4px;
+    font-size: 12px;
+    font-weight: 500;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    margin-left: 12px;
+}
+
+.server-status-badge .status-indicator {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #888;
+    animation: pulse-slow 2s infinite;
+}
+
+.server-status-badge.online .status-indicator {
+    background: #2ecc71;
+    box-shadow: 0 0 8px rgba(46, 204, 113, 0.6);
+}
+
+.server-status-badge.offline .status-indicator {
+    background: #e74c3c;
+    animation: none;
+}
+
+.server-status-badge.checking .status-indicator {
+    background: #f39c12;
+}
+
+.server-status-badge .status-text {
+    font-size: 11px;
+    color: var(--text-secondary);
+}
+
+.server-status-badge.online .status-text {
+    color: #2ecc71;
+}
+
+.server-status-badge.offline .status-text {
+    color: #e74c3c;
+}
+
+@keyframes pulse-slow {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.6; }
+}
+
+/* URL List Upload Modal */
+.url-list-modal {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    z-index: 1050;
+    width: 90%;
+    max-width: 700px;
+    background-color: var(--bg-secondary);
+    color: var(--text-primary);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    box-shadow: 0 5px 15px rgba(0, 0, 0, 0.5);
+    display: flex;
+    flex-direction: column;
+    max-height: 85vh;
+    overflow: hidden;
+}
+
+.url-list-modal-header {
+    padding: 15px 20px;
+    border-bottom: 1px solid var(--border-color);
+    flex-shrink: 0;
+    position: relative;
+    background: linear-gradient(135deg, #f39c12 0%, #9b59b6 100%);
+}
+
+.url-list-modal-header h4 {
+    margin: 0;
+    font-size: 18px;
+    font-weight: 600;
+    color: white;
+}
+
+.url-list-modal-body {
+    padding: 20px;
+    flex-grow: 1;
+    overflow-y: auto;
+    background-color: var(--bg-primary);
+}
+
+.url-list-modal-body p {
+    color: var(--text-secondary);
+    margin-bottom: 15px;
+    font-size: 13px;
+}
+
+.url-list-textarea {
+    width: 100%;
+    min-height: 300px;
+    padding: 12px;
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    background-color: var(--code-bg);
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+    font-size: 13px;
+    resize: vertical;
+    box-sizing: border-box;
+}
+
+.url-list-textarea:focus {
+    outline: none;
+    border-color: var(--accent-primary);
+    box-shadow: 0 0 0 2px rgba(77, 208, 81, 0.2);
+}
+
+.url-list-file-upload {
+    margin-top: 15px;
+    padding: 12px;
+    border: 2px dashed var(--border-color);
+    border-radius: 4px;
+    text-align: center;
+    background-color: var(--bg-secondary);
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.url-list-file-upload:hover {
+    border-color: var(--accent-primary);
+    background-color: rgba(77, 208, 81, 0.1);
+}
+
+.url-list-file-upload input[type="file"] {
+    display: none;
+}
+
+.url-list-modal-footer {
+    padding: 15px 20px;
+    display: flex;
+    justify-content: space-between;
+    gap: 10px;
+    border-top: 1px solid var(--border-color);
+    background-color: #303030;
+    border-radius: 0 0 6px 6px;
+    flex-shrink: 0;
+}
+
+.url-list-modal-footer .control-button {
+    padding: 8px 20px;
+}
+
+/* Auto Pilot Footer Bar */
+.autopilot-footer-bar {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    background: linear-gradient(135deg, #3498db 0%, #1abc9c 100%);
+    color: white;
+    padding: 12px 20px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    box-shadow: 0 -2px 10px rgba(0, 0, 0, 0.3);
+    z-index: 1000;
+    font-size: 14px;
+    font-weight: 500;
+}
+
+.autopilot-footer-content {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.autopilot-footer-spinner {
+    display: inline-block;
+    width: 16px;
+    height: 16px;
+    border: 2px solid rgba(255, 255, 255, 0.3);
+    border-top-color: white;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+    to { transform: rotate(360deg); }
+}
+
+.autopilot-footer-url {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    opacity: 0.9;
+    max-width: 600px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.autopilot-footer-close {
+    background: rgba(255, 255, 255, 0.2);
+    border: none;
+    color: white;
+    padding: 4px 12px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 12px;
+    transition: background 0.2s ease;
+}
+
+.autopilot-footer-close:hover {
+    background: rgba(255, 255, 255, 0.3);
+}
+
+/* Custom URLs Group Styling */
+.custom-urls-group {
+    border: 2px solid #f39c12;
+    background: linear-gradient(to right, rgba(243, 156, 18, 0.1), rgba(155, 89, 182, 0.1));
+}
+
+.custom-urls-group .host-row {
+    background: linear-gradient(135deg, rgba(243, 156, 18, 0.2) 0%, rgba(155, 89, 182, 0.2) 100%);
+    border-color: #f39c12;
+}
+
+.custom-urls-group .host-name {
+    color: #f39c12;
+    font-weight: 600;
+}
+
+.custom-urls-group .host-name::before {
+    content: "📋 ";
 }
 
