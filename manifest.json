@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "FrogPost",
-  "version": "2.0.1",
+  "version": "3.0.0",
   "description": "FrogPost - One Stop Shop for postMessage communication and exploitation",
   "permissions": [
     "tabs",
@@ -27,7 +27,6 @@
     {
       "matches": ["<all_urls>"],
       "js": [
-        "dom_injection_agent.js",
         "content_scripts.js"
       ],
       "run_at": "document_start",
@@ -38,6 +37,8 @@
   "web_accessible_resources": [
     {
       "resources": [
+        "dom_injection_agent.js",
+        "static/shared-utils.js",
         "dashboard/*",
         "fuzzer/*",
         "static/*",

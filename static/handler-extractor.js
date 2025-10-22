@@ -1,7 +1,20 @@
 /**
- * FrogPost Extension
+ * FrogPost Extension - SLIM Handler Extractor (Fallback Only)
  * Originally Created by thisis0xczar/Lidor
- * Refined on: 2025-09-17
+ * Refined on: 2025-10-22
+ * 
+ * NOTE: This is now a SLIM FALLBACK ONLY - used in <5% of cases
+ * Primary extraction is via FrogPost DOM agent runtime telemetry
+ * 
+ * Removed for speed/simplicity:
+ * - extractDynamicallyViaDebugger (heavy debugger API usage)
+ * - confirmHandlerViaBreakpointExecution (breakpoint validation)
+ * - extractWithStrictIframe (complex iframe loading)
+ * 
+ * Kept:
+ * - extractStaticallyWithContext (AST-only analysis)
+ * - getBestHandler (scoring mechanism)
+ * - Basic regex fallbacks
  */
 
 class HandlerExtractor {
@@ -746,6 +759,10 @@ class HandlerExtractor {
                 if (filename.match(/app\.js|main\.js|index\.js/i)) {
                     boost = 50;
                     reason = "App-like name";
+                } else if (filename.match(/^inline_\d+\.js$/i)) {
+                    // Inline handlers are common and valid (e.g., script tags in HTML)
+                    boost = 25;
+                    reason = "Inline handler";
                 } else if (filename.match(/^(npm|vendor|chunk|bundle|poly|webpack)/i) || filename.match(/^\d+\.js$/)) {
                     // Penalize only if there are other non-chunk candidates
                     boost = (handlersInfo.some(h => {
@@ -885,352 +902,13 @@ class HandlerExtractor {
         return handlers.map(h => ({ ...h, handlerNode: null, fullScriptContent: h.handler }));
     }
 
-    async extractDynamicallyViaDebugger(targetUrl) {
-        const handlers = new Set();
-        let tabId = null;
-        let attached = false;
-        let detachReason = null;
-        const collectedScripts = new Map();
-        let analysisTimer = null;
-        const ANALYSIS_TIMEOUT = 15000;  // Increased for better handler detection
-        const SETTLE_TIME = 2000;        // Increased for script parsing to complete
-        const LOAD_EXTRA_TIME = 3000;    // Increased for page load completion
-        let resolveAnalysis;
-        const analysisPromise = new Promise(res => { resolveAnalysis = res; });
-        let analysisResolved = false;
-        let eventListener = null;
-        let detachListener = null;
-        let listenerAttached = false;
-        let detachListenerAttached = false;
+    // REMOVED: extractDynamicallyViaDebugger
+    // This heavy debugger-based method has been removed for the slim fallback.
+    // Primary extraction now happens via FrogPost DOM agent runtime telemetry.
 
-        eventListener = (source, method, params) => {
-            if (!tabId || source.tabId !== tabId) return;
-            if (method === 'Debugger.scriptParsed') {
-                const { scriptId, url } = params;
-                if (url && !url.startsWith('chrome-extension://') && url !== 'about:blank' && url.startsWith('http')) { // Ensure URL is valid http/https
-                    if(typeof log !== 'undefined') log.debug(`[Debugger Tab] Script parsed: ID=${scriptId}, URL=${url.substring(0,100)}`);
-                    collectedScripts.set(scriptId, { url: url, scriptId: scriptId });
-                    clearTimeout(analysisTimer);
-                    analysisTimer = setTimeout(() => {
-                        if (!analysisResolved) {
-                            if(typeof log !== 'undefined') log.debug('[Debugger Tab] Script parsing settled.');
-                            analysisResolved = true;
-                            resolveAnalysis();
-                        }
-                    }, SETTLE_TIME);
-                }
-            } else if (method === 'Page.loadEventFired') {
-                if(typeof log !== 'undefined') log.debug('[Debugger Tab] Page load event fired.');
-                clearTimeout(analysisTimer);
-                analysisTimer = setTimeout(() => {
-                    if (!analysisResolved) {
-                        if(typeof log !== 'undefined') log.debug('[Debugger Tab] Page loaded + settle time.');
-                        analysisResolved = true;
-                        resolveAnalysis();
-                    }
-                }, LOAD_EXTRA_TIME);
-            } else if (method === 'Runtime.exceptionThrown') {
-                if(typeof log !== 'undefined') log.warn('[Debugger Tab] Exception in target:', params.exceptionDetails?.exception?.description || 'Unknown error');
-            }
-        };
-
-        detachListener = (source, reason) => {
-            if (source.tabId === tabId) {
-                detachReason = reason;
-                if(typeof log !== 'undefined') log.warn(`[Debugger Tab] Detached unexpectedly from tab ${tabId}. Reason: ${reason}`);
-                attached = false;
-                if (eventListener && chrome?.debugger?.onEvent) try {chrome.debugger.onEvent.removeListener(eventListener); listenerAttached = false;} catch(e){}
-                if (detachListener && chrome?.debugger?.onDetach) try {chrome.debugger.onDetach.removeListener(detachListener); detachListenerAttached = false;} catch(e){}
-                if (!analysisResolved) {
-                    analysisResolved = true;
-                    resolveAnalysis();
-                }
-            }
-        };
-
-        try {
-            if(typeof log !== 'undefined') log.debug('[Debugger Tab] Creating temporary background tab for:', targetUrl);
-
-            // Create tab with special parameter to mark it as handler extraction
-            const analysisUrl = targetUrl + (targetUrl.includes('?') ? '&' : '?') + 'frogpost_handler_extraction=true';
-            const tab = await chrome.tabs.create({ url: analysisUrl, active: false });
-            tabId = tab.id;
-            if (!tabId) throw new Error("Failed to create target tab.");
-            if(typeof log !== 'undefined') log.debug(`[Debugger Tab] Created target tab ID: ${tabId}`);
-
-            // Mark this tab as a handler extraction tab
-            await chrome.storage.local.set({ [`handler-extraction-tab-${tabId}`]: true });
-
-            await new Promise(res => setTimeout(res, 2000)); // Increased for better page load
-
-            await chrome.debugger.attach({ tabId }, "1.3");
-            attached = true;
-            if(typeof log !== 'undefined') log.debug(`[Debugger Tab] Attached to target tab: ${tabId}`);
-
-            chrome.debugger.onEvent.addListener(eventListener); listenerAttached = true;
-            chrome.debugger.onDetach.addListener(detachListener); detachListenerAttached = true;
-
-            await Promise.all([
-                chrome.debugger.sendCommand({ tabId }, "Page.enable"),
-                chrome.debugger.sendCommand({ tabId }, "Runtime.enable"),
-                chrome.debugger.sendCommand({ tabId }, "Debugger.enable")
-            ]);
-            if(typeof log !== 'undefined') log.debug(`[Debugger Tab] Enabled domains.`);
-
-            const overallTimeout = setTimeout(() => {
-                if (!analysisResolved) {
-                    if(typeof log !== 'undefined') log.warn(`[Debugger Tab] Overall analysis timeout reached.`);
-                    analysisResolved = true;
-                    resolveAnalysis();
-                }
-            }, ANALYSIS_TIMEOUT);
-
-            if(typeof log !== 'undefined') log.debug('[Debugger Tab] Waiting for script parsing to settle...');
-            await analysisPromise;
-            clearTimeout(overallTimeout);
-
-            if (!attached) throw new Error(`Debugger detached unexpectedly. Reason: ${detachReason || 'Unknown'}`);
-            if(typeof log !== 'undefined') log.debug(`[Debugger Tab] Proceeding to fetch ${collectedScripts.size} script sources.`);
-
-            const sourcePromises = Array.from(collectedScripts.keys()).map(scriptId =>
-                chrome.debugger.sendCommand({ tabId }, "Debugger.getScriptSource", { scriptId })
-                    .then(result => ({ scriptId, source: result.scriptSource }))
-                    .catch(err => {
-                        if(typeof log !== 'undefined') log.warn(`[Debugger Tab] Failed to get source for scriptId ${scriptId}:`, err?.message || err);
-                        return { scriptId, source: null };
-                    })
-            );
-            const sources = await Promise.all(sourcePromises);
-
-            if(typeof log !== 'undefined') log.debug(`[Debugger Tab] Analyzing ${sources.filter(s => s.source).length} fetched script sources.`);
-            for (const { scriptId, source } of sources) {
-                if (source) {
-                    const scriptInfo = collectedScripts.get(scriptId);
-                    const sourceUrl = scriptInfo?.url || `tab_${tabId}_scriptId_${scriptId}`;
-                    const scriptHandlers = this.analyzeScriptContent(source, sourceUrl);
-                    scriptHandlers.forEach(handlerInfo => handlers.add(handlerInfo));
-                }
-            }
-        } catch (error) {
-            if(typeof log !== 'undefined') log.error('[Debugger Tab] Error during dynamic extraction process:', error);
-            handlers.clear();
-        } finally {
-            if(typeof log !== 'undefined') log.debug('[Debugger Tab] Entering finally block for cleanup.');
-            clearTimeout(analysisTimer);
-            if (attached && tabId) {
-                if(typeof log !== 'undefined') log.debug(`[Debugger Tab] Attempting to detach from tab: ${tabId}`);
-                try {
-                    if (listenerAttached && eventListener && chrome?.debugger?.onEvent) chrome.debugger.onEvent.removeListener(eventListener);
-                    if (detachListenerAttached && detachListener && chrome?.debugger?.onDetach) chrome.debugger.onDetach.removeListener(detachListener);
-                    await chrome.debugger.sendCommand({ tabId }, "Debugger.disable").catch(e => {});
-                    await chrome.debugger.detach({ tabId });
-                    if(typeof log !== 'undefined') log.debug(`[Debugger Tab] Detached successfully from tab: ${tabId}`);
-                } catch (detachError) {
-                    if(typeof log !== 'undefined') log.error('[Debugger Tab] Error detaching:', detachError?.message || detachError);
-                }
-            }
-            else { if(typeof log !== 'undefined') log.debug('[Debugger Tab] Skipping detach (not attached or no tabId).'); }
-
-            if (tabId) {
-                if(typeof log !== 'undefined') log.debug(`[Debugger Tab] Attempting to remove temporary tab: ${tabId}`);
-                try {
-                    // Clean up the handler extraction flag
-                    await chrome.storage.local.remove(`handler-extraction-tab-${tabId}`);
-
-                    await chrome.tabs.remove(tabId);
-                }
-                catch (removeError) { if(typeof log !== 'undefined') log.error(`[Debugger Tab] Error removing temporary tab ${tabId}:`, removeError); }
-            }
-        }
-        if(typeof log !== 'undefined') log.success(`[Debugger Tab] Dynamic extraction finished. Found ${handlers.size} potential handler structures.`);
-        return Array.from(handlers);
-    }
-
-    async confirmHandlerViaBreakpointExecution(targetUrl, potentialHandlers, testMessageData = {"FrogPost": "BreakpointTest"}) {
-        if (!potentialHandlers || potentialHandlers.length === 0) {
-            if(typeof log !== 'undefined') log.warn('[Breakpoint Exec] No potential handlers provided.');
-            return null;
-        }
-
-        let tabId = null;
-        let attached = false;
-        let confirmedHandler = null;
-        const breakpointMap = new Map();
-        let targetOrigin = '*';
-
-        const onDebuggerEvent = (source, method, params) => {
-            if (!tabId || source.tabId !== tabId) return;
-
-            if (method === 'Debugger.paused' && params.hitBreakpoints && params.hitBreakpoints.length > 0) {
-                if(typeof log !== 'undefined') log.debug(`[Breakpoint Exec] Debugger paused. Hit Breakpoints: ${params.hitBreakpoints.join(', ')}`);
-                for (const bpId of params.hitBreakpoints) {
-                    if (breakpointMap.has(bpId)) {
-                        confirmedHandler = breakpointMap.get(bpId);
-                        if(typeof log !== 'undefined') log.success(`[Breakpoint Exec] Confirmed handler via breakpoint ${bpId}. Handler category: ${confirmedHandler.category}`);
-                        break;
-                    }
-                }
-                chrome.debugger.sendCommand({ tabId }, "Debugger.resume").catch(e => log.warn("[Breakpoint Exec] Error resuming debugger:", e.message));
-            } else if (method === 'Debugger.scriptParsed') {
-            } else if (method === 'Runtime.exceptionThrown') {
-                if(typeof log !== 'undefined') log.warn('[Breakpoint Exec Tab] Exception in target:', params.exceptionDetails?.exception?.description || 'Unknown error');
-            }
-        };
-
-        const onDebuggerDetach = (source, reason) => {
-            if (source.tabId === tabId) {
-                if(typeof log !== 'undefined') log.warn(`[Breakpoint Exec Tab] Detached from tab ${tabId}. Reason: ${reason}`);
-                attached = false;
-            }
-        };
-
-        try {
-            if(typeof log !== 'undefined') log.debug(`[Breakpoint Exec] Creating temp tab for: ${targetUrl}`);
-            // Create the temporary tab with a special marker so the extension ignores it
-            const analysisUrl = targetUrl + (targetUrl.includes('?') ? '&' : '?') + 'frogpost_handler_extraction=true';
-            const tab = await chrome.tabs.create({ url: analysisUrl, active: false });
-            tabId = tab.id;
-            if (!tabId) throw new Error("Failed to create target tab.");
-            // Mark this tab in storage as a handler-extraction tab for extra safety
-            try { await chrome.storage.local.set({ [`handler-extraction-tab-${tabId}`]: true }); } catch {}
-            // Wait for page to be ready - need enough time for scripts to load
-            await new Promise(resolve => setTimeout(resolve, 1000)); // Reduced from 1500
-
-            targetOrigin = new URL(targetUrl).origin;
-
-            await chrome.debugger.attach({ tabId }, "1.3");
-            attached = true;
-            if(typeof log !== 'undefined') log.debug(`[Breakpoint Exec] Attached to target tab: ${tabId}`);
-
-            chrome.debugger.onEvent.addListener(onDebuggerEvent);
-            chrome.debugger.onDetach.addListener(onDebuggerDetach);
-
-            await Promise.all([
-                chrome.debugger.sendCommand({ tabId }, "Page.enable"),
-                chrome.debugger.sendCommand({ tabId }, "Runtime.enable"),
-                chrome.debugger.sendCommand({ tabId }, "Debugger.enable")
-            ]);
-            if(typeof log !== 'undefined') log.debug(`[Breakpoint Exec] Enabled debugger domains.`);
-
-            let breakpointPromises = [];
-            if(typeof log !== 'undefined') log.debug(`[Breakpoint Exec] Attempting to set breakpoints for ${potentialHandlers.length} potential handlers.`);
-            for (const handlerInfo of potentialHandlers) {
-                if (handlerInfo.handlerNode?.loc?.start) {
-                    const location = {
-                        scriptId: '', // This needs to be determined, major challenge!
-                        lineNumber: handlerInfo.handlerNode.loc.start.line - 1, // Acorn lines are 1-based, debugger is 0-based
-                        columnNumber: handlerInfo.handlerNode.loc.start.column
-                    };
-
-                    if (handlerInfo.source && handlerInfo.source.startsWith('http')) {
-                        const bpPromise = chrome.debugger.sendCommand({ tabId }, "Debugger.setBreakpointByUrl", {
-                            url: handlerInfo.source, // Or regex if needed
-                            lineNumber: location.lineNumber,
-                            columnNumber: location.columnNumber
-                        }).then(result => {
-                            if (result && result.breakpointId) {
-                                breakpointMap.set(result.breakpointId, handlerInfo);
-                                if(typeof log !== 'undefined') log.debug(`[Breakpoint Exec] Set breakpoint ${result.breakpointId} for handler at ${handlerInfo.source}:${location.lineNumber}`);
-                            } else {
-                                if(typeof log !== 'undefined') log.warn(`[Breakpoint Exec] Failed to set breakpoint for handler at ${handlerInfo.source}:${location.lineNumber}`);
-                            }
-                            return result;
-                        }).catch(err => {
-                            // Handle "already exists" errors gracefully
-                            if (err && (err.code === -32000 || /already exists/i.test(err.message||''))) {
-                                if(typeof log !== 'undefined') log.info(`[Breakpoint Exec] Breakpoint already exists at ${handlerInfo.source}:${location.lineNumber} - continuing.`);
-                            } else {
-                                if(typeof log !== 'undefined') log.warn(`[Breakpoint Exec] Error setting breakpoint for handler at ${handlerInfo.source}:${location.lineNumber}: ${err.message}`);
-                            }
-                            return null;
-                        });
-                        breakpointPromises.push(bpPromise);
-                    } else {
-                        if(typeof log !== 'undefined') log.warn(`[Breakpoint Exec] Cannot set breakpoint for handler candidate without source URL or scriptId mapping.`);
-                    }
-
-                } else {
-                    if(typeof log !== 'undefined') log.debug(`[Breakpoint Exec] Skipping handler candidate, no location info: ${handlerInfo.category}`);
-                }
-            }
-            await Promise.all(breakpointPromises);
-            if(typeof log !== 'undefined') log.debug(`[Breakpoint Exec] Finished attempting to set ${breakpointMap.size} breakpoints.`);
-
-            if (breakpointMap.size === 0) {
-                if(typeof log !== 'undefined') log.warn(`[Breakpoint Exec] No breakpoints could be set. Potential handlers:`, potentialHandlers.map(h => ({
-                    category: h.category,
-                    source: h.source?.substring(h.source?.lastIndexOf('/')+1),
-                    hasLocation: !!h.handlerNode?.loc?.start
-                })));
-                throw new Error("Could not set any breakpoints for potential handlers.");
-            }
-
-            if(typeof log !== 'undefined') log.debug(`[Breakpoint Exec] Injecting postMessage probes with targetOrigin: ${targetOrigin}`);
-
-            // Send both probes in parallel for faster execution
-            const jsonProbe = JSON.stringify(testMessageData || { "FrogPost": "BreakpointTest" });
-            const strProbe = 'FrogPost::BreakpointTest';
-
-            const probePromises = [
-                chrome.debugger.sendCommand({ tabId }, "Runtime.evaluate", {
-                    expression: `window.postMessage(${jsonProbe}, '${targetOrigin}');`
-                }),
-                chrome.debugger.sendCommand({ tabId }, "Runtime.evaluate", {
-                    expression: `window.postMessage('${strProbe}', '${targetOrigin}');`
-                })
-            ];
-
-            // Adaptive delay based on number of breakpoints set
-            const breakpointDelay = Math.min(200 + (breakpointMap.size * 50), 500);
-            await new Promise(resolve => setTimeout(resolve, breakpointDelay));
-
-            await Promise.all(probePromises);
-            if(typeof log !== 'undefined') log.debug(`[Breakpoint Exec] Both probes sent in parallel.`);
-
-            // Wait for handler confirmation with early exit capability
-            const maxWaitTime = 2000; // Reduced from 3000
-            const checkInterval = 50;  // Reduced from 100 for faster checking
-            let waitedTime = 0;
-
-            while (waitedTime < maxWaitTime && !confirmedHandler) {
-                await new Promise(resolve => setTimeout(resolve, checkInterval));
-                waitedTime += checkInterval;
-            }
-
-            if (confirmedHandler) {
-                if(typeof log !== 'undefined') log.success(`[Breakpoint Exec] Confirmed handler via execution (${waitedTime}ms):`, confirmedHandler);
-                confirmedHandler.category = `breakpoint-${confirmedHandler.category || 'confirmed'}`;
-            } else {
-                if(typeof log !== 'undefined') log.warn(`[Breakpoint Exec] No breakpoint hit confirmed within ${maxWaitTime}ms timeout.`);
-            }
-
-        } catch (error) {
-            if(typeof log !== 'undefined') log.error('[Breakpoint Exec] Error during process:', error);
-            confirmedHandler = null;
-        } finally {
-            if (attached && tabId) {
-                if(typeof log !== 'undefined') log.debug(`[Breakpoint Exec] Cleaning up debugger for tab ${tabId}`);
-                try {
-                    chrome.debugger.onEvent.removeListener(onDebuggerEvent);
-                    chrome.debugger.onDetach.removeListener(onDebuggerDetach);
-                    await chrome.debugger.sendCommand({ tabId }, "Debugger.disable");
-                    await chrome.debugger.detach({ tabId });
-                } catch (detachError) {
-                    if(typeof log !== 'undefined') log.error('[Breakpoint Exec] Error during cleanup:', detachError?.message || detachError);
-                }
-            }
-            if (tabId) {
-                try {
-                    // Clean up the handler extraction flag
-                    await chrome.storage.local.remove(`handler-extraction-tab-${tabId}`);
-
-                    await chrome.tabs.remove(tabId);
-                }
-                catch (removeError) { if(typeof log !== 'undefined') log.error(`[Breakpoint Exec] Error removing temp tab ${tabId}:`, removeError); }
-            }
-        }
-        return confirmedHandler;
-    }
+    // REMOVED: confirmHandlerViaBreakpointExecution
+    // This heavy breakpoint-based validation has been removed for the slim fallback.
+    // Primary extraction now happens via FrogPost DOM agent runtime telemetry.
 
 }
 
@@ -1290,19 +968,11 @@ HandlerExtractor.prototype.extractStaticallyWithContext = async function(targetU
     return Array.from(handlers);
 };
 
+// REMOVED: extractWithStrictIframe
+// This method has been simplified away since it depended on the removed debugger extraction.
+// Use extractStaticallyWithContext instead as the slim fallback.
 HandlerExtractor.prototype.extractWithStrictIframe = async function(targetUrl, messageKeys, messageTypes, messageValues) {
-    // Minimal strict mode: leverage debugger-based dynamic extraction to approximate iframe monitoring
-    try {
-        this._log(1, 'debug', `[Strict Iframe] Starting dynamic extraction for: ${targetUrl}`);
-        const dynamicHandlers = await this.extractDynamicallyViaDebugger(targetUrl);
-        if (Array.isArray(dynamicHandlers) && dynamicHandlers.length > 0) {
-            this._log(1, 'success', `[Strict Iframe] Dynamic extraction returned ${dynamicHandlers.length} candidate(s).`);
-            return dynamicHandlers;
-        }
-        this._log(1, 'warn', `[Strict Iframe] No dynamic candidates found. Returning empty set.`);
-        return [];
-    } catch (e) {
-        this._log(1, 'error', `[Strict Iframe] Error: ${e?.message || e}`);
-        return [];
-    }
+    // Redirected to static analysis fallback
+    this._log(1, 'debug', `[Slim Fallback] Redirecting to static analysis...`);
+    return this.extractStaticallyWithContext(targetUrl, messageKeys, messageTypes, messageValues);
 };

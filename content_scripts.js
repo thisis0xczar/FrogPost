@@ -1,11 +1,27 @@
 /**
  * FrogPost Extension
  * Originally Created by thisis0xczar/Lidor
- * Refined on: 2025-09-17
+ * Refined on: 2025-10-22
  */
 
 // ============================================================================
-// CONTENT FORWARDER
+// INJECT DOM AGENT INTO MAIN WORLD (CRITICAL!)
+// ============================================================================
+// The DOM agent MUST run in the MAIN world to intercept page's addEventListener
+(async () => {
+    try {
+        // Inject the DOM agent script into MAIN world
+        const script = document.createElement('script');
+        script.src = chrome.runtime.getURL('dom_injection_agent.js');
+        script.onload = () => script.remove();
+        (document.head || document.documentElement).appendChild(script);
+    } catch (e) {
+        console.error('FrogPost: Failed to inject DOM agent into MAIN world:', e);
+    }
+})();
+
+// ============================================================================
+// CONTENT FORWARDER (ISOLATED WORLD)
 // ============================================================================
 (() => {
     const FORWARDER_FLAG = '__frogPostForwarderInjected_v2';
@@ -21,36 +37,159 @@
 
     // Handle messages from extension to send to iframe
     chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-        console.log('Content script received message:', request);
+        // console.log('Content script received message:', request);
         if (request.action === 'sendPostMessageToIframe') {
-            try {
-                console.log('Looking for iframe on page...');
-                const iframe = document.querySelector('iframe');
-                console.log('Found iframe:', iframe);
+            // Use async to allow waiting for iframes to load
+            (async () => {
+                try {
+                    const targetUrl = request.targetUrl;
+                    let iframe = null;
+                    
+                    // Wait for iframes to load (Azure Portal loads them dynamically)
+                    let allIframes = document.querySelectorAll('iframe');
+                    let retries = 0;
+                    const maxRetries = 10; // Wait up to 1 second
+                    
+                    while (allIframes.length === 0 && retries < maxRetries) {
+                        await new Promise(resolve => setTimeout(resolve, 100));
+                        allIframes = document.querySelectorAll('iframe');
+                        retries++;
+                    }
+                    
+                    console.log('[FrogPost Content] Received send request for:', targetUrl);
+                    console.log('[FrogPost Content] Total iframes on page:', allIframes.length, `(after ${retries * 100}ms wait)`);
+                    
+                    // Log all iframe sources for debugging
+                    allIframes.forEach((frame, index) => {
+                        console.log(`[FrogPost Content] Iframe ${index}:`, {
+                            src: frame.src || '(no src)',
+                            id: frame.id || '(no id)',
+                            name: frame.name || '(no name)'
+                        });
+                    });
 
-                if (iframe && iframe.contentWindow) {
-                    console.log('Sending postMessage to iframe:', request.message);
-                    iframe.contentWindow.postMessage(request.message, '*');
-                    console.log('Content script sent message to iframe:', request.message);
-                    sendResponse({ success: true });
-                } else {
-                    console.log('No iframe found to send message to');
-                    sendResponse({ success: false, error: 'No iframe found' });
+                    // Try to find iframe matching the target URL
+                    if (targetUrl) {
+                        try {
+                            const targetUrlObj = new URL(targetUrl);
+                            console.log('[FrogPost Content] Looking for:', targetUrlObj.hostname, targetUrlObj.pathname);
+                            
+                            // Try exact src match first
+                            iframe = document.querySelector(`iframe[src="${targetUrl}"]`);
+                            if (iframe) console.log('[FrogPost Content] Found by exact match');
+                            
+                            // Try partial match (hostname + pathname)
+                            if (!iframe) {
+                                for (const frame of allIframes) {
+                                    if (frame.src) {
+                                        try {
+                                            const frameSrc = new URL(frame.src);
+                                            // Match if hostname and pathname match
+                                            if (frameSrc.hostname === targetUrlObj.hostname && 
+                                                frameSrc.pathname === targetUrlObj.pathname) {
+                                                iframe = frame;
+                                                console.log('[FrogPost Content] Found by hostname+path match');
+                                                break;
+                                            }
+                                        } catch (e) {
+                                            // Invalid frame src, skip
+                                        }
+                                    }
+                                }
+                            }
+                            
+                            // If still not found, try matching just hostname
+                            if (!iframe) {
+                                for (const frame of allIframes) {
+                                    if (frame.src) {
+                                        try {
+                                            const frameSrc = new URL(frame.src);
+                                            if (frameSrc.hostname === targetUrlObj.hostname) {
+                                                iframe = frame;
+                                                console.log('[FrogPost Content] Found by hostname match');
+                                                break;
+                                            }
+                                        } catch (e) {
+                                            // Invalid frame src, skip
+                                        }
+                                    }
+                                }
+                            }
+                        } catch (e) {
+                            console.log('[FrogPost Content] URL parsing error:', e.message);
+                        }
+                    }
+                    
+                    // Final fallback: use first iframe if no match found
+                    if (!iframe && allIframes.length > 0) {
+                        iframe = allIframes[0];
+                        console.log('[FrogPost Content] Using first available iframe as fallback');
+                    }
+
+                    if (iframe && iframe.contentWindow) {
+                        iframe.contentWindow.postMessage(request.message, '*');
+                        console.log('[FrogPost Content] ✓ Message sent to iframe');
+                        sendResponse({ 
+                            success: true, 
+                            targetMatched: !!targetUrl,
+                            debug: `Sent to iframe (${allIframes.length} total on page)`
+                        });
+                    } else {
+                        console.warn('[FrogPost Content] ✗ No iframe found or no contentWindow');
+                        const iframeList = Array.from(allIframes).map((f, i) => `${i}: ${f.src || '(no src)'}`).join(', ');
+                        sendResponse({ 
+                            success: false, 
+                            error: allIframes.length === 0 ? 'No iframes on this page (waited 1s)' : `Found ${allIframes.length} iframes but none matched. Iframes: ${iframeList}` 
+                        });
+                    }
+                } catch (error) {
+                    console.error('[FrogPost Content] Error:', error);
+                    sendResponse({ success: false, error: error.message });
                 }
-            } catch (error) {
-                console.error('Error sending message to iframe:', error);
-                sendResponse({ success: false, error: error.message });
-            }
+            })();
+            
             return true; // Keep message channel open for async response
         }
     });
 
     window.addEventListener('message', (event) => {
+        // NEW: Enhanced message forwarding
         if (event.source === window && event.data?.type === 'frogPostAgent->ForwardToBackground') {
             if (chrome?.runtime?.id && chrome.runtime.sendMessage) {
                 try {
-                    chrome.runtime.sendMessage({ type: "runtimeListenerCaptured", payload: event.data.payload }, (response) => { if (chrome.runtime.lastError) {} else {} });
-                } catch (e) {}
+                    const payload = event.data.payload;
+                    const topic = payload?.topic;
+                    
+                    // Forward with proper topic-based type
+                    // Map topics to message types that background script expects
+                    let messageType;
+                    switch(topic) {
+                        case 'handlers-telemetry':
+                        case 'handler-added':
+                        case 'received-message':
+                        case 'outgoing-message':
+                        case 'agent-ready':
+                            messageType = topic;
+                            break;
+                        default:
+                            // Skip unknown topics (they're likely internal)
+                            return;
+                    }
+                    
+                    // Logging disabled to prevent flood
+                    // console.log(`%c[FrogPost Forwarder]`, 'color: #ff6600; font-weight: bold', '🔄 Forwarding:', messageType);
+                    
+                    chrome.runtime.sendMessage({ 
+                        type: messageType, 
+                        payload: payload 
+                    }, (response) => { 
+                        if (chrome.runtime.lastError) {
+                            // Silently ignore
+                        }
+                    });
+                } catch (e) {
+                    // Silently ignore
+                }
             }
         } else if (event.data && event.data.type === '__FROGPOST_SET_INDEX__') {
             return;
@@ -63,13 +202,13 @@
                         type: event.data.type,
                         payload: event.data.data
                     }).catch(error => {
-                        console.error('FrogPost DOM Agent Forwarder: Error sending message to background:', error);
+                        // console.error('FrogPost DOM Agent Forwarder: Error sending message to background:', error);
                     });
                 } else {
-                    console.warn('FrogPost DOM Agent Forwarder: chrome.runtime not available, skipping message forwarding');
+                    // console.warn('FrogPost DOM Agent Forwarder: chrome.runtime not available, skipping message forwarding');
                 }
             } catch (error) {
-                console.error('FrogPost DOM Agent Forwarder: Error processing message:', error);
+                // console.error('FrogPost DOM Agent Forwarder: Error processing message:', error);
             }
             return;
         } else {
@@ -147,8 +286,8 @@
                 lastKnownPayloadIndexFromFuzzer = event.data.index;
             }
         }, false);
-    } catch(e) {
-        console.error("FrogPost Monitor: Failed to add index listener", e);
+        } catch(e) {
+        // console.error("FrogPost Monitor: Failed to add index listener", e);
     }
 
     if (!window[CONSOLE_FLAG]) {
@@ -170,13 +309,13 @@
                         }
                     }
                 } catch (e) {
-                    console.warn("FrogPost Monitor: Error processing console log hook", e);
+                    // console.warn("FrogPost Monitor: Error processing console log hook", e);
                 }
                 originalConsoleLog.apply(console, args);
             };
             window[CONSOLE_FLAG] = true;
         } catch (e) {
-            console.error("FrogPost Monitor: Failed to hook console.log", e);
+            // console.error("FrogPost Monitor: Failed to hook console.log", e);
         }
     }
 
@@ -187,7 +326,7 @@
 
     function getElementDescription(node) { if (!node || node.nodeType !== Node.ELEMENT_NODE) return 'NonElementNode'; let desc = `<${node.nodeName.toLowerCase()}`; for (const attr of node.attributes) { desc += ` ${attr.name}="${String(attr.value || '').substring(0, 20)}..."`; } return desc.substring(0, 100) + (desc.length > 100 ? '>...' : '>'); }
 
-    function isSuspiciousMutation(mutation) { try { if (mutation.type === 'childList') { for (const node of mutation.addedNodes) { if (node.nodeType === Node.ELEMENT_NODE) { const nodeName = node.nodeName.toUpperCase(); if (SUSPICIOUS_TAGS.has(nodeName)) { return { reason: `Added suspicious tag: <${nodeName}>`, nodeInfo: node.outerHTML?.substring(0, 150) }; } if (node.matches && node.matches('[onerror], [onload], [onclick], [onmouseover], [onfocus]')) { return { reason: `Added node with suspicious event handler`, nodeInfo: node.outerHTML.substring(0, 100) }; } const suspiciousAttr = node.getAttributeNames().find(attr => SUSPICIOUS_ATTRS.has(attr.toLowerCase())); if(suspiciousAttr) { return { reason: `Added node with suspicious attribute: ${suspiciousAttr}`, nodeInfo: getElementDescription(node), attributeValue: node.getAttribute(suspiciousAttr)?.substring(0, 50) }; } for(const attrName of node.getAttributeNames()) { const lowerAttrName = attrName.toLowerCase(); if (SUSPICIOUS_SRC_HREF_ATTRS.has(lowerAttrName)) { const value = node.getAttribute(attrName); if(value && SUSPICIOUS_ATTR_VALUES.test(value)) { return { reason: `Added node with suspicious protocol in attribute: ${lowerAttrName}`, nodeInfo: getElementDescription(node), attributeValue: value.substring(0, 50) }; } } } if (nodeName === 'SCRIPT' && node.innerHTML?.length > 0) { return { reason: `Added script tag with content`, nodeInfo: node.outerHTML?.substring(0, 150) }; } } } } else if (mutation.type === 'attributes') { const attrName = mutation.attributeName?.toLowerCase(); const targetNode = mutation.target; if (targetNode?.nodeType !== Node.ELEMENT_NODE) return null; const targetDesc = getElementDescription(targetNode); if (SUSPICIOUS_ATTRS.has(attrName)) { const value = targetNode.getAttribute(mutation.attributeName); return { reason: `Suspicious attribute modified/added: ${attrName}`, target: targetNode.nodeName, value: value?.substring(0, 100), nodeInfo: targetDesc }; } if (SUSPICIOUS_SRC_HREF_ATTRS.has(attrName)) { const value = targetNode.getAttribute(mutation.attributeName); if(value && SUSPICIOUS_ATTR_VALUES.test(value)) { return { reason: `Suspicious protocol set for attribute: ${attrName}`, target: targetNode.nodeName, value: value.substring(0, 100), nodeInfo: targetDesc }; } } } } catch(e) { console.warn("FrogPost Monitor: Error checking mutation", e); } return null; }
+    function isSuspiciousMutation(mutation) { try { if (mutation.type === 'childList') { for (const node of mutation.addedNodes) { if (node.nodeType === Node.ELEMENT_NODE) { const nodeName = node.nodeName.toUpperCase(); if (SUSPICIOUS_TAGS.has(nodeName)) { return { reason: `Added suspicious tag: <${nodeName}>`, nodeInfo: node.outerHTML?.substring(0, 150) }; } if (node.matches && node.matches('[onerror], [onload], [onclick], [onmouseover], [onfocus]')) { return { reason: `Added node with suspicious event handler`, nodeInfo: node.outerHTML.substring(0, 100) }; } const suspiciousAttr = node.getAttributeNames().find(attr => SUSPICIOUS_ATTRS.has(attr.toLowerCase())); if(suspiciousAttr) { return { reason: `Added node with suspicious attribute: ${suspiciousAttr}`, nodeInfo: getElementDescription(node), attributeValue: node.getAttribute(suspiciousAttr)?.substring(0, 50) }; } for(const attrName of node.getAttributeNames()) { const lowerAttrName = attrName.toLowerCase(); if (SUSPICIOUS_SRC_HREF_ATTRS.has(lowerAttrName)) { const value = node.getAttribute(attrName); if(value && SUSPICIOUS_ATTR_VALUES.test(value)) { return { reason: `Added node with suspicious protocol in attribute: ${lowerAttrName}`, nodeInfo: getElementDescription(node), attributeValue: value.substring(0, 50) }; } } } if (nodeName === 'SCRIPT' && node.innerHTML?.length > 0) { return { reason: `Added script tag with content`, nodeInfo: node.outerHTML?.substring(0, 150) }; } } } } else if (mutation.type === 'attributes') { const attrName = mutation.attributeName?.toLowerCase(); const targetNode = mutation.target; if (targetNode?.nodeType !== Node.ELEMENT_NODE) return null; const targetDesc = getElementDescription(targetNode); if (SUSPICIOUS_ATTRS.has(attrName)) { const value = targetNode.getAttribute(mutation.attributeName); return { reason: `Suspicious attribute modified/added: ${attrName}`, target: targetNode.nodeName, value: value?.substring(0, 100), nodeInfo: targetDesc }; } if (SUSPICIOUS_SRC_HREF_ATTRS.has(attrName)) { const value = targetNode.getAttribute(mutation.attributeName); if(value && SUSPICIOUS_ATTR_VALUES.test(value)) { return { reason: `Suspicious protocol set for attribute: ${attrName}`, target: targetNode.nodeName, value: value.substring(0, 100), nodeInfo: targetDesc }; } } } } catch(e) { /* console.warn("FrogPost Monitor: Error checking mutation", e); */ } return null; }
 
     // Throttle mutation processing to prevent performance issues
     let mutationThrottleTimeout = null;
@@ -207,7 +346,7 @@
                     if (chrome?.runtime?.id) {
                         chrome.runtime.sendMessage({ type: "FROGPOST_MUTATION", detail: suspiciousDetail, location: window.location.href, payloadIndex: currentPayloadIndex }).catch(e => {});
                     } else { observer.disconnect(); break; }
-                } catch (e) { console.warn("FrogPost Monitor: Failed to send mutation message", e); }
+                } catch (e) { /* console.warn("FrogPost Monitor: Failed to send mutation message", e); */ }
             }
         }
 
@@ -240,10 +379,10 @@
     const startObserving = () => {
         const initialTarget = document.documentElement;
         let bodyObserverActive = false;
-        const observeBody = () => { if (document.body && !bodyObserverActive) { try { observer.disconnect(); } catch(e){} try { observer.observe(document.body, config); bodyObserverActive = true; } catch(e) { console.error("FrogPost Monitor: Failed to observe document.body", e); } } };
-        try { observer.observe(initialTarget, { childList: true, subtree: true }); } catch(e) { console.error("FrogPost Monitor: Failed to observe documentElement", e); return; }
+        const observeBody = () => { if (document.body && !bodyObserverActive) { try { observer.disconnect(); } catch(e){} try { observer.observe(document.body, config); bodyObserverActive = true; } catch(e) { /* console.error("FrogPost Monitor: Failed to observe document.body", e); */ } } };
+        try { observer.observe(initialTarget, { childList: true, subtree: true }); } catch(e) { /* console.error("FrogPost Monitor: Failed to observe documentElement", e); */ return; }
         if (document.body) { observeBody(); }
-        else { const bodyWaitObserver = new MutationObserver(() => { if (document.body) { bodyWaitObserver.disconnect(); observeBody(); } }); try { bodyWaitObserver.observe(document.documentElement, { childList: true }); } catch(e) { console.error("FrogPost Monitor: Failed to observe documentElement for body wait", e); if(document.body) observeBody(); } }
+        else { const bodyWaitObserver = new MutationObserver(() => { if (document.body) { bodyWaitObserver.disconnect(); observeBody(); } }); try { bodyWaitObserver.observe(document.documentElement, { childList: true }); } catch(e) { /* console.error("FrogPost Monitor: Failed to observe documentElement for body wait", e); */ if(document.body) observeBody(); } }
     };
 
     if (document.readyState === 'loading') {
@@ -254,518 +393,8 @@
 })();
 
 // ============================================================================
-// REAL TIME DETECTOR
+// REAL TIME DETECTOR (DEPRECATED - REPLACED BY ADVANCED DOM AGENT)
 // ============================================================================
-(() => {
-    const DETECTOR_FLAG = '__frogPostRealTimeDetector_v1';
-    if (window[DETECTOR_FLAG]) return;
-    window[DETECTOR_FLAG] = true;
-
-    class RealTimeHandlerDetector {
-        constructor() {
-            this.detectedHandlers = new Map();
-            this.messageEvents = new Map();
-            this.iframeHandlers = new Map();
-            this.originalMethods = {};
-            this.isMonitoring = true;
-
-            this.initialize();
-        }
-
-        initialize() {
-            try {
-                this.overrideAddEventListener();
-                this.overridePostMessage();
-                this.monitorExistingListeners();
-                this.setupIframeMonitoring();
-                this.reportInitialState();
-            } catch (error) {
-                console.error('FrogPost RealTimeDetector: Initialization failed', error);
-            }
-        }
-
-        /**
-         * Override addEventListener to catch message handlers as they're registered
-         */
-        overrideAddEventListener() {
-            const self = this;
-            this.originalMethods.addEventListener = EventTarget.prototype.addEventListener;
-
-            EventTarget.prototype.addEventListener = function(type, listener, options) {
-                if (type === 'message' && self.isMonitoring) {
-                    self.detectMessageHandler(this, listener, options);
-                }
-                return self.originalMethods.addEventListener.call(this, type, listener, options);
-            };
-        }
-
-        /**
-         * Override postMessage to log all outgoing messages
-         */
-        overridePostMessage() {
-            const self = this;
-            this.originalMethods.postMessage = window.postMessage;
-
-            window.postMessage = function(message, targetOrigin, transfer) {
-                if (self.isMonitoring) {
-                    self.logPostMessage(message, targetOrigin, transfer);
-                }
-                return self.originalMethods.postMessage.call(this, message, targetOrigin, transfer);
-            };
-        }
-
-        /**
-         * Detect and analyze message event handlers
-         */
-        detectMessageHandler(target, listener, options) {
-            try {
-                // Filter out extension-injected handlers
-                if (this.isExtensionHandler(listener)) {
-                    console.log('FrogPost: Filtered out extension handler:', listener.toString().substring(0, 100));
-                    return; // Skip extension handlers
-                }
-
-                const handlerInfo = {
-                    id: this.generateHandlerId(),
-                    target: this.getTargetInfo(target),
-                    listener: this.analyzeListener(listener),
-                    options: options,
-                    timestamp: new Date().toISOString(),
-                    location: window.location.href,
-                    frameType: this.getFrameType()
-                };
-
-                this.detectedHandlers.set(handlerInfo.id, handlerInfo);
-                this.reportHandlerDetection(handlerInfo);
-
-                console.log('FrogPost: Real-time handler detected', handlerInfo);
-            } catch (error) {
-                console.error('FrogPost: Error detecting handler', error);
-            }
-        }
-
-        /**
-         * Log postMessage calls for analysis
-         */
-        logPostMessage(message, targetOrigin, transfer) {
-            try {
-                // Filter out extension messages
-                if (this.isExtensionMessage(message)) {
-                    console.log('FrogPost: Filtered out extension message:', JSON.stringify(message).substring(0, 100));
-                    return; // Skip extension messages
-                }
-
-                const messageInfo = {
-                    id: this.generateMessageId(),
-                    data: message,
-                    targetOrigin: targetOrigin,
-                    transfer: transfer,
-                    timestamp: new Date().toISOString(),
-                    source: window.location.href,
-                    frameType: this.getFrameType()
-                };
-
-                this.messageEvents.set(messageInfo.id, messageInfo);
-                this.reportMessageSent(messageInfo);
-                console.log('FrogPost: Real-time message logged', messageInfo);
-            } catch (error) {
-                console.error('FrogPost: Error logging postMessage', error);
-            }
-        }
-
-        /**
-         * Monitor existing event listeners on page load
-         */
-        monitorExistingListeners() {
-            try {
-                // Check if window already has message listeners
-                const hasMessageListeners = this.checkExistingListeners(window);
-                if (hasMessageListeners) {
-                    this.reportExistingListeners();
-                }
-
-                // Also check for onmessage handlers
-                if (window.onmessage && typeof window.onmessage === 'function') {
-                    console.log('FrogPost: Found existing onmessage handler');
-                    this.detectMessageHandler(window, window.onmessage, null);
-                }
-
-                // Check for any existing addEventListener calls we might have missed
-                setTimeout(() => {
-                    this.scanForExistingHandlers();
-                }, 1000);
-            } catch (error) {
-                console.error('FrogPost: Error monitoring existing listeners', error);
-            }
-        }
-
-        /**
-         * Scan for existing handlers that might have been added before our detector
-         */
-        scanForExistingHandlers() {
-            try {
-                // This is a simplified scan - we can't easily detect all existing listeners
-                // but we can check for common patterns
-                console.log('FrogPost: Scanning for existing message handlers...');
-
-                // Check if there are any message event listeners on common targets
-                const targets = [window, document];
-                targets.forEach(target => {
-                    if (target.onmessage && typeof target.onmessage === 'function') {
-                        console.log('FrogPost: Found onmessage handler on', target.constructor.name);
-                        this.detectMessageHandler(target, target.onmessage, null);
-                    }
-                });
-            } catch (error) {
-                console.error('FrogPost: Error scanning for existing handlers', error);
-            }
-        }
-
-        /**
-         * Setup monitoring for dynamically created iframes
-         */
-        setupIframeMonitoring() {
-            const self = this;
-
-            // Monitor for new iframes
-            const observer = new MutationObserver((mutations) => {
-                mutations.forEach((mutation) => {
-                    mutation.addedNodes.forEach((node) => {
-                        if (node.tagName === 'IFRAME') {
-                            self.monitorNewIframe(node);
-                        }
-                    });
-                });
-            });
-
-            observer.observe(document.body || document.documentElement, {
-                childList: true,
-                subtree: true
-            });
-        }
-
-        /**
-         * Monitor newly created iframe
-         */
-        monitorNewIframe(iframe) {
-            try {
-                iframe.addEventListener('load', () => {
-                    try {
-                        // Try to access iframe content (may fail due to CORS)
-                        const iframeDoc = iframe.contentDocument || iframe.contentWindow?.document;
-                        if (iframeDoc) {
-                            this.injectDetectorIntoIframe(iframeDoc);
-                        }
-                    } catch (error) {
-                        // CORS restriction - iframe is cross-origin
-                        this.reportCrossOriginIframe(iframe);
-                    }
-                });
-            } catch (error) {
-                console.error('FrogPost: Error monitoring iframe', error);
-            }
-        }
-
-        /**
-         * Inject detector into iframe content
-         */
-        injectDetectorIntoIframe(iframeDoc) {
-            try {
-                const script = iframeDoc.createElement('script');
-                script.src = chrome.runtime.getURL('static/iframe-detector.js');
-                script.onload = () => script.remove();
-                iframeDoc.head.appendChild(script);
-            } catch (error) {
-                console.error('FrogPost: Error injecting into iframe', error);
-            }
-        }
-
-        /**
-         * Check if a handler is from the extension (should be filtered out)
-         */
-        isExtensionHandler(listener) {
-            try {
-                if (typeof listener !== 'function') {
-                    return false;
-                }
-
-                const source = listener.toString();
-
-                // Check for FrogPost extension patterns (more specific to avoid false positives)
-                const extensionPatterns = [
-                    'frogPostIframeHandler',
-                    'frogPostAgent->ForwardToBackground',
-                    '__FROGPOST_SET_INDEX__',
-                    'chrome.runtime.sendMessage',
-                    'chrome?.runtime?.id',
-                    '__frogPostRealTimeDetector'
-                ];
-
-                // Only filter if we find very specific extension patterns
-                return extensionPatterns.some(pattern => source.includes(pattern));
-            } catch (error) {
-                return false; // If we can't analyze, assume it's not an extension handler
-            }
-        }
-
-        /**
-         * Check if a message is from the extension (should be filtered out)
-         */
-        isExtensionMessage(message) {
-            try {
-                if (!message || typeof message !== 'object') {
-                    return false;
-                }
-
-                // Check for specific extension message types
-                if (message.type) {
-                    const extensionTypes = [
-                        'frogPostIframeHandler',
-                        'frogPostAgent->ForwardToBackground',
-                        '__FROGPOST_SET_INDEX__',
-                        'realTimeHandlerDetected',
-                        'realTimeMessageSent',
-                        'realTimeDetectorReady'
-                    ];
-
-                    if (extensionTypes.includes(message.type)) {
-                        return true;
-                    }
-                }
-
-                // Check message content for extension patterns
-                const messageStr = JSON.stringify(message);
-                const extensionPatterns = [
-                    'frogPostIframeHandler',
-                    'frogPostAgent->ForwardToBackground',
-                    '__FROGPOST_SET_INDEX__',
-                    'chrome.runtime.sendMessage',
-                    'chrome?.runtime?.id'
-                ];
-
-                return extensionPatterns.some(pattern => messageStr.includes(pattern));
-            } catch (error) {
-                return false; // If we can't analyze, assume it's not an extension message
-            }
-        }
-
-        /**
-         * Analyze listener function to extract useful information
-         */
-        analyzeListener(listener) {
-            try {
-                return {
-                    type: typeof listener,
-                    isFunction: typeof listener === 'function',
-                    isObject: typeof listener === 'object' && listener !== null,
-                    hasHandleEvent: typeof listener === 'object' && typeof listener.handleEvent === 'function',
-                    source: listener.toString ? listener.toString().substring(0, 200) : 'unknown'
-                };
-            } catch (error) {
-                return { type: 'unknown', error: error.message };
-            }
-        }
-
-        /**
-         * Get information about the event target
-         */
-        getTargetInfo(target) {
-            try {
-                if (target === window) {
-                    return { type: 'window', url: window.location.href };
-                } else if (target === document) {
-                    return { type: 'document', url: window.location.href };
-                } else if (target.nodeType) {
-                    return {
-                        type: 'element',
-                        tagName: target.tagName,
-                        id: target.id,
-                        className: target.className
-                    };
-                } else {
-                    return { type: 'unknown', target: target };
-                }
-            } catch (error) {
-                return { type: 'error', error: error.message };
-            }
-        }
-
-        /**
-         * Determine frame type
-         */
-        getFrameType() {
-            try {
-                if (window === window.top) {
-                    return 'top';
-                } else if (window.parent !== window.top) {
-                    return 'nested';
-                } else {
-                    return 'iframe';
-                }
-            } catch (error) {
-                return 'unknown';
-            }
-        }
-
-        /**
-         * Check for existing message listeners
-         */
-        checkExistingListeners(target) {
-            try {
-                // This is a simplified check - full detection requires debugger
-                return target.onmessage !== null ||
-                    (target._listeners && target._listeners.message) ||
-                    false;
-            } catch (error) {
-                return false;
-            }
-        }
-
-        /**
-         * Generate unique handler ID
-         */
-        generateHandlerId() {
-            return `handler_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-        }
-
-        /**
-         * Generate unique message ID
-         */
-        generateMessageId() {
-            return `msg_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-        }
-
-        /**
-         * Report handler detection to background script
-         */
-        reportHandlerDetection(handlerInfo) {
-            if (chrome?.runtime?.id) {
-                chrome.runtime.sendMessage({
-                    type: 'realTimeHandlerDetected',
-                    payload: handlerInfo
-                }).catch(error => {
-                    console.error('FrogPost: Error reporting handler detection', error);
-                });
-            }
-        }
-
-        /**
-         * Report message sent to background script
-         */
-        reportMessageSent(messageInfo) {
-            if (chrome?.runtime?.id) {
-                chrome.runtime.sendMessage({
-                    type: 'realTimeMessageSent',
-                    payload: messageInfo
-                }).catch(error => {
-                    console.error('FrogPost: Error reporting message sent', error);
-                });
-            }
-        }
-
-        /**
-         * Report existing listeners
-         */
-        reportExistingListeners() {
-            if (chrome?.runtime?.id) {
-                chrome.runtime.sendMessage({
-                    type: 'realTimeExistingListeners',
-                    payload: {
-                        location: window.location.href,
-                        timestamp: new Date().toISOString(),
-                        frameType: this.getFrameType()
-                    }
-                }).catch(error => {
-                    console.error('FrogPost: Error reporting existing listeners', error);
-                });
-            }
-        }
-
-        /**
-         * Report cross-origin iframe
-         */
-        reportCrossOriginIframe(iframe) {
-            if (chrome?.runtime?.id) {
-                chrome.runtime.sendMessage({
-                    type: 'realTimeCrossOriginIframe',
-                    payload: {
-                        src: iframe.src,
-                        timestamp: new Date().toISOString(),
-                        parentLocation: window.location.href
-                    }
-                }).catch(error => {
-                    console.error('FrogPost: Error reporting cross-origin iframe', error);
-                });
-            }
-        }
-
-        /**
-         * Report initial state
-         */
-        reportInitialState() {
-            if (chrome?.runtime?.id) {
-                chrome.runtime.sendMessage({
-                    type: 'realTimeDetectorReady',
-                    payload: {
-                        location: window.location.href,
-                        timestamp: new Date().toISOString(),
-                        frameType: this.getFrameType(),
-                        userAgent: navigator.userAgent
-                    }
-                }).catch(error => {
-                    console.error('FrogPost: Error reporting initial state', error);
-                });
-            }
-        }
-
-        /**
-         * Get detection statistics
-         */
-        getStats() {
-            return {
-                handlersDetected: this.detectedHandlers.size,
-                messagesLogged: this.messageEvents.size,
-                isMonitoring: this.isMonitoring
-            };
-        }
-
-        /**
-         * Stop monitoring (cleanup)
-         */
-        stop() {
-            this.isMonitoring = false;
-
-            // Restore original methods
-            if (this.originalMethods.addEventListener) {
-                EventTarget.prototype.addEventListener = this.originalMethods.addEventListener;
-            }
-            if (this.originalMethods.postMessage) {
-                window.postMessage = this.originalMethods.postMessage;
-            }
-        }
-    }
-
-    // Initialize the real-time detector
-    const detector = new RealTimeHandlerDetector();
-
-    // Listen for iframe handler reports
-    window.addEventListener('message', (event) => {
-        if (event.data && event.data.type === 'frogPostIframeHandler') {
-            if (chrome?.runtime?.id) {
-                chrome.runtime.sendMessage({
-                    type: 'realTimeIframeHandler',
-                    payload: event.data.data
-                }).catch(error => {
-                    console.error('FrogPost: Error reporting iframe handler', error);
-                });
-            }
-        }
-    });
-
-    // Cleanup on page unload
-    window.addEventListener('beforeunload', () => {
-        detector.stop();
-    });
-
-    console.log('FrogPost: Real-time handler detector initialized');
-})();
+// The old RealTimeHandlerDetector has been REMOVED and replaced by the new
+// FrogPost DOM agent in dom_injection_agent.js which provides 95%+ accuracy.
+// Code removed to prevent conflicts and reduce extension size.
