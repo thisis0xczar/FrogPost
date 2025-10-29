@@ -126,15 +126,15 @@
 
     /**
      * Send handler immediately when detected (real-time capture)
-     * No periodic batching - handlers sent instantly when registered
+     * OPTIMIZED: Minimal logging to prevent main thread blocking
      */
     function sendHandlerImmediately(listenerFunc) {
         try {
             const handlerCode = listenerFunc.toString();
             const handlerName = listenerFunc.name || 'anonymous';
             
-            console.log(`[FrogPost DOM Agent] 📨 Handler detected immediately: ${handlerName} (${handlerCode.length} chars)`);
-            console.log(`[FrogPost DOM Agent] Location: ${window.location.href}`);
+            // Production: Only log if VERBOSE_DEBUG is enabled
+            debugLog(`📨 Handler: ${handlerName} (${handlerCode.length} chars) @ ${window.location.href}`);
             
             sendToBackground({
                 topic: "handler-detected",
@@ -148,10 +148,8 @@
                     timestamp: Date.now()
                 }
             });
-            
-            debugLog(`📨 Handler sent immediately: ${handlerName} (${handlerCode.length} chars)`);
         } catch (e) {
-            debugLog('❌ Failed to send handler:', e);
+            // Silent fail in production
         }
     }
 
@@ -268,6 +266,14 @@
 
             // Scan for existing handlers
             scanExistingHandlers();
+
+            // Scan inline scripts for handlers (after DOM is ready)
+            if (document.readyState === 'loading') {
+                document.addEventListener('DOMContentLoaded', scanInlineScripts, { once: true });
+            } else {
+                // DOM already loaded, scan immediately
+                scanInlineScripts();
+            }
 
             // Report initialization
             sendToBackground({
@@ -396,6 +402,194 @@
             }
         } catch (error) {
             // Silent fail
+        }
+    }
+
+    /**
+     * Fast hash function for handler deduplication
+     * Uses FNV-1a algorithm for speed (faster than SHA-256)
+     */
+    function fastHash(str) {
+        let hash = 2166136261; // FNV offset basis
+        for (let i = 0; i < str.length; i++) {
+            hash ^= str.charCodeAt(i);
+            hash += (hash << 1) + (hash << 4) + (hash << 7) + (hash << 8) + (hash << 24);
+        }
+        return hash >>> 0; // Convert to unsigned 32-bit
+    }
+
+    /**
+     * Scan inline <script> tags for addEventListener('message', ...) handlers
+     * OPTIMIZED: Size limits, cached regexes, fast hash dedup, minimal logging
+     */
+    function scanInlineScripts() {
+        try {
+            const scripts = document.querySelectorAll('script:not([src])');
+            debugLog(`🔍 Scanning ${scripts.length} inline script(s) for message handlers...`);
+            
+            // Cache compiled regexes OUTSIDE loop for performance
+            const cachedUsageRegexes = new Map();
+            function getUsageRegex(varName) {
+                if (!cachedUsageRegexes.has(varName)) {
+                    cachedUsageRegexes.set(varName, 
+                        new RegExp(`addEventListener\\s*\\(\\s*['"]message['"]\\s*,\\s*${varName}\\s*[,\\)]`)
+                    );
+                }
+                return cachedUsageRegexes.get(varName);
+            }
+            
+            const foundHandlerHashes = new Set(); // Fast hash-based dedup
+            let scannedCount = 0;
+            let skippedLarge = 0;
+            
+            for (const script of scripts) {
+                const code = script.textContent || script.innerText || '';
+                if (!code.trim()) continue;
+                
+                // OPTIMIZATION: Skip extremely large scripts (>1MB minified bundles)
+                if (code.length > 1000000) {
+                    skippedLarge++;
+                    debugLog(`⏭️  Skipping large script (${(code.length/1024).toFixed(0)}KB)`);
+                    continue;
+                }
+                
+                scannedCount++;
+                
+                // Helper to extract balanced braces starting from a position
+                function extractHandler(startPos) {
+                    let depth = 0;
+                    let inString = false;
+                    let stringChar = null;
+                    let escaped = false;
+                    
+                    for (let i = startPos; i < code.length; i++) {
+                        const char = code[i];
+                        
+                        if (escaped) {
+                            escaped = false;
+                            continue;
+                        }
+                        
+                        if (char === '\\') {
+                            escaped = true;
+                            continue;
+                        }
+                        
+                        if ((char === '"' || char === "'" || char === '`') && !inString) {
+                            inString = true;
+                            stringChar = char;
+                        } else if (char === stringChar && inString) {
+                            inString = false;
+                            stringChar = null;
+                        }
+                        
+                        if (!inString) {
+                            if (char === '{') depth++;
+                            if (char === '}') {
+                                depth--;
+                                if (depth === 0) {
+                                    return code.substring(startPos, i + 1);
+                                }
+                            }
+                        }
+                    }
+                    return null;
+                }
+                
+                // Pattern 1: Direct inline handlers
+                const directRegex = /addEventListener\s*\(\s*['"]message['"]\s*,\s*/g;
+                let match;
+                
+                while ((match = directRegex.exec(code)) !== null) {
+                    const afterMatch = match.index + match[0].length;
+                    const handlerCode = extractHandler(afterMatch);
+                    
+                    if (handlerCode && handlerCode.length > 10) {
+                        const hash = fastHash(handlerCode);
+                        if (!foundHandlerHashes.has(hash)) {
+                            foundHandlerHashes.add(hash);
+                            debugLog(`📨 Handler [direct]: ${handlerCode.length} chars`);
+                            
+                            sendHandlerImmediately({
+                                toString: () => handlerCode,
+                                name: 'inline-addEventListener',
+                                length: 1
+                            });
+                        }
+                    }
+                }
+                
+                // Pattern 2: Separate declaration + addEventListener (OPTIMIZED with cached regex)
+                const separatePattern = /(?:const|let|var)\s+(\w+)\s*=\s*(async\s+)?(\w+|\([^)]*\))\s*=>\s*\{/g;
+                
+                while ((match = separatePattern.exec(code)) !== null) {
+                    const varName = match[1];
+                    const startPos = match.index + match[0].length - 1;
+                    const handlerCode = extractHandler(startPos);
+                    
+                    if (handlerCode && handlerCode.length > 50) {
+                        // OPTIMIZED: Use cached regex
+                        if (getUsageRegex(varName).test(code)) {
+                            const params = match[3];
+                            const fullHandler = `${match[2] || ''}${params} => ${handlerCode}`;
+                            
+                            const hash = fastHash(fullHandler);
+                            if (!foundHandlerHashes.has(hash)) {
+                                foundHandlerHashes.add(hash);
+                                debugLog(`📨 Handler [separate-var]: ${fullHandler.length} chars`);
+                                
+                                sendHandlerImmediately({
+                                    toString: () => fullHandler,
+                                    name: `inline-${varName}`,
+                                    length: 1
+                                });
+                            }
+                        }
+                    }
+                }
+                
+                // Pattern 3: React useEffect with addEventListener
+                const useEffectPattern = /useEffect\s*\)\s*\(\s*\(\s*\(\s*\)\s*=>\s*\{/g;
+                
+                while ((match = useEffectPattern.exec(code)) !== null) {
+                    const startPos = match.index + match[0].length - 1;
+                    const effectBody = extractHandler(startPos);
+                    
+                    if (effectBody && effectBody.includes("addEventListener") && effectBody.includes("message")) {
+                        const innerPattern = /(?:const|let|var)\s+(\w+)\s*=\s*(async\s+)?(\w+|\([^)]*\))\s*=>\s*\{/g;
+                        let innerMatch;
+                        
+                        while ((innerMatch = innerPattern.exec(effectBody)) !== null) {
+                            const varName = innerMatch[1];
+                            const innerStartPos = innerMatch.index + innerMatch[0].length - 1;
+                            const innerHandler = extractHandler(innerStartPos);
+                            
+                            if (innerHandler && innerHandler.length > 50) {
+                                if (getUsageRegex(varName).test(effectBody)) {
+                                    const params = innerMatch[3];
+                                    const fullHandler = `${innerMatch[2] || ''}${params} => ${innerHandler}`;
+                                    
+                                    const hash = fastHash(fullHandler);
+                                    if (!foundHandlerHashes.has(hash)) {
+                                        foundHandlerHashes.add(hash);
+                                        debugLog(`📨 Handler [useEffect]: ${fullHandler.length} chars`);
+                                        
+                                        sendHandlerImmediately({
+                                            toString: () => fullHandler,
+                                            name: `inline-useEffect-${varName}`,
+                                            length: 1
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            
+            debugLog(`✅ Scanned ${scannedCount}/${scripts.length} scripts, skipped ${skippedLarge} large, found ${foundHandlerHashes.size} unique handlers`);
+        } catch (error) {
+            debugLog('❌ Error scanning inline scripts:', error);
         }
     }
 

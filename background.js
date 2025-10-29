@@ -834,57 +834,11 @@ async function handleWebNavigationCommitted(details) {
     }
 }
 
-/**
- * Store handler from DOM agent telemetry
- * Enhanced to support both old and new telemetry formats
- */
-async function storeRealTimeHandler(payload) {
-    try {
-        const location = payload.location;
-        if (!location) return;
-
-        // Normalize URL to match Play button expectations
-        const normalized = normalizeEndpointUrl(location);
-        const storageKey = `real-time-handlers-${normalized?.normalized || location}`;
-        
-        const existingResult = await chrome.storage.local.get(storageKey);
-        const existingHandlers = existingResult[storageKey] || [];
-        
-        // Add new handler if not already present
-        const handlerExists = existingHandlers.some(h => h.id === payload.id);
-        if (!handlerExists) {
-            existingHandlers.push(payload);
-            // Keep only last 10 handlers per URL
-            if (existingHandlers.length > 10) {
-                existingHandlers.splice(0, existingHandlers.length - 10);
-            }
-            // Use batched storage (non-critical)
-            storageBatcher.set({ [storageKey]: existingHandlers });
-            
-            // Mark endpoint as having detected handlers
-            if (normalized?.normalized) {
-                endpointsWithDetectedHandlers.add(normalized.normalized);
-                await saveHandlerEndpoints(); // Immediate flush for tracking
-            }
-        }
-    } catch (error) {
-        log.error("Error in storeRealTimeHandler:", error);
-    }
-}
-
-/**
- * Store periodic telemetry from enhanced DOM agent
- * This is the primary handler storage mechanism
- */
-/**
- * DEPRECATED: Old telemetry storage system (no longer used)
- * Kept for reference only - handlers now use real-time in-memory cache
- */
-async function storeHandlerTelemetry(payload) {
-    // This function is deprecated and should not be called
-    console.warn('[DEPRECATED] storeHandlerTelemetry called - this should not happen');
-    log.warn('[DEPRECATED] storeHandlerTelemetry called - handlers should use handler-detected topic');
-}
+// ============================================================================
+// DEPRECATED FUNCTIONS REMOVED
+// Old telemetry and storage functions have been completely removed.
+// We now use ONLY the in-memory handlerCache with real-time detection.
+// ============================================================================
 
 /**
  * Retrieve handler from in-memory cache (real-time architecture)
@@ -896,11 +850,12 @@ function getHandlerFromCache(url) {
     
     const entry = handlerCache.get(url);
     if (!entry || !entry.handlers || entry.handlers.length === 0) {
-        console.log(`[Handler Cache] No handlers found for: ${url}`);
-        console.log(`[Handler Cache] Current cache size: ${handlerCache.size} entries`);
-        if (handlerCache.size > 0) {
-            console.log(`[Handler Cache] Sample keys:`, Array.from(handlerCache.keys()).slice(0, 5));
-        }
+    console.log(`[Handler Cache] No handlers found for: ${url}`);
+    console.log(`[Handler Cache] Current cache size: ${handlerCache.size} entries`);
+    if (handlerCache.size > 0 && debugMode) {
+        // Only show debug info when debug mode is enabled
+        console.log(`[Handler Cache] Sample keys:`, Array.from(handlerCache.keys()).slice(0, 5));
+    }
         log.warn(`[Handler Retrieval] No handlers found for: ${url}`);
         return null;
     }
@@ -908,12 +863,11 @@ function getHandlerFromCache(url) {
     console.log(`[Handler Cache] ✅ Found ${entry.handlers.length} handler(s) for: ${url}`);
     log.info(`[Handler Retrieval] ✅ Found ${entry.handlers.length} handler(s)`);
     
-    // Return the longest handler (most complete)
-    const bestHandler = entry.handlers.reduce((best, current) => 
-        (current.code.length > best.code.length) ? current : best
-    );
+    // Return the LAST handler (most recently detected, often the real one)
+    // Reasoning: Pages often register noise handlers first, then the real handler
+    const bestHandler = entry.handlers[entry.handlers.length - 1];
     
-    console.log(`[Handler Cache] Selected handler: ${bestHandler.name} (${bestHandler.code.length} chars)`);
+    console.log(`[Handler Cache] Selected handler: ${bestHandler.name} (${bestHandler.code.length} chars) [last of ${entry.handlers.length}]`);
     log.info(`[Handler Retrieval] Selected: ${bestHandler.name} (${bestHandler.code.length} chars)`);
     
     return {
@@ -1228,15 +1182,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             }
             break;
 
-        case "handlers-telemetry":
-            // DEPRECATED: Old telemetry system no longer used
-            console.warn('[DEPRECATED] handlers-telemetry topic received - DOM agent should use handler-detected');
-            break;
-
-        case "handler-added":
-            // DEPRECATED: Old handler-added system no longer used
-            console.warn('[DEPRECATED] handler-added topic received - DOM agent should use handler-detected');
-            break;
+        // handlers-telemetry and handler-added topics removed - deprecated
 
         case "received-message":
             // Skip handler extraction tabs

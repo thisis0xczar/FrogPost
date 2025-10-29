@@ -3099,25 +3099,40 @@ async function handlePlayButton(endpoint, button, skipCheck = false, silentMode 
                 updateButton(button, 'launching', currentStateInfo.options);
                 showToastNotification("Preparing Fuzzer Environment...", "info", 3000);
             }
+            // For CSP bypass scenarios, we need TWO URLs:
+            // 1. analysisKeyToUse: The ORIGINAL URL (where trace report is stored)
+            // 2. successfulUrl: The MODIFIED URL (that passed CSP and will be fuzzed)
+            
             const successfulUrlStorageKey = `successful-url-${endpointKey}`;
             let successfulUrlResult = await new Promise(resolve => chrome.storage.local.get(successfulUrlStorageKey, resolve));
             let successfulUrl = successfulUrlResult[successfulUrlStorageKey];
-            let analysisKeyToUse = successfulUrl ? getStorageKeyForUrl(successfulUrl) : null;
-
-            if (!analysisKeyToUse) {
-                const mappingKey = `analyzed-url-for-${endpointKey}`;
-                const mappingResult = await new Promise(resolve => chrome.storage.local.get(mappingKey, resolve));
-                if (mappingResult && mappingResult[mappingKey]) {
-                    analysisKeyToUse = mappingResult[mappingKey];
-                    const mappedSuccessfulUrlKey = `successful-url-${analysisKeyToUse}`;
-                    successfulUrlResult = await new Promise(resolve => chrome.storage.local.get(mappedSuccessfulUrlKey, resolve));
-                    successfulUrl = successfulUrlResult[mappedSuccessfulUrlKey] || analysisKeyToUse;
-                } else {
-                    analysisKeyToUse = endpointKey;
-                    successfulUrl = originalFullEndpoint;
-                }
+            
+            // Default: both use the endpointKey
+            let analysisKeyToUse = endpointKey;
+            
+            // Check if there's a URL mapping from CSP bypass (original → modified)
+            const mappingKey = `analyzed-url-for-${endpointKey}`;
+            const mappingResult = await new Promise(resolve => chrome.storage.local.get(mappingKey, resolve));
+            
+            if (mappingResult && mappingResult[mappingKey]) {
+                // CSP bypass scenario detected!
+                // The mapping stores: original URL → original URL (telemetry key)
+                analysisKeyToUse = mappingResult[mappingKey]; // Original URL (where trace report is)
+                
+                // Get the successful (modified) URL if it exists
+                const mappedSuccessfulUrlKey = `successful-url-${analysisKeyToUse}`;
+                successfulUrlResult = await new Promise(resolve => chrome.storage.local.get(mappedSuccessfulUrlKey, resolve));
+                successfulUrl = successfulUrlResult[mappedSuccessfulUrlKey];
+                
+                log.info(`[Launch] CSP bypass detected: Analysis key=${analysisKeyToUse}, Fuzzing URL=${successfulUrl || endpointKey}`);
             }
-            if (!successfulUrl) successfulUrl = analysisKeyToUse;
+            
+            // Fallback: if no successfulUrl found, use endpointKey for both
+            if (!successfulUrl) {
+                successfulUrl = endpointKey;
+            }
+            
+            log.info(`[Launch] Final URLs - Analysis: ${analysisKeyToUse}, Fuzzing: ${successfulUrl}`);
 
 
             const [traceReport, storedPayloads, storedMessages] = await Promise.all([

@@ -164,11 +164,10 @@
                     // Map topics to message types that background script expects
                     let messageType;
                     switch(topic) {
-                        case 'handlers-telemetry':
-                        case 'handler-added':
-                        case 'received-message':
-                        case 'outgoing-message':
-                        case 'agent-ready':
+                        case 'handler-detected':  // Real-time handler capture (current system)
+                        case 'received-message':  // Intercepted postMessage
+                        case 'outgoing-message':  // Outgoing postMessage
+                        case 'agent-ready':       // Agent initialization
                             messageType = topic;
                             break;
                         default:
@@ -232,7 +231,7 @@
                     // Filter out extension-generated messages by common markers
                     if (typeof data === 'object' && data && typeof data.type === 'string') {
                         const t = data.type;
-                        if (t.startsWith('frogPost') || t.startsWith('FROGPOST_') || t === 'realTimeDetectorReady' || t === 'realTimeHandlerDetected' || t === 'realTimeMessageSent') {
+                        if (t.startsWith('frogPost') || t.startsWith('FROGPOST_')) {
                             return;
                         }
                     }
