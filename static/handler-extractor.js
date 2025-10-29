@@ -715,10 +715,63 @@ class HandlerExtractor {
             }
         } catch(_) {}
 
-        // Acorn AST parsing removed - no longer used
-        /* DEPRECATED: if (handlerNode && typeof acorn !== 'undefined' && typeof acorn.walk !== 'undefined') {
-            ...
-        } */
+        // String-based scoring (replaces Acorn AST parsing)
+        if (handlerCode) {
+            try {
+                // Check for specific intercepted keys in handler code
+                let foundSpecificKeys = 0;
+                for (const key of this.messageKeys) {
+                    if (handlerCode.includes(key)) foundSpecificKeys++;
+                }
+                
+                // Check for specific intercepted types/values
+                let foundSpecificTypes = 0;
+                for (const type of this.messageTypes) {
+                    if (handlerCode.includes(type)) foundSpecificTypes++;
+                }
+                
+                // Check for postMessage patterns
+                const usesPostMessageCall = /\.postMessage\s*\(/.test(handlerCode) && 
+                                           !/postMessage\s*\(\s*null\s*\)/.test(handlerCode);
+                
+                // Check for origin validation patterns
+                const hasOriginCheckStructure = /\.origin\s*[!=]=/.test(handlerCode) ||
+                                               /\.origin\s*\.\s*(startsWith|endsWith|includes)/.test(handlerCode);
+                
+                // Check for JSON.parse
+                const usesJsonParse = /JSON\s*\.\s*parse/.test(handlerCode);
+                
+                // Check for event.data access
+                const accessesEventData = /\.(data|payload)\s*[.\[]/.test(handlerCode);
+                
+                const keysDelta = foundSpecificKeys * SPECIFIC_KEY_MATCH_BONUS;
+                const typesDelta = foundSpecificTypes * SPECIFIC_TYPE_MATCH_BONUS;
+                featureScore += keysDelta; 
+                if (dbg && keysDelta) dbg.contributions.push({rule:'SPECIFIC_KEY_MATCH_BONUS(string)', delta:keysDelta, count:foundSpecificKeys});
+                featureScore += typesDelta; 
+                if (dbg && typesDelta) dbg.contributions.push({rule:'SPECIFIC_TYPE_MATCH_BONUS(string)', delta:typesDelta, count:foundSpecificTypes});
+                
+                if (usesPostMessageCall && !handlerFlags.mentionsPostMessageNull) { 
+                    featureScore += POSTMESSAGE_CALL_BONUS; 
+                    if (dbg) dbg.contributions.push({rule:'POSTMESSAGE_CALL_BONUS(string)', delta:POSTMESSAGE_CALL_BONUS}); 
+                }
+                if (hasOriginCheckStructure) { 
+                    featureScore += ORIGIN_CHECK_STRUCTURE_BONUS; 
+                    hasStrongSignal = true; 
+                    if (dbg) dbg.contributions.push({rule:'ORIGIN_CHECK_STRUCTURE_BONUS(string)', delta:ORIGIN_CHECK_STRUCTURE_BONUS}); 
+                }
+                if (usesJsonParse) { 
+                    featureScore += JSON_PARSE_BONUS; 
+                    if (dbg) dbg.contributions.push({rule:'JSON_PARSE_BONUS(string)', delta:JSON_PARSE_BONUS}); 
+                }
+                if (accessesEventData) {
+                    featureScore += 20; // Small bonus for event.data access
+                    if (dbg) dbg.contributions.push({rule:'EVENT_DATA_ACCESS(string)', delta:20});
+                }
+            } catch (e) { 
+                this._log(2, 'warn', '[String-based scoring error]', e?.message);
+            }
+        }
 
         if(!hasStrongSignal && handlerFlags.hasStrongSignal !== undefined) {
             hasStrongSignal = handlerFlags.hasStrongSignal;
