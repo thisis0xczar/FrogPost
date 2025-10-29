@@ -3337,140 +3337,71 @@ async function handlePlayButton(endpoint, button, skipCheck = false, silentMode 
                 log.info(`[Play] Requesting pre-extracted handler for key: ${analysisStorageKey}`);
                 
                 // Check if runtime is available (background script might be terminated)
+                // REAL-TIME HANDLER RETRIEVAL (Only Method - No Fallbacks)
                 if (!chrome?.runtime?.id) {
                     log.error(`[Play] Chrome runtime not available - extension context invalidated`);
                     if (!hideFromUser) {
                         showToastNotification("⚠️ Extension reloaded. Please refresh dashboard.", "error", 5000);
                     }
-                } else {
-                    log.debug(`[Play] Chrome runtime available, ID: ${chrome.runtime.id}`);
+                    throw new Error('Extension context invalidated');
                 }
                 
-                let preExtractedResult = null;
+                log.info(`[Play] Requesting real-time handler for: ${endpointKey}`);
+                if (!hideFromUser) {
+                    updateButton(button, 'analyze', { message: 'Retrieving handler...' });
+                }
+                
+                let handlerResult = null;
                 try {
-                    preExtractedResult = await chrome.runtime.sendMessage({
+                    handlerResult = await chrome.runtime.sendMessage({
                         type: 'getPreExtractedHandler',
-                        payload: { endpointKey: analysisStorageKey }
+                        payload: { endpointKey: endpointKey }
                     });
-                    log.info(`[Play] Telemetry retrieval response:`, JSON.stringify(preExtractedResult, null, 2));
+                    log.info(`[Play] Handler retrieval response:`, handlerResult);
                 } catch (err) {
-                    log.error(`[Play] Error retrieving telemetry:`, err);
-                    log.error(`[Play] Error details:`, err?.message || 'Unknown error', err?.stack || 'No stack trace');
+                    log.error(`[Play] Error retrieving handler:`, err);
+                    if (!hideFromUser) {
+                        showToastNotification(`Error: ${err.message}`, "error", 5000);
+                    }
+                    throw err;
                 }
 
-                if (preExtractedResult?.success && preExtractedResult?.handler) {
-                    // SUCCESS: Found pre-extracted handler from DOM agent!
-                    foundHandlerObject = preExtractedResult.handler;
-                    log.success(`[FrogPost] Retrieved pre-extracted handler from DOM agent telemetry!`);
-                    log.info(`[FrogPost] Handler source: ${foundHandlerObject.source}, Score: ${foundHandlerObject.score}`);
+                if (handlerResult?.success && handlerResult?.handler) {
+                    // SUCCESS: Found handler from real-time capture!
+                    foundHandlerObject = handlerResult.handler;
+                    log.success(`[Play] ✅ Retrieved handler: ${foundHandlerObject.name} (${foundHandlerObject.code.length} chars)`);
                     
                     if (!hideFromUser) {
-                        showToastNotification("✅ Handler retrieved from telemetry", "success", 3000);
+                        showToastNotification(`✅ Handler captured: ${foundHandlerObject.name}`, "success", 3000);
                     }
                 } else {
-                    // Fallback: No pre-extracted handler found
-                    log.warn("[Play] No pre-extracted handler found in telemetry. Using slim fallback...");
-                    if (preExtractedResult) {
-                        log.debug(`[Play] Telemetry response details:`, { success: preExtractedResult?.success, hasHandler: !!preExtractedResult?.handler, error: preExtractedResult?.error });
-                    }
+                    // NO HANDLER FOUND: This means FrogPost wasn't active when the page loaded
+                    const errorMsg = handlerResult?.error || "No handler captured for this URL";
+                    log.error(`[Play] ❌ ${errorMsg}`);
                     
                     if (!hideFromUser) {
-                        updateButton(button, 'analyze', { message: 'Using fallback extraction...' });
-                        showToastNotification("⚠️ No telemetry found. Using AST fallback...", "warning", 3000);
+                        showToastNotification(
+                            `⚠️ No handler captured. Ensure FrogPost was active when the page loaded.`, 
+                            "error", 
+                            5000
+                        );
                     }
-
-                    // Initialize slim extractor for fallback
-                    const extractor = new HandlerExtractor().initialize(successfullyAnalyzedUrl, originalMessages);
-
-                    // SLIM FALLBACK: AST-only analysis (no debugger, no iframe loading)
-                    potentialHandlers = await extractor.extractStaticallyWithContext(
-                        successfullyAnalyzedUrl, 
-                        extractor.messageKeys, 
-                        extractor.messageTypes, 
-                        extractor.messageValues
-                    );
-
-                    if (potentialHandlers && potentialHandlers.length > 0) {
-                        log.info(`[Slim Fallback] Found ${potentialHandlers.length} handlers via AST analysis`);
-                        foundHandlerObject = extractor.getBestHandler(potentialHandlers);
-                        
-                        if (foundHandlerObject) {
-                            log.info(`[Slim Fallback] Selected best handler via scoring`);
-                            if (!hideFromUser) {
-                                showToastNotification(`✅ Handler found via fallback`, "success", 3000);
-                            }
-                        }
-                    } else {
-                        log.warn("[Play] Slim fallback found no handlers");
-                        foundHandlerObject = null;
-                        if (!hideFromUser) {
-                            showToastNotification("⚠️ No handlers found", "warning", 4000);
-                        }
-                    }
+                    
+                    // Mark as failed and stop
+                    await markEndpointAsFailed(endpointKey, errorMsg);
+                    updateButton(button, 'start');
+                    return;
                 }
                 
-                // ZOMBIE ENDPOINT EXTRACTION: If no handler found, check if this is a zombie endpoint (0 messages)
-                if (!foundHandlerObject) {
-                    const messageCount = getMessageCount(originalFullEndpoint);
-                    if (messageCount === 0) {
-                        log.info('[Play] Zombie endpoint detected (0 messages). Attempting extraction...');
-                        
-                        if (!hideFromUser) {
-                            updateButton(button, 'analyze', { message: 'Zombie endpoint - extracting...' });
-                            showToastNotification('🧟 Zombie endpoint - attempting handler extraction...', 'info', 3000);
-                        }
-                        
-                        // Strategy: Static AST analysis for zombie endpoints
-                        try {
-                            log.info('[Zombie] Attempting static AST analysis...');
-                            
-                            const zombieExtractor = new HandlerExtractor();
-                            const staticHandlers = await zombieExtractor.extractStaticallyWithContext(
-                                originalFullEndpoint, 
-                                new Set(), // no message keys
-                                new Set(), // no message types
-                                new Set()  // no message values
-                            );
-                            
-                            if (staticHandlers && staticHandlers.length > 0) {
-                                const bestStatic = zombieExtractor.getBestHandler(staticHandlers);
-                                if (bestStatic) {
-                                    foundHandlerObject = {
-                                        handler: bestStatic.code,
-                                        code: bestStatic.code,
-                                        source: 'static-ast-zombie',
-                                        score: bestStatic.score || 50,
-                                        category: 'static-zombie'
-                                    };
-                                    log.success('[Zombie] Handler extracted via static analysis');
-                                    if (!hideFromUser) {
-                                        showToastNotification('✅ Zombie handler extracted', 'success', 3000);
-                                    }
-                                }
-                            } else {
-                                log.warn('[Zombie] Static analysis found no handlers');
-                            }
-                        } catch (zombieError) {
-                            log.error('[Zombie] Static analysis failed:', zombieError);
-                        }
-                        
-                        if (!foundHandlerObject) {
-                            log.error('[Zombie] All extraction methods failed for zombie endpoint');
-                            if (!hideFromUser) {
-                                showToastNotification('❌ No handler found for zombie endpoint', 'error', 3000);
-                            }
-                        }
-                    }
-                }
-
             } catch (discoveryError) {
                 log.error(`[Play] Handler discovery failed:`, discoveryError);
                 analysisErrorMsg = discoveryError.message;
-                potentialHandlers = [];
                 foundHandlerObject = null;
                 if (!hideFromUser) {
                     showToastNotification("Handler extraction failed", "error", 4000);
                 }
+                // Re-throw to stop execution
+                throw discoveryError;
             }
         }
 

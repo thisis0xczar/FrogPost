@@ -1,10 +1,11 @@
 /**
  * FrogPost Extension
  * Originally Created by thisis0xczar/Lidor 
- * Refined on: 2025-10-22
+ * Refined on: 2025-10-29 - Real-time handler capture for BlackHat
  */
 
-// TELEMETRY-FIRST: No AST parsing needed
+// DEPRECATED: No longer using static handler extraction
+// Keeping import for reference but handlers now come from real-time capture
 try {
     importScripts(
         './static/handler-extractor.js'
@@ -23,6 +24,44 @@ const log = {
     handler: (...args) => { if (debugMode) console.log("BG HANDLER:", ...args); },
     scan: (...args) => { if (debugMode) console.log("BG SCAN:", ...args); },
 };
+
+/**
+ * IN-MEMORY HANDLER CACHE (Real-Time Architecture)
+ * Handlers stored in memory, keyed by URL
+ * No Chrome storage, no key mismatches, instant retrieval
+ */
+const handlerCache = new Map(); // url -> { handlers: [], lastUpdate: timestamp }
+const HANDLER_CACHE_MAX_AGE = 300000; // 5 minutes
+const HANDLER_CACHE_MAX_SIZE = 1000; // Max 1000 entries
+
+// Periodic cleanup of stale cache entries
+setInterval(() => {
+    const now = Date.now();
+    let removedCount = 0;
+    
+    // Age-based eviction
+    for (const [url, entry] of handlerCache.entries()) {
+        if (now - entry.lastUpdate > HANDLER_CACHE_MAX_AGE) {
+            handlerCache.delete(url);
+            removedCount++;
+        }
+    }
+    
+    // Size-based eviction (LRU-style)
+    if (handlerCache.size > HANDLER_CACHE_MAX_SIZE) {
+        const sorted = Array.from(handlerCache.entries())
+            .sort((a, b) => a[1].lastUpdate - b[1].lastUpdate);
+        const toRemove = sorted.slice(0, handlerCache.size - HANDLER_CACHE_MAX_SIZE);
+        toRemove.forEach(([url]) => {
+            handlerCache.delete(url);
+            removedCount++;
+        });
+    }
+    
+    if (removedCount > 0) {
+        console.log(`[Handler Cache] Cleaned up ${removedCount} stale entries. Current size: ${handlerCache.size}`);
+    }
+}, 60000); // Clean every minute
 /**
  * BoundedMap - Prevents memory leaks by limiting Map size
  * Automatically removes oldest entries when limit is reached
@@ -837,241 +876,55 @@ async function storeRealTimeHandler(payload) {
  * Store periodic telemetry from enhanced DOM agent
  * This is the primary handler storage mechanism
  */
+/**
+ * DEPRECATED: Old telemetry storage system (no longer used)
+ * Kept for reference only - handlers now use real-time in-memory cache
+ */
 async function storeHandlerTelemetry(payload) {
-    try {
-        const { windowId, location, handlers, timestamp, isIframe, handlerCount } = payload;
-        if (!location || !handlers) return;
-
-        // Normalize URL
-        const normalized = normalizeEndpointUrl(location);
-        const endpointKey = normalized?.normalized || location;
-        const storageKey = `dom-agent-telemetry-${endpointKey}`;
-        
-        // Store telemetry with frame metadata
-        const telemetryData = {
-            windowId: windowId,
-            location: location,
-            handlers: handlers, // Array of {code, length, name}
-            timestamp: timestamp,
-            isIframe: isIframe,
-            handlerCount: handlerCount,
-            endpointKey: endpointKey
-        };
-        
-        // Use batched storage (non-critical, can wait 100ms)
-        storageBatcher.set({ [storageKey]: telemetryData });
-        
-        // If handlers found, mark endpoint
-        if (handlers && handlers.length > 0) {
-            if (!endpointsWithDetectedHandlers.has(endpointKey)) {
-                endpointsWithDetectedHandlers.add(endpointKey);
-                await saveHandlerEndpoints(); // This one needs immediate flush
-                notifyDashboard("handlerEndpointDetected", { endpointKey: endpointKey });
-            }
-        }
-        
-        log.debug(`[Telemetry] Queued ${handlers.length} handlers for ${endpointKey}`);
-    } catch (error) {
-        log.error("Error in storeHandlerTelemetry:", error);
-    }
+    // This function is deprecated and should not be called
+    console.warn('[DEPRECATED] storeHandlerTelemetry called - this should not happen');
+    log.warn('[DEPRECATED] storeHandlerTelemetry called - handlers should use handler-detected topic');
 }
 
 /**
- * Retrieve best pre-extracted handler from DOM agent telemetry
- * This is what the Play button calls first (primary method)
+ * Retrieve handler from in-memory cache (real-time architecture)
+ * No storage lookups, no key mismatches, instant retrieval
  */
-async function getPreExtractedHandler(endpointKey) {
-    try {
-        const storageKey = `dom-agent-telemetry-${endpointKey}`;
-        console.log(`[FROGPOST-BG] getPreExtractedHandler called with key: ${endpointKey}`);
-        console.log(`[FROGPOST-BG] Storage key: ${storageKey}`);
-        log.debug(`[Telemetry Retrieval] Looking for key: ${storageKey}`);
-        
-        let result = await chrome.storage.local.get(storageKey);
-        let telemetry = result[storageKey];
-        console.log(`[FROGPOST-BG] Exact match result:`, telemetry ? 'FOUND' : 'NOT_FOUND');
-        
-        if (telemetry) {
-            console.log(`[FROGPOST-BG] Telemetry object:`, {
-                hasHandlers: !!telemetry.handlers,
-                handlerCount: telemetry.handlers?.length || 0,
-                timestamp: telemetry.timestamp,
-                timestampAge: `${Math.floor((Date.now() - telemetry.timestamp) / 1000)}s ago`,
-                location: telemetry.location,
-                windowId: telemetry.windowId
-            });
-            if (telemetry.handlers && telemetry.handlers.length > 0) {
-                console.log(`[FROGPOST-BG] First handler:`, {
-                    codeLength: telemetry.handlers[0].code?.length || 0,
-                    name: telemetry.handlers[0].name,
-                    hasCode: !!telemetry.handlers[0].code
-                });
-            } else {
-                // Empty handlers - treat as invalid and try fallback
-                console.warn(`[FROGPOST-BG] Exact match found but has EMPTY handlers - will try fallback`);
-                telemetry = null;  // Force fallback matching
-            }
+function getHandlerFromCache(url) {
+    console.log(`[Handler Cache] Looking for handlers at: ${url}`);
+    log.info(`[Handler Retrieval] Looking for: ${url}`);
+    
+    const entry = handlerCache.get(url);
+    if (!entry || !entry.handlers || entry.handlers.length === 0) {
+        console.log(`[Handler Cache] No handlers found for: ${url}`);
+        console.log(`[Handler Cache] Current cache size: ${handlerCache.size} entries`);
+        if (handlerCache.size > 0) {
+            console.log(`[Handler Cache] Sample keys:`, Array.from(handlerCache.keys()).slice(0, 5));
         }
-        
-        // DEBUG: If not found OR empty, check what keys DO exist and try fuzzy matching
-        if (!telemetry || !telemetry.handlers || telemetry.handlers.length === 0) {
-            console.log(`[FROGPOST-BG] Telemetry empty or invalid. Checking reason:`, {
-                exists: !!result[storageKey],
-                exactMatchHandlerCount: result[storageKey]?.handlers?.length || 0,
-                willTryFallback: true
-            });
-            const allStorage = await chrome.storage.local.get(null);
-            const allTelemetryKeys = Object.keys(allStorage).filter(k => k.startsWith('dom-agent-telemetry-'));
-            log.warn(`[Telemetry Retrieval] ❌ Exact match not found`);
-            log.info(`[Telemetry Retrieval] Looking for: ${endpointKey}`);
-            log.info(`[Telemetry Retrieval] Storage key: ${storageKey}`);
-            log.info(`[Telemetry Retrieval] Total telemetry entries: ${allTelemetryKeys.length}`);
-            
-            // FALLBACK: Try aggressive fuzzy matching
-            // Strategy 1: Match origin + pathname (ignore query params)
-            // Strategy 2: Match origin only
-            try {
-                const endpointUrl = new URL(endpointKey);
-                const endpointOrigin = endpointUrl.origin;
-                const endpointPath = endpointUrl.pathname;
-                const endpointOriginPath = endpointOrigin + endpointPath;
-                
-                log.info(`[Telemetry Retrieval] Attempting fallback matches:`);
-                log.info(`  - Origin: ${endpointOrigin}`);
-                log.info(`  - Origin+Path: ${endpointOriginPath}`);
-                
-                // Strategy 1: Match origin + pathname (best match)
-                log.info(`[Telemetry Retrieval] Strategy 1: Matching origin+path = ${endpointOriginPath}`);
-                let originPathMatches = allTelemetryKeys.filter(k => {
-                    const telemetryUrl = k.replace('dom-agent-telemetry-', '');
-                    try {
-                        const telUrl = new URL(telemetryUrl);
-                        const telOriginPath = telUrl.origin + telUrl.pathname;
-                        const matches = telOriginPath === endpointOriginPath;
-                        if (matches) {
-                            log.info(`  ✅ Match found: ${telemetryUrl}`);
-                        }
-                        return matches;
-                    } catch {
-                        return false;
-                    }
-                });
-                
-                // Strategy 2: Match origin only (broader fallback)
-                if (originPathMatches.length === 0) {
-                    log.info(`[Telemetry Retrieval] Strategy 2: Matching origin = ${endpointOrigin}`);
-                    var originMatches = allTelemetryKeys.filter(k => {
-                        const telemetryUrl = k.replace('dom-agent-telemetry-', '');
-                        try {
-                            const telUrl = new URL(telemetryUrl);
-                            const matches = telUrl.origin === endpointOrigin;
-                            if (matches) {
-                                log.info(`  ✅ Match found: ${telemetryUrl}`);
-                            }
-                            return matches;
-                        } catch {
-                            return false;
-                        }
-                    });
-                } else {
-                    var originMatches = [];
-                }
-                
-                // Try Strategy 1 first (origin+path), then Strategy 2 (origin)
-                let matchingKeys = originPathMatches.length > 0 ? originPathMatches : originMatches;
-                
-                log.info(`[Telemetry Retrieval] Found ${matchingKeys.length} potential matches`);
-                
-                if (matchingKeys.length > 0) {
-                    log.success(`[Telemetry Retrieval] Found ${matchingKeys.length} fallback matches`);
-                    if (originPathMatches.length > 0) {
-                        log.info(`  ✅ Using Strategy 1: origin+path match`);
-                    } else {
-                        log.info(`  ⚠️  Using Strategy 2: origin-only match`);
-                    }
-                    
-                    // Use the most recent one (by timestamp)
-                    let bestMatch = null;
-                    let bestTimestamp = 0;
-                    let bestKey = null;
-                    
-                    for (const key of matchingKeys) {
-                        const tel = allStorage[key];
-                        if (tel?.handlers && tel.handlers.length > 0) {
-                            const ts = tel.timestamp || 0;
-                            if (ts > bestTimestamp) {
-                                bestTimestamp = ts;
-                                bestMatch = tel;
-                                bestKey = key.replace('dom-agent-telemetry-', '');
-                            }
-                        }
-                    }
-                    
-                    if (bestMatch) {
-                        log.success(`[Telemetry Retrieval] ✅ Using fallback telemetry:`);
-                        log.info(`  - Original key: ${bestKey}`);
-                        log.info(`  - Timestamp: ${new Date(bestTimestamp).toISOString()}`);
-                        log.info(`  - Handlers: ${bestMatch.handlers.length}`);
-                        telemetry = bestMatch;
-                    }
-                } else {
-                    log.warn(`[Telemetry Retrieval] No fallback matches found for origin ${endpointOrigin}`);
-                }
-            } catch (e) {
-                log.debug(`[Telemetry Retrieval] Fallback matching failed:`, e);
-            }
-            
-            // Still no match
-            if (!telemetry || !telemetry.handlers || telemetry.handlers.length === 0) {
-                return null;
-            }
-        }
-        
-        // CRITICAL: Get the best handler (longest/most complete)
-        console.log(`[FROGPOST-BG] Selecting best handler from ${telemetry.handlers.length} handlers`);
-        telemetry.handlers.forEach((h, i) => {
-            console.log(`[FROGPOST-BG]   Handler ${i+1}: ${(h.code || '').length} chars, name: ${h.name}`);
-        });
-        
-        const bestHandler = telemetry.handlers.reduce((best, current) => {
-            const currentLen = (current.code || '').length;
-            const bestLen = (best.code || '').length;
-            return currentLen > bestLen ? current : best;
-        }, telemetry.handlers[0]);
-        
-        console.log(`[FROGPOST-BG] Selected handler: ${(bestHandler.code || '').length} chars, name: ${bestHandler.name}`);
-        
-        // CRITICAL: Ensure full code is returned, not truncated
-        const fullHandlerCode = bestHandler.code || '';
-        
-        // Quality check: Reject if handler is too short (likely noise)
-        const MIN_LEGITIMATE_HANDLER_LENGTH = 100; // Real handlers are usually >100 chars
-        if (fullHandlerCode.length < MIN_LEGITIMATE_HANDLER_LENGTH) {
-            console.warn(`[FROGPOST-BG] ❌ Handler too short (${fullHandlerCode.length} chars), rejecting telemetry`);
-            log.warn(`[Telemetry Retrieval] Handler rejected: too short (${fullHandlerCode.length} chars < ${MIN_LEGITIMATE_HANDLER_LENGTH})`);
-            return null; // Force fallback to regex analysis
-        }
-        
-        log.debug(`[Handler Retrieval] Retrieved handler for ${endpointKey}: ${fullHandlerCode.length} chars`);
-        
-        // Return in format expected by Play button
-        return {
-            handler: fullHandlerCode,  // Full code
-            code: fullHandlerCode,     // Full code
-            category: "dom-agent-telemetry",
-            method: "FrogPost runtime interception",
-            score: 100, // High confidence from runtime interception
-            windowId: telemetry.windowId,
-            location: telemetry.location,
-            timestamp: telemetry.timestamp,
-            source: "DOM Agent Telemetry",
-            length: bestHandler.length,
-            name: bestHandler.name
-        };
-    } catch (error) {
-        log.error("Error in getPreExtractedHandler:", error);
+        log.warn(`[Handler Retrieval] No handlers found for: ${url}`);
         return null;
     }
+    
+    console.log(`[Handler Cache] ✅ Found ${entry.handlers.length} handler(s) for: ${url}`);
+    log.info(`[Handler Retrieval] ✅ Found ${entry.handlers.length} handler(s)`);
+    
+    // Return the longest handler (most complete)
+    const bestHandler = entry.handlers.reduce((best, current) => 
+        (current.code.length > best.code.length) ? current : best
+    );
+    
+    console.log(`[Handler Cache] Selected handler: ${bestHandler.name} (${bestHandler.code.length} chars)`);
+    log.info(`[Handler Retrieval] Selected: ${bestHandler.name} (${bestHandler.code.length} chars)`);
+    
+    return {
+        handler: bestHandler.code,
+        code: bestHandler.code,
+        method: "Real-time DOM interception",
+        score: 100,
+        timestamp: bestHandler.timestamp,
+        name: bestHandler.name,
+        source: "FrogPost Real-Time Capture"
+    };
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -1339,30 +1192,50 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             notifyDashboard('realTimeDetectorReady', payload);
             break;
 
-        case "handlers-telemetry":
+        case "handler-detected":
             // Skip handler extraction tabs
             if (payload?.location && payload.location.includes('frogpost_handler_extraction=true')) {
                 break;
             }
-            // Store periodic telemetry (THE KEY to 95%+ accuracy)
-            storeHandlerTelemetry(payload).catch(error => {
-                log.error("Error storing handler telemetry:", error);
-            });
-            // Forward to dashboard for real-time display
-            notifyDashboard('handlersUpdated', {
-                location: payload.location,
-                handlerCount: payload.handlerCount,
-                windowId: payload.windowId
-            });
+            // Add handler to in-memory cache immediately
+            const url = payload.location;
+            
+            // Get or create cache entry for this URL
+            if (!handlerCache.has(url)) {
+                handlerCache.set(url, { handlers: [], lastUpdate: Date.now() });
+            }
+            
+            const entry = handlerCache.get(url);
+            
+            // Deduplicate: only add if not already present (compare code)
+            const isDuplicate = entry.handlers.some(h => h.code === payload.handler.code);
+            if (!isDuplicate) {
+                entry.handlers.push(payload.handler);
+                entry.lastUpdate = Date.now();
+                console.log(`[Handler Cache] ✅ Added handler for ${url}: ${payload.handler.name} (${payload.handler.code.length} chars). Total: ${entry.handlers.length}`);
+                log.info(`[Handler Cache] Added: ${payload.handler.name} at ${url}. Total: ${entry.handlers.length}`);
+                
+                // Notify dashboard
+                notifyDashboard('realTimeHandlerDetected', {
+                    location: url,
+                    handlerName: payload.handler.name,
+                    handlerLength: payload.handler.code.length,
+                    windowId: payload.windowId
+                });
+            } else {
+                console.log(`[Handler Cache] ⚠️  Duplicate handler ignored for ${url}`);
+                log.debug(`[Handler Cache] Duplicate ignored for ${url}`);
+            }
+            break;
+
+        case "handlers-telemetry":
+            // DEPRECATED: Old telemetry system no longer used
+            console.warn('[DEPRECATED] handlers-telemetry topic received - DOM agent should use handler-detected');
             break;
 
         case "handler-added":
-            // Skip handler extraction tabs
-            if (payload?.location && payload.location.includes('frogpost_handler_extraction=true')) {
-                break;
-            }
-            log.handler(`[FrogPost] Handler added via ${payload.method} on ${payload.location}`);
-            notifyDashboard('realTimeHandlerDetected', payload);
+            // DEPRECATED: Old handler-added system no longer used
+            console.warn('[DEPRECATED] handler-added topic received - DOM agent should use handler-detected');
             break;
 
         case "received-message":
@@ -1397,38 +1270,40 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             break;
 
         case "getPreExtractedHandler":
-            // NEW: Retrieve handler from telemetry (called by Play button)
+            // Retrieve handler from in-memory cache (real-time architecture)
             console.log('[FROGPOST-BG] ========================================');
             console.log('[FROGPOST-BG] getPreExtractedHandler message received');
             console.log('[FROGPOST-BG] Payload:', payload);
-            isAsync = true;
-            (async () => {
-                try {
-                    const endpointKey = payload?.endpointKey;
-                    if (!endpointKey) {
-                        console.error('[FROGPOST-BG] Missing endpointKey in payload');
-                        log.error('[getPreExtractedHandler] Missing endpointKey in payload');
-                        sendResponse({ success: false, error: 'Missing endpointKey' });
-                        return;
-                    }
-                    console.log(`[FROGPOST-BG] Looking up telemetry for: ${endpointKey}`);
-                    log.info(`[getPreExtractedHandler] Looking up telemetry for: ${endpointKey}`);
-                    const handler = await getPreExtractedHandler(endpointKey);
-                    console.log(`[FROGPOST-BG] getPreExtractedHandler returned:`, handler ? 'FOUND' : 'NULL');
-                    if (handler) {
-                        console.log(`[FROGPOST-BG] ✅ Handler found! Length: ${handler.handler?.length || handler.code?.length}`);
-                        log.info(`[getPreExtractedHandler] ✅ Found handler for ${endpointKey}`);
-                        sendResponse({ success: true, handler: handler });
-                    } else {
-                        console.warn(`[FROGPOST-BG] ❌ No handler found`);
-                        log.warn(`[getPreExtractedHandler] ❌ No handler found for ${endpointKey}`);
-                        sendResponse({ success: false, error: 'No pre-extracted handler found' });
-                    }
-                } catch (e) {
-                    console.error('[FROGPOST-BG] Exception:', e);
-                    sendResponse({ success: false, error: e?.message || 'Unknown error' });
+            
+            try {
+                const endpointKey = payload?.endpointKey;
+                if (!endpointKey) {
+                    console.error('[FROGPOST-BG] Missing endpointKey in payload');
+                    log.error('[Handler Request] Missing endpointKey');
+                    sendResponse({ success: false, error: 'Missing endpointKey' });
+                    break;
                 }
-            })();
+                
+                console.log(`[FROGPOST-BG] Looking up handler in cache for: ${endpointKey}`);
+                log.info(`[Handler Request] Dashboard requesting handler for: ${endpointKey}`);
+                
+                const handler = getHandlerFromCache(endpointKey);
+                console.log(`[FROGPOST-BG] getHandlerFromCache returned:`, handler ? 'FOUND' : 'NULL');
+                
+                if (handler) {
+                    console.log(`[FROGPOST-BG] ✅ Handler found! Length: ${handler.code.length}`);
+                    log.info(`[Handler Request] ✅ Found handler: ${handler.name}`);
+                    sendResponse({ success: true, handler: handler });
+                } else {
+                    console.warn(`[FROGPOST-BG] ❌ No handler found in cache`);
+                    log.warn(`[Handler Request] ❌ No handler captured for: ${endpointKey}`);
+                    sendResponse({ success: false, error: 'No handler captured for this URL' });
+                }
+            } catch (e) {
+                console.error('[FROGPOST-BG] Exception:', e);
+                log.error(`[Handler Request] Exception:`, e);
+                sendResponse({ success: false, error: e?.message || 'Unknown error' });
+            }
             break;
             case "realTimeMessageSent":
                 log.debug("Real-time message sent:", payload);

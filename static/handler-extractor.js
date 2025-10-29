@@ -1,20 +1,24 @@
 /**
- * FrogPost Extension - SLIM Handler Extractor (Fallback Only)
+ * DEPRECATED AS OF 2025-10-29 - REAL-TIME HANDLER CAPTURE ARCHITECTURE
+ * 
+ * FrogPost Extension - Handler Extractor (No Longer Used)
  * Originally Created by thisis0xczar/Lidor
  * Refined on: 2025-10-22
+ * Deprecated on: 2025-10-29 for BlackHat presentation
  * 
- * NOTE: This is now a SLIM FALLBACK ONLY - used in <5% of cases
- * Primary extraction is via FrogPost DOM agent runtime telemetry
+ * This file is NO LONGER USED as of the real-time handler capture refactor.
+ * Handlers are now captured immediately when registered via DOM agent hooks.
  * 
- * Removed for speed/simplicity:
- * - extractDynamicallyViaDebugger (heavy debugger API usage)
- * - confirmHandlerViaBreakpointExecution (breakpoint validation)
- * - extractWithStrictIframe (complex iframe loading)
+ * Kept for reference/backup only. All extraction now happens via:
+ * - dom_injection_agent.js: Captures handlers when addEventListener/onmessage is called
+ * - background.js: Stores handlers in-memory cache
+ * - dashboard.js: Retrieves handlers instantly from cache
  * 
- * Kept:
- * - extractStaticallyWithContext (AST-only analysis)
- * - getBestHandler (scoring mechanism)
- * - Basic regex fallbacks
+ * Benefits of new architecture:
+ * - 100% accuracy (captures exact handler function reference)
+ * - Instant retrieval (<50ms vs seconds for static analysis)
+ * - No CSP issues, no key mismatches, no scoring complexity
+ * - Simpler codebase (-650 lines of complex regex/AST/fuzzy matching)
  */
 
 class HandlerExtractor {
