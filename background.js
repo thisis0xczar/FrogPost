@@ -62,6 +62,14 @@ class BoundedSet extends Set {
     }
 }
 
+/**
+ * In-Memory Handler Cache for Real-Time Capture
+ * Stores handlers immediately when detected by DOM agent
+ */
+const handlerCache = new Map(); // Key: URL, Value: { handlers: [{code, name, timestamp}], lastUpdate: timestamp }
+const MAX_CACHE_SIZE = 500;
+const MAX_HANDLERS_PER_URL = 10;
+
 let frameConnections = new BoundedMap(50); // Limit to 50 frame connections
 let messageBuffer;
 const injectedFramesAgents = new BoundedMap(20); // Limit to 20 injected agents
@@ -877,22 +885,43 @@ async function storeHandlerTelemetry(payload) {
 }
 
 /**
- * Retrieve best pre-extracted handler from DOM agent telemetry
+ * Retrieve best pre-extracted handler - REAL-TIME FIRST, then old telemetry fallback
  * This is what the Play button calls first (primary method)
  */
 async function getPreExtractedHandler(endpointKey) {
     try {
+        if (debugMode) console.log(`[FROGPOST-BG] getPreExtractedHandler called with key: ${endpointKey}`);
+        
+        // PRIORITY 1: Check in-memory real-time cache (NEW SYSTEM)
+        if (handlerCache.has(endpointKey)) {
+            const cacheEntry = handlerCache.get(endpointKey);
+            if (cacheEntry.handlers && cacheEntry.handlers.length > 0) {
+                // Return the LAST detected handler (most recent, usually the real one)
+                const handler = cacheEntry.handlers[cacheEntry.handlers.length - 1];
+                if (debugMode) console.log(`[FROGPOST-BG] ✅ Found handler in real-time cache: ${handler.code.length} chars, ${cacheEntry.handlers.length} total handlers for URL`);
+                // Return in the format dashboard expects: { handler: code, category, score, ... }
+                return { 
+                    handler: handler.code,  // Dashboard expects 'handler' not 'code'
+                    name: handler.name, 
+                    source: 'realtime-cache',
+                    category: 'realtime-capture',
+                    score: 1000  // High score to prioritize real-time handlers
+                };
+            }
+        }
+        if (debugMode) console.log(`[FROGPOST-BG] No handler in real-time cache, falling back to old telemetry...`);
+        
+        // FALLBACK: Check old telemetry system (DEPRECATED)
         const storageKey = `dom-agent-telemetry-${endpointKey}`;
-        console.log(`[FROGPOST-BG] getPreExtractedHandler called with key: ${endpointKey}`);
-        console.log(`[FROGPOST-BG] Storage key: ${storageKey}`);
+        if (debugMode) console.log(`[FROGPOST-BG] Storage key: ${storageKey}`);
         log.debug(`[Telemetry Retrieval] Looking for key: ${storageKey}`);
         
         let result = await chrome.storage.local.get(storageKey);
         let telemetry = result[storageKey];
-        console.log(`[FROGPOST-BG] Exact match result:`, telemetry ? 'FOUND' : 'NOT_FOUND');
+        if (debugMode) console.log(`[FROGPOST-BG] Exact match result:`, telemetry ? 'FOUND' : 'NOT_FOUND');
         
         if (telemetry) {
-            console.log(`[FROGPOST-BG] Telemetry object:`, {
+            if (debugMode) console.log(`[FROGPOST-BG] Telemetry object:`, {
                 hasHandlers: !!telemetry.handlers,
                 handlerCount: telemetry.handlers?.length || 0,
                 timestamp: telemetry.timestamp,
@@ -901,21 +930,21 @@ async function getPreExtractedHandler(endpointKey) {
                 windowId: telemetry.windowId
             });
             if (telemetry.handlers && telemetry.handlers.length > 0) {
-                console.log(`[FROGPOST-BG] First handler:`, {
+                if (debugMode) console.log(`[FROGPOST-BG] First handler:`, {
                     codeLength: telemetry.handlers[0].code?.length || 0,
                     name: telemetry.handlers[0].name,
                     hasCode: !!telemetry.handlers[0].code
                 });
             } else {
                 // Empty handlers - treat as invalid and try fallback
-                console.warn(`[FROGPOST-BG] Exact match found but has EMPTY handlers - will try fallback`);
+                if (debugMode) console.warn(`[FROGPOST-BG] Exact match found but has EMPTY handlers - will try fallback`);
                 telemetry = null;  // Force fallback matching
             }
         }
         
         // DEBUG: If not found OR empty, check what keys DO exist and try fuzzy matching
         if (!telemetry || !telemetry.handlers || telemetry.handlers.length === 0) {
-            console.log(`[FROGPOST-BG] Telemetry empty or invalid. Checking reason:`, {
+            if (debugMode) console.log(`[FROGPOST-BG] Telemetry empty or invalid. Checking reason:`, {
                 exists: !!result[storageKey],
                 exactMatchHandlerCount: result[storageKey]?.handlers?.length || 0,
                 willTryFallback: true
@@ -1028,9 +1057,9 @@ async function getPreExtractedHandler(endpointKey) {
         }
         
         // CRITICAL: Get the best handler (longest/most complete)
-        console.log(`[FROGPOST-BG] Selecting best handler from ${telemetry.handlers.length} handlers`);
+        if (debugMode) console.log(`[FROGPOST-BG] Selecting best handler from ${telemetry.handlers.length} handlers`);
         telemetry.handlers.forEach((h, i) => {
-            console.log(`[FROGPOST-BG]   Handler ${i+1}: ${(h.code || '').length} chars, name: ${h.name}`);
+            if (debugMode) console.log(`[FROGPOST-BG]   Handler ${i+1}: ${(h.code || '').length} chars, name: ${h.name}`);
         });
         
         const bestHandler = telemetry.handlers.reduce((best, current) => {
@@ -1039,18 +1068,12 @@ async function getPreExtractedHandler(endpointKey) {
             return currentLen > bestLen ? current : best;
         }, telemetry.handlers[0]);
         
-        console.log(`[FROGPOST-BG] Selected handler: ${(bestHandler.code || '').length} chars, name: ${bestHandler.name}`);
+        if (debugMode) console.log(`[FROGPOST-BG] Selected handler: ${(bestHandler.code || '').length} chars, name: ${bestHandler.name}`);
         
         // CRITICAL: Ensure full code is returned, not truncated
         const fullHandlerCode = bestHandler.code || '';
         
-        // Quality check: Reject if handler is too short (likely noise)
-        const MIN_LEGITIMATE_HANDLER_LENGTH = 100; // Real handlers are usually >100 chars
-        if (fullHandlerCode.length < MIN_LEGITIMATE_HANDLER_LENGTH) {
-            console.warn(`[FROGPOST-BG] ❌ Handler too short (${fullHandlerCode.length} chars), rejecting telemetry`);
-            log.warn(`[Telemetry Retrieval] Handler rejected: too short (${fullHandlerCode.length} chars < ${MIN_LEGITIMATE_HANDLER_LENGTH})`);
-            return null; // Force fallback to regex analysis
-        }
+        // Note: Removed length check - real handlers can be short (e.g., e=>{this.messageReceived(e)})
         
         log.debug(`[Handler Retrieval] Retrieved handler for ${endpointKey}: ${fullHandlerCode.length} chars`);
         
@@ -1365,6 +1388,63 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             notifyDashboard('realTimeHandlerDetected', payload);
             break;
 
+        case "handler-detected":
+            // Real-time handler capture - add to in-memory cache
+            if (debugMode) console.log(`[FROGPOST-BG] 🎯 handler-detected received!`, {
+                hasPayload: !!payload,
+                hasLocation: !!payload?.location,
+                hasHandler: !!payload?.handler,
+                location: payload?.location,
+                handlerType: typeof payload?.handler
+            });
+            
+            if (payload?.location && payload.location.includes('frogpost_handler_extraction=true')) {
+                if (debugMode) console.log(`[FROGPOST-BG] Skipping extraction tab`);
+                break;
+            }
+            if (payload?.location && payload?.handler) {
+                const url = payload.location;
+                if (debugMode) console.log(`[FROGPOST-BG] ✅ Caching handler for: ${url}`);
+                const handlerData = {
+                    code: payload.handler.code || payload.handler,
+                    name: payload.handler.name || 'anonymous',
+                    timestamp: payload.handler.timestamp || Date.now(),
+                    source: 'dom-agent-realtime'
+                };
+                
+                // Get or create cache entry for this URL
+                if (!handlerCache.has(url)) {
+                    handlerCache.set(url, { handlers: [], lastUpdate: Date.now() });
+                }
+                
+                const cacheEntry = handlerCache.get(url);
+                
+                // Deduplicate: check if this exact handler already exists
+                const isDuplicate = cacheEntry.handlers.some(h => h.code === handlerData.code);
+                if (!isDuplicate) {
+                    cacheEntry.handlers.push(handlerData);
+                    cacheEntry.lastUpdate = Date.now();
+                    
+                    // Limit handlers per URL
+                    if (cacheEntry.handlers.length > MAX_HANDLERS_PER_URL) {
+                        cacheEntry.handlers.shift(); // Remove oldest
+                    }
+                    
+                    if (debugMode) {
+                        if (debugMode) console.log(`[FROGPOST-BG] Handler cached for ${url}: ${handlerData.code.substring(0, 80)}...`);
+                        if (debugMode) console.log(`[FROGPOST-BG] Cache now has ${cacheEntry.handlers.length} handler(s) for this URL`);
+                    }
+                }
+                
+                // LRU eviction: if cache is too large, remove oldest URL
+                if (handlerCache.size > MAX_CACHE_SIZE) {
+                    const oldestKey = handlerCache.keys().next().value;
+                    handlerCache.delete(oldestKey);
+                    if (debugMode) if (debugMode) console.log(`[FROGPOST-BG] Cache evicted oldest URL: ${oldestKey}`);
+                }
+            }
+            break;
+
         case "received-message":
             // Skip handler extraction tabs
             if (payload?.location && payload.location.includes('frogpost_handler_extraction=true')) {
@@ -1411,16 +1491,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                         sendResponse({ success: false, error: 'Missing endpointKey' });
                         return;
                     }
-                    console.log(`[FROGPOST-BG] Looking up telemetry for: ${endpointKey}`);
+                    if (debugMode) console.log(`[FROGPOST-BG] Looking up telemetry for: ${endpointKey}`);
                     log.info(`[getPreExtractedHandler] Looking up telemetry for: ${endpointKey}`);
                     const handler = await getPreExtractedHandler(endpointKey);
-                    console.log(`[FROGPOST-BG] getPreExtractedHandler returned:`, handler ? 'FOUND' : 'NULL');
+                    if (debugMode) console.log(`[FROGPOST-BG] getPreExtractedHandler returned:`, handler ? 'FOUND' : 'NULL');
                     if (handler) {
-                        console.log(`[FROGPOST-BG] ✅ Handler found! Length: ${handler.handler?.length || handler.code?.length}`);
+                        if (debugMode) console.log(`[FROGPOST-BG] ✅ Handler found! Length: ${handler.handler?.length || handler.code?.length}`);
                         log.info(`[getPreExtractedHandler] ✅ Found handler for ${endpointKey}`);
                         sendResponse({ success: true, handler: handler });
                     } else {
-                        console.warn(`[FROGPOST-BG] ❌ No handler found`);
+                        if (debugMode) console.warn(`[FROGPOST-BG] ❌ No handler found`);
                         log.warn(`[getPreExtractedHandler] ❌ No handler found for ${endpointKey}`);
                         sendResponse({ success: false, error: 'No pre-extracted handler found' });
                     }

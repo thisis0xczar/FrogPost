@@ -164,7 +164,8 @@
                     // Map topics to message types that background script expects
                     let messageType;
                     switch(topic) {
-                        case 'handlers-telemetry':
+                        case 'handler-detected':  // Real-time handler capture (NEW)
+                        case 'handlers-telemetry': // Old telemetry (DEPRECATED)
                         case 'handler-added':
                         case 'received-message':
                         case 'outgoing-message':

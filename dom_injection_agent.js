@@ -1,7 +1,8 @@
 /**
- * FrogPost Extension - Advanced Runtime Handler Extraction
+ * FrogPost Extension - Real-Time Handler Extraction
  * Originally Created by thisis0xczar/Lidor
- * Enhanced: 2025-10-22 - Runtime interception for 95%+ accuracy
+ * Enhanced: 2025-10-29 - Immediate handler capture for BlackHat presentation
+ * Architecture: Handlers sent instantly when registered, no periodic telemetry
  */
 
 (function() {
@@ -34,29 +35,6 @@
     // Message tracking
     const messageEvents = new Map();
     let isActive = true;
-
-    // Adaptive telemetry configuration
-    let telemetryInterval = 3000; // Start at 3s
-    let lastHandlerDetectedTime = Date.now();
-    let telemetryTimer = null;
-    const TELEMETRY_ACTIVE = 3000;      // 3s when handlers recently detected
-    const TELEMETRY_IDLE = 10000;       // 10s when idle (no new handlers for 30s)
-    const TELEMETRY_BACKGROUND = 30000; // 30s when page hidden/inactive
-
-    // Smart telemetry: Cache to avoid resending identical handlers
-    const handlerCache = new Map(); // hash -> {code, timestamp}
-    const CACHE_CLEANUP_INTERVAL = 60000; // Clean cache every 60s
-    let lastCacheCleanup = Date.now();
-    
-    // Fast hash function for handler code (FNV-1a)
-    function hashCode(str) {
-        let hash = 2166136261;
-        for (let i = 0; i < str.length; i++) {
-            hash ^= str.charCodeAt(i);
-            hash += (hash << 1) + (hash << 4) + (hash << 7) + (hash << 8) + (hash << 24);
-        }
-        return (hash >>> 0).toString(36);
-    }
 
     // VERBOSE DEBUG MODE - Disabled to prevent log flood
     const VERBOSE_DEBUG = false;
@@ -147,97 +125,34 @@
     }
 
     /**
-     * Send periodic telemetry with current handlers
-     * OPTIMIZED: Only sends handler CHANGES (not full code every time)
-     * This reduces IPC traffic by 80-90% with multiple frames
+     * Send handler immediately when detected (real-time capture)
+     * No periodic batching - handlers sent instantly when registered
      */
-    function sendPeriodicTelemetry() {
+    function sendHandlerImmediately(listenerFunc) {
         try {
-            const now = Date.now();
-            const allHandlers = [];  // Send ALL handlers, not just changes
-            const currentHashes = new Set();
+            const handlerCode = listenerFunc.toString();
+            const handlerName = listenerFunc.name || 'anonymous';
             
-            // Send ALL handlers every time (not just changes)
-            // This ensures dashboard always gets full handler list even if opened late
-            $$$listeners.forEach(listener => {
-                try {
-                    const code = listener.toString();
-                    const hash = hashCode(code);
-                    currentHashes.add(hash);
-                    
-                    // Send full code (not abbreviated) for actual handler analysis
-                    const isNew = !handlerCache.has(hash);
-                    if (isNew) {
-                        handlerCache.set(hash, { code: code, timestamp: now });
-                    }
-                    
-                    allHandlers.push({
-                        hash: hash,
-                        code: code,  // Send FULL code for analysis
-                        length: listener.length || 0,
-                        name: listener.name || 'anonymous',
-                        isNew: isNew
-                    });
-                } catch (e) {
-                    // Skip handlers that can't be stringified
+            debugLog(` 📨 Handler detected immediately: ${handlerName} (${handlerCode.length} chars)`);
+            debugLog(` Location: ${window.location.href}`);
+            
+            sendToBackground({
+                topic: "handler-detected",
+                windowId: windowId,
+                location: window.location.href,
+                isIframe: window !== window.top,
+                handler: {
+                    code: handlerCode,
+                    name: handlerName,
+                    length: listenerFunc.length || 0,
+                    timestamp: Date.now()
                 }
             });
-
-            // Periodic cache cleanup to prevent memory leaks
-            if (now - lastCacheCleanup > CACHE_CLEANUP_INTERVAL) {
-                const staleThreshold = now - 300000; // 5 minutes
-                for (const [hash, entry] of handlerCache.entries()) {
-                    if (entry.timestamp < staleThreshold && !currentHashes.has(hash)) {
-                        handlerCache.delete(hash);
-                    }
-                }
-                lastCacheCleanup = now;
-            }
-
-            // Always send telemetry with ALL handlers (not just changes)
-            // This ensures dashboard gets full handler list even if opened after handlers were registered
-            if (allHandlers.length > 0) {
-                const newHandlerCount = allHandlers.filter(h => h.isNew).length;
-                console.log(`[FrogPost DOM Agent] 📊 Sending telemetry: ${newHandlerCount} new, ${allHandlers.length} total handlers`);
-                console.log(`[FrogPost DOM Agent] Location: ${window.location.href}`);
-                console.log(`[FrogPost DOM Agent] Handlers:`, allHandlers.map(h => ({ name: h.name, codeLength: h.code.length })));
-                debugLog(`📊 Telemetry: ${newHandlerCount} new, ${allHandlers.length} total handlers, iframe=${window !== window.top}`);
-
-                sendToBackground({
-                    topic: "handlers-telemetry",
-                    windowId: windowId,
-                    location: window.location.href,
-                    isIframe: window !== window.top,
-                    handlers: allHandlers,  // Send ALL handlers every time
-                    timestamp: now,
-                    handlerCount: $$$listeners.size,
-                    cacheSize: handlerCache.size
-                });
-            } else {
-                console.log(`[FrogPost DOM Agent] ⚠️ No handlers to send. Total listeners: ${$$$listeners.size}`);
-            }
-
-            // Build frame tree from top window only (less frequently)
-            if (window.top === window && allHandlers.length > 0) {
-                buildFrameTree();
-            }
-
-            // Adaptive interval calculation
-            const timeSinceLastHandler = Date.now() - lastHandlerDetectedTime;
-            if (timeSinceLastHandler > 30000) {
-                // No new handlers for 30s -> slow down to 10s interval
-                telemetryInterval = document.hidden ? TELEMETRY_BACKGROUND : TELEMETRY_IDLE;
-            } else {
-                // Recent handler activity -> keep at 3s interval
-                telemetryInterval = TELEMETRY_ACTIVE;
-            }
-
-        } catch (error) {
-            debugLog('❌ Telemetry error:', error);
+            
+            debugLog(`📨 Handler sent immediately: ${handlerName} (${handlerCode.length} chars)`);
+        } catch (e) {
+            debugLog('❌ Failed to send handler:', e);
         }
-
-        // Schedule next telemetry update with adaptive interval
-        telemetryTimer = setTimeout(sendPeriodicTelemetry, telemetryInterval);
     }
 
     /**
@@ -329,6 +244,118 @@
     }
 
     /**
+     * Scan inline <script> tags for message handlers
+     * Optimized for performance with fast hash deduplication
+     */
+    function scanInlineScripts() {
+        try {
+            const scripts = document.querySelectorAll('script:not([src])');
+            debugLog(` 🔍 Scanning ${scripts.length} inline script(s) for handlers...`);
+            const seenHashes = new Set();
+            
+            // Fast hash function for deduplication
+            function fastHash(str) {
+                let hash = 0;
+                for (let i = 0; i < str.length; i++) {
+                    hash = ((hash << 5) - hash) + str.charCodeAt(i);
+                    hash = hash & hash;
+                }
+                return hash;
+            }
+            
+            // Cached regex patterns
+            const addEventListenerPattern = /addEventListener\s*\(\s*["']message["']\s*,\s*([^,)]+)/g;
+            const onMessagePattern = /\.onmessage\s*=\s*([^;]+)/g;
+            
+            scripts.forEach((script) => {
+                try {
+                    const scriptContent = script.textContent;
+                    if (!scriptContent || scriptContent.length > 1000000) return; // Skip huge scripts
+                    
+                    const scriptHash = fastHash(scriptContent);
+                    if (seenHashes.has(scriptHash)) return; // Skip duplicates
+                    seenHashes.add(scriptHash);
+                    
+                    // Find addEventListener('message', handler) - handles both inline and named handlers
+                    let match;
+                    const inlineHandlerPattern = /addEventListener\s*\(\s*["']message["']\s*,\s*(\([^)]*\)\s*=>\s*\{|function\s*\([^)]*\)\s*\{)/g;
+                    
+                    // First, try to find inline handlers (arrow functions or anonymous functions)
+                    inlineHandlerPattern.lastIndex = 0;
+                    while ((match = inlineHandlerPattern.exec(scriptContent)) !== null) {
+                        debugLog(` 📝 Found inline addEventListener handler`);
+                        const matchStart = match.index + match[0].indexOf(match[1]);
+                        let braceCount = 1;
+                        let endIdx = matchStart + match[1].length;
+                        
+                        while (braceCount > 0 && endIdx < scriptContent.length) {
+                            if (scriptContent[endIdx] === '{') braceCount++;
+                            else if (scriptContent[endIdx] === '}') braceCount--;
+                            endIdx++;
+                        }
+                        
+                        if (braceCount === 0) {
+                            const handlerCode = scriptContent.substring(matchStart, endIdx);
+                            sendHandlerImmediately({ toString: () => handlerCode, name: 'inline-addEventListener' });
+                        }
+                    }
+                    
+                    // Then, try to find named handler references
+                    addEventListenerPattern.lastIndex = 0;
+                    while ((match = addEventListenerPattern.exec(scriptContent)) !== null) {
+                        const handlerRef = match[1].trim();
+                        
+                        // Skip if it looks like an inline function (starts with parenthesis or 'function')
+                        if (handlerRef.startsWith('(') || handlerRef.startsWith('function')) continue;
+                        
+                        debugLog(` 📝 Found addEventListener pattern, handler ref: ${handlerRef}`);
+                        
+                        // Extract actual handler code
+                        let handlerCode = null;
+                        const funcMatch = scriptContent.match(new RegExp(`(?:function\\s+${handlerRef}|const\\s+${handlerRef}\\s*=|let\\s+${handlerRef}\\s*=|var\\s+${handlerRef}\\s*=)\\s*(?:function)?\\s*\\([^)]*\\)\\s*\\{`, 'g'));
+                        
+                        if (funcMatch) {
+                            const startIdx = scriptContent.indexOf(funcMatch[0]);
+                            let braceCount = 1;
+                            let endIdx = startIdx + funcMatch[0].length;
+                            
+                            while (braceCount > 0 && endIdx < scriptContent.length) {
+                                if (scriptContent[endIdx] === '{') braceCount++;
+                                else if (scriptContent[endIdx] === '}') braceCount--;
+                                endIdx++;
+                            }
+                            
+                            if (braceCount === 0) {
+                                handlerCode = scriptContent.substring(startIdx, endIdx);
+                            }
+                        }
+                        
+                        if (handlerCode) {
+                            sendHandlerImmediately({ toString: () => handlerCode, name: handlerRef });
+                        }
+                    }
+                    
+                    // Find window.onmessage = handler
+                    onMessagePattern.lastIndex = 0;
+                    while ((match = onMessagePattern.exec(scriptContent)) !== null) {
+                        const handlerDef = match[1].trim();
+                        debugLog(` 📝 Found onmessage pattern: ${handlerDef.substring(0, 50)}...`);
+                        if (handlerDef.startsWith('function') || handlerDef.includes('=>')) {
+                            sendHandlerImmediately({ toString: () => handlerDef, name: 'onmessage' });
+                        }
+                    }
+                    
+                } catch (scriptError) {
+                    // Silently skip problematic scripts
+                }
+            });
+            
+        } catch (error) {
+            debugLog('❌ Error scanning inline scripts:', error);
+        }
+    }
+
+    /**
      * Initialize the agent
      */
     function initialize() {
@@ -354,6 +381,13 @@
             // Scan for existing handlers
             scanExistingHandlers();
 
+            // Scan inline scripts for handlers (catches handlers defined in <script> tags)
+            if (document.readyState === 'loading') {
+                document.addEventListener('DOMContentLoaded', () => scanInlineScripts());
+            } else {
+                scanInlineScripts();
+            }
+
             // Report initialization
             sendToBackground({
                 topic: "agent-ready",
@@ -363,10 +397,7 @@
                 timestamp: Date.now()
             });
 
-            debugLog('✅ Agent fully initialized! Starting periodic telemetry...');
-
-            // Start periodic telemetry (THE KEY to 95%+ accuracy)
-            sendPeriodicTelemetry();
+            debugLog('✅ Agent fully initialized! Real-time handler capture active.');
 
         } catch (error) {
             debugLog('❌ Initialization error:', error);
@@ -391,23 +422,10 @@
                         
                         if (!isOwnHandler) {
                             $$$listeners.add(listener);
-                            lastHandlerDetectedTime = Date.now(); // Reset for adaptive telemetry
-                            telemetryInterval = TELEMETRY_ACTIVE; // Speed up to 3s
                             debugLog(`✅ Handler registered via addEventListener! Total: ${$$$listeners.size}`, listenerStr.substring(0, 100));
                             
-                            // Send immediate notification about new handler
-                            sendToBackground({
-                                topic: "handler-added",
-                                windowId: windowId,
-                                location: window.location.href,
-                                method: "addEventListener",
-                                handlerCode: listenerStr.substring(0, 2000),
-                                timestamp: Date.now()
-                            });
-
-                            // Trigger immediate telemetry update
-                            if (telemetryTimer) clearTimeout(telemetryTimer);
-                            sendPeriodicTelemetry();
+                            // Send handler immediately (real-time capture)
+                            sendHandlerImmediately(listener);
                         }
                     }
                     // Don't call original - hub already handles it
@@ -436,21 +454,9 @@
                     
                     if (!isOwnHandler) {
                         $$$listeners.add(handler);
-                        lastHandlerDetectedTime = Date.now(); // Reset for adaptive telemetry
-                        telemetryInterval = TELEMETRY_ACTIVE; // Speed up to 3s
                         
-                        sendToBackground({
-                            topic: "handler-added",
-                            windowId: windowId,
-                            location: window.location.href,
-                            method: "onmessage",
-                            handlerCode: handlerStr.substring(0, 2000),
-                            timestamp: Date.now()
-                        });
-
-                        // Trigger immediate telemetry update
-                        if (telemetryTimer) clearTimeout(telemetryTimer);
-                        sendPeriodicTelemetry();
+                        // Send handler immediately (real-time capture)
+                        sendHandlerImmediately(handler);
                     }
                 }
             },
@@ -504,14 +510,8 @@
             // Check if window.onmessage was set before we overrode it
             if (window.onmessage && typeof window.onmessage === 'function') {
                 $$$listeners.add(window.onmessage);
-                sendToBackground({
-                    topic: "handler-added",
-                    windowId: windowId,
-                    location: window.location.href,
-                    method: "onmessage (pre-existing)",
-                    handlerCode: window.onmessage.toString().substring(0, 2000),
-                    timestamp: Date.now()
-                });
+                // Send handler immediately (real-time capture)
+                sendHandlerImmediately(window.onmessage);
             }
         } catch (error) {
             // Silent fail
@@ -549,20 +549,6 @@
     // Cleanup on page unload
     window.addEventListener('beforeunload', () => {
         stop();
-    });
-
-    // Adapt telemetry based on page visibility (saves CPU when page is hidden)
-    document.addEventListener('visibilitychange', () => {
-        if (document.hidden) {
-            // Page hidden -> slow down to 30s
-            telemetryInterval = TELEMETRY_BACKGROUND;
-            debugLog('📴 Page hidden, telemetry slowed to 30s');
-        } else {
-            // Page visible -> check if handlers were detected recently
-            const timeSinceLastHandler = Date.now() - lastHandlerDetectedTime;
-            telemetryInterval = timeSinceLastHandler > 30000 ? TELEMETRY_IDLE : TELEMETRY_ACTIVE;
-            debugLog('📱 Page visible, telemetry adjusted to', telemetryInterval + 'ms');
-        }
     });
 
     // Expose agent API for debugging
