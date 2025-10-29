@@ -36,8 +36,8 @@
     const messageEvents = new Map();
     let isActive = true;
 
-    // VERBOSE DEBUG MODE - Disabled to prevent log flood
-    const VERBOSE_DEBUG = false;
+    // VERBOSE DEBUG MODE - TEMPORARILY ENABLED FOR DEBUGGING
+    const VERBOSE_DEBUG = true;
     const debugLog = (...args) => {
         if (VERBOSE_DEBUG) {
             console.log(`%c[FrogPost Agent ${windowId.substring(0, 8)}]`, 'color: #00ff00; font-weight: bold', ...args);

@@ -13,7 +13,7 @@ try {
     console.error("Background.js: Failed to import handler-extractor.js", e);
 }
 
-let debugMode = false; // Flag to control debug logging
+let debugMode = true; // Flag to control debug logging - TEMPORARILY ENABLED FOR DEBUGGING
 
 const log = {
     debug: (...args) => { if (debugMode) console.debug("BG:", ...args); },
