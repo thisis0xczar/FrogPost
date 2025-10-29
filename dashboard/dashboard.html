@@ -5,13 +5,11 @@
     <title>FrogPost</title>
     <link rel="stylesheet" href="./dashboard.css">
 
-    <script src="../imports/acorn.js"></script>
-    <script src="../imports/walk.js"></script>
-
+    <!-- TELEMETRY-FIRST: No AST parsing needed -->
     <script src="../fuzzer/payloads.js"></script>
-    <script src="../static/static-handler-analyzer.js"></script>
     <script src="../static/handler-extractor.js"></script>
     <script src="../static/trace-report-storage.js"></script>
+    <script src="../static/performance-utils.js"></script>
 
     <script type="module" src="../fuzzer/fuzzer.js"></script>
     <script type="module" src="../static/tracer.js"></script>
@@ -49,6 +47,29 @@
             <div id="endpointsList" class="panel">
                 <div class="endpoint-filter-container">
                     <input type="text" id="endpointFilterInput" placeholder="Filter endpoints...">
+                </div>
+                <!-- Pagination Controls -->
+                <div class="pagination-controls" id="paginationControls" style="display: none;">
+                    <div class="pagination-info">
+                        <span id="paginationInfo">Showing 0-0 of 0</span>
+                    </div>
+                    <div class="pagination-buttons">
+                        <button id="paginationFirst" class="pagination-btn" title="First page">⟨⟨</button>
+                        <button id="paginationPrev" class="pagination-btn" title="Previous page">⟨</button>
+                        <span id="paginationPages" class="pagination-pages"></span>
+                        <button id="paginationNext" class="pagination-btn" title="Next page">⟩</button>
+                        <button id="paginationLast" class="pagination-btn" title="Last page">⟩⟩</button>
+                    </div>
+                    <div class="pagination-size">
+                        <label for="paginationSize">Per page:</label>
+                        <select id="paginationSize">
+                            <option value="50">50</option>
+                            <option value="100" selected>100</option>
+                            <option value="200">200</option>
+                            <option value="500">500</option>
+                            <option value="all">All</option>
+                        </select>
+                    </div>
                 </div>
                 <div class='no-endpoints'>Loading captured communications...</div>
             </div>
@@ -121,6 +142,23 @@
         <iframe id="testFrame1"></iframe>
         <iframe id="testFrame2"></iframe>
         <iframe id="testFrame3"></iframe>
+    </div>
+
+    <!-- Batch Scan Controls Footer -->
+    <div id="batchScanFooter" class="batch-scan-footer" style="display: none;">
+        <div class="batch-scan-info">
+            <span id="batchScanProgress">Scanning: 0/0</span>
+            <span id="batchScanCurrent" class="batch-scan-current"></span>
+        </div>
+        <div class="batch-scan-controls">
+            <button id="batchScanPause" class="batch-control-btn pause-btn">⏸ Pause</button>
+            <button id="batchScanResume" class="batch-control-btn resume-btn" style="display: none;">▶ Resume</button>
+            <button id="batchScanStop" class="batch-control-btn stop-btn">⏹ Stop</button>
+        </div>
+        <div class="batch-scan-stats">
+            <span class="batch-stat success">✓ <span id="batchSuccessCount">0</span></span>
+            <span class="batch-stat failed">✗ <span id="batchFailCount">0</span></span>
+        </div>
     </div>
 
     <div id="reportPanelContainer">

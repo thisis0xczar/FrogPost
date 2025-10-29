@@ -4,14 +4,13 @@
  * Refined on: 2025-10-22
  */
 
+// TELEMETRY-FIRST: No AST parsing needed
 try {
     importScripts(
-        './imports/acorn.js',
-        './imports/walk.js',
         './static/handler-extractor.js'
     );
 } catch (e) {
-    console.error("Background.js: Failed to import required scripts (Acorn, Extractor, etc).", e);
+    console.error("Background.js: Failed to import handler-extractor.js", e);
 }
 
 let debugMode = false; // Flag to control debug logging
@@ -210,6 +209,36 @@ const processedUrlsInSession = new BoundedSet(100); // Limit to 100 processed UR
 let isDebuggerApiModeGloballyEnabled = false;
 const DEBUGGER_MODE_STORAGE_KEY = 'debuggerApiModeEnabled';
 
+// PERFORMANCE: Debugger session limiting to prevent browser lag
+const MAX_CONCURRENT_DEBUGGER_SESSIONS = 3;
+let activeDebuggerCount = 0;
+const debuggerQueue = [];
+
+function canAttachDebugger() {
+    return activeDebuggerCount < MAX_CONCURRENT_DEBUGGER_SESSIONS;
+}
+
+function incrementDebuggerCount() {
+    activeDebuggerCount++;
+    log.debug(`[Debugger Limit] Active sessions: ${activeDebuggerCount}/${MAX_CONCURRENT_DEBUGGER_SESSIONS}`);
+}
+
+function decrementDebuggerCount() {
+    activeDebuggerCount = Math.max(0, activeDebuggerCount - 1);
+    log.debug(`[Debugger Limit] Active sessions: ${activeDebuggerCount}/${MAX_CONCURRENT_DEBUGGER_SESSIONS}`);
+    processDebuggerQueue();
+}
+
+function processDebuggerQueue() {
+    if (debuggerQueue.length > 0 && canAttachDebugger()) {
+        const nextTask = debuggerQueue.shift();
+        if (nextTask) {
+            log.debug(`[Debugger Limit] Processing queued task (${debuggerQueue.length} remaining)`);
+            nextTask();
+        }
+    }
+}
+
 (async () => {
     try {
         const result = await chrome.storage.local.get([DEBUGGER_MODE_STORAGE_KEY]);
@@ -226,6 +255,8 @@ async function fetchHeadersViaDebugger(targetUrl) {
     let headers = {};
     let status = 0;
     let reason = '';
+    let finalUrl = targetUrl; // Track final URL after redirects
+    let redirectChain = []; // Track redirect chain
     try {
         const tab = await chrome.tabs.create({ url: targetUrl, active: false });
         tabId = tab.id;
@@ -238,6 +269,26 @@ async function fetchHeadersViaDebugger(targetUrl) {
         const done = new Promise(res => { resolveOnce = res; });
         const onEvent = (src, method, params) => {
             if (src.tabId !== tabId) return;
+            
+            // Track redirects by monitoring request chains
+            if (method === 'Network.requestWillBeSent' && params?.type === 'Document') {
+                const request = params.request || {};
+                const requestUrl = request.url;
+                const redirectResponse = params.redirectResponse;
+                
+                if (redirectResponse && redirectResponse.status >= 300 && redirectResponse.status < 400) {
+                    // This is a redirect!
+                    try {
+                        const location = redirectResponse.headers?.Location || redirectResponse.headers?.location;
+                        redirectChain.push({ from: finalUrl, to: requestUrl, status: redirectResponse.status });
+                        finalUrl = requestUrl;
+                        log.info(`[Debugger] Redirect detected: ${redirectResponse.status} ${finalUrl} → ${requestUrl}`);
+                    } catch (e) {
+                        log.warn(`[Debugger] Failed to track redirect: ${e.message}`);
+                    }
+                }
+            }
+            
             if (method === 'Network.responseReceived' && params?.type === 'Document') {
                 try {
                     const resp = params.response || {};
@@ -245,8 +296,23 @@ async function fetchHeadersViaDebugger(targetUrl) {
                     const hs = resp.headers || {};
                     const map = {};
                     for (const k in hs) { map[k] = hs[k]; map[k.toLowerCase()] = hs[k]; }
-                    headers = map;
-                    resolveOnce();
+                    
+                    if (status >= 200 && status < 300) {
+                        // Final response - use these headers
+                        headers = map;
+                        
+                        // CRITICAL: Check if final URL differs from original (indicates redirect)
+                        if (resp.url && resp.url !== targetUrl) {
+                            if (redirectChain.length === 0) {
+                                // Redirect happened but we didn't catch it in requestWillBeSent
+                                log.warn(`[Debugger] Redirect detected via final URL: ${targetUrl} → ${resp.url}`);
+                                redirectChain.push({ from: targetUrl, to: resp.url, status: 'unknown' });
+                            }
+                            finalUrl = resp.url;
+                        }
+                        
+                        resolveOnce();
+                    }
                 } catch (_) { resolveOnce(); }
             } else if (method === 'Page.loadEventFired') {
                 resolveOnce();
@@ -259,13 +325,17 @@ async function fetchHeadersViaDebugger(targetUrl) {
         await Promise.race([done, new Promise(res => setTimeout(res, 6000))]);
         chrome.debugger.onEvent.removeListener(onEvent);
         reason = 'ok';
+        
+        if (redirectChain.length > 0) {
+            log.info(`[Debugger] Redirect chain: ${targetUrl} → ${redirectChain.map(r => r.to).join(' → ')}`);
+        }
     } catch (e) {
         reason = e?.message || 'debugger error';
     } finally {
         try { if (attached && tabId) await chrome.debugger.detach({ tabId }); } catch {}
         try { if (tabId) await chrome.tabs.remove(tabId); } catch {}
     }
-    return { status, headers, reason };
+    return { status, headers, reason, finalUrl, redirectChain };
 }
 
 
@@ -277,6 +347,47 @@ class CircularMessageBuffer {
     clear() { this.buffer = new Array(this.maxSize); this.head = 0; this.size = 0; }
 }
 messageBuffer = new CircularMessageBuffer(100);
+
+// Deep JSON sanitizer: caps total keys across nested structure and array lengths (defense-in-depth)
+function sanitizeJsonDeep(value, options = {}) {
+    const maxKeysTotal = typeof options.maxKeysTotal === 'number' ? options.maxKeysTotal : 50;
+    const maxArrayLength = typeof options.maxArrayLength === 'number' ? options.maxArrayLength : 50;
+    const maxDepth = typeof options.maxDepth === 'number' ? options.maxDepth : 8;
+    let remainingKeys = maxKeysTotal;
+
+    function walk(val, depth) {
+        if (depth > maxDepth) return { __frogPost_truncatedDepth: true };
+        if (!val || typeof val !== 'object') return val;
+        if (Array.isArray(val)) {
+            const out = [];
+            const len = Math.min(val.length, maxArrayLength);
+            for (let i = 0; i < len; i++) {
+                if (remainingKeys <= 0) break;
+                out.push(walk(val[i], depth + 1));
+            }
+            if (val.length > len) out.push({ __frogPost_truncatedArray: val.length - len });
+            return out;
+        }
+
+        const out = {};
+        const keys = Object.keys(val);
+        for (let i = 0; i < keys.length; i++) {
+            if (remainingKeys <= 0) break;
+            const k = keys[i];
+            remainingKeys--;
+            out[k] = walk(val[k], depth + 1);
+        }
+        const omitted = keys.length - Object.keys(out).length;
+        if (omitted > 0) out.__frogPost_truncatedKeys = omitted;
+        return out;
+    }
+
+    const result = walk(value, 0);
+    if (remainingKeys <= 0 && result && typeof result === 'object' && !Array.isArray(result)) {
+        result.__frogPost_truncatedTotalKeys = true;
+    }
+    return result;
+}
 
 function normalizeEndpointUrl(url) { try { if (!url || typeof url !== 'string' || ['access-denied-or-invalid', 'unknown-origin', 'null'].includes(url)) { return { normalized: url, components: null }; } let absoluteUrlStr = url; if (!url.includes('://') && !url.startsWith('//')) { absoluteUrlStr = 'https:' + url; } else if (url.startsWith('//')) { absoluteUrlStr = 'https:' + url; } const urlObj = new URL(absoluteUrlStr); if (['about:', 'chrome:', 'moz-extension:', 'chrome-extension:', 'blob:', 'data:'].includes(urlObj.protocol)) { const normalized = url; return { normalized: normalized, components: { origin: urlObj.origin, path: urlObj.pathname, query: urlObj.search, hash: urlObj.hash } }; } const normalized = urlObj.origin + urlObj.pathname + urlObj.search; return { normalized: normalized, components: { origin: urlObj.origin, path: urlObj.pathname, query: urlObj.search, hash: urlObj.hash } }; } catch (e) { return { normalized: url, components: null }; } }
 function addFrameConnection(origin, destinationUrl) { let addedNew = false; try { const normalizedOrigin = normalizeEndpointUrl(origin)?.normalized; const normalizedDestination = normalizeEndpointUrl(destinationUrl)?.normalized; if (!normalizedOrigin || !normalizedDestination || normalizedOrigin === 'null' || normalizedDestination === 'null' || normalizedOrigin === 'access-denied-or-invalid' || normalizedDestination === 'access-denied-or-invalid' || normalizedOrigin === normalizedDestination ) { return false; } if (!frameConnections.has(normalizedOrigin)) { frameConnections.set(normalizedOrigin, new Set()); addedNew = true; } const destSet = frameConnections.get(normalizedOrigin); if (!destSet.has(normalizedDestination)) { destSet.add(normalizedDestination); addedNew = true; } } catch (e) {} return addedNew; }
@@ -341,15 +452,23 @@ async function handleExtensionPageLoad(tabId, targetUrl) {
         log.debug("Could not check real-time detection status:", error.message);
     }
     
+    // PERFORMANCE: Queue if at debugger limit
+    if (!canAttachDebugger()) {
+        log.info(`[AutoAttach] Debugger limit reached, queuing ${targetUrl}`);
+        debuggerQueue.push(() => handleExtensionPageLoad(tabId, targetUrl));
+        return;
+    }
+    
     autoAttachInProgress.add(tabId);
     processedUrlsInSession.add(targetUrl);
+    incrementDebuggerCount();
     let attached = false; let extractor = null; let analysisTimeout = null;
     try {
         log.debug(`[AutoAttach] Attaching debugger to: ${targetUrl} (Tab ID: ${tabId})`);
         await chrome.debugger.attach({ tabId: tabId }, "1.3"); attached = true; log.debug(`[AutoAttach] Attached successfully.`);
         if (typeof HandlerExtractor === 'undefined') { log.warn("[AutoAttach] HandlerExtractor class not available. Cannot analyze scripts."); await chrome.debugger.detach({ tabId: tabId }); attached = false; return; }
         extractor = new HandlerExtractor(); extractor.initialize(targetUrl, []);
-        let analysisCompleteResolve; const analysisCompletionPromise = new Promise(resolve => { analysisCompleteResolve = resolve; }); analysisTimeout = setTimeout(() => { log.warn(`[AutoAttach] Analysis timeout reached for ${targetUrl}. Detaching.`); analysisCompleteResolve(); }, 12000);
+        let analysisCompleteResolve; const analysisCompletionPromise = new Promise(resolve => { analysisCompleteResolve = resolve; }); analysisTimeout = setTimeout(() => { log.warn(`[AutoAttach] Analysis timeout reached for ${targetUrl}. Detaching.`); analysisCompleteResolve(); }, 6000); // OPTIMIZED: Reduced from 12s to 6s
         const onEvent = async (source, method, params) => {
             if (source.tabId !== tabId) return;
             if (method === 'Debugger.scriptParsed') {
@@ -379,7 +498,7 @@ async function handleExtensionPageLoad(tabId, targetUrl) {
         await Promise.all([ chrome.debugger.sendCommand({ tabId: tabId }, "Page.enable"), chrome.debugger.sendCommand({ tabId: tabId }, "Runtime.enable"), chrome.debugger.sendCommand({ tabId: tabId }, "Debugger.enable") ]); log.debug(`[AutoAttach] Domains enabled.`);
         log.debug("[AutoAttach] Waiting for analysis timeout or detach..."); await analysisCompletionPromise;
     } catch (err) { log.error(`[AutoAttach] Error processing extension tab ${tabId}:`, err.message);
-    } finally { clearTimeout(analysisTimeout); try { chrome.debugger.onEvent.removeListener(onEvent); } catch(e) {} try { chrome.debugger.onDetach.removeListener(onDetach); } catch(e) {} if (attached) { try { await chrome.debugger.detach({ tabId: tabId }); log.debug(`[AutoAttach] Detached in finally block for tab ${tabId}`); } catch (e) { log.warn(`[AutoAttach] Error detaching in finally for tab ${tabId}: ${e.message}`) } } autoAttachInProgress.delete(tabId); }
+    } finally { clearTimeout(analysisTimeout); try { chrome.debugger.onEvent.removeListener(onEvent); } catch(e) {} try { chrome.debugger.onDetach.removeListener(onDetach); } catch(e) {} if (attached) { try { await chrome.debugger.detach({ tabId: tabId }); log.debug(`[AutoAttach] Detached in finally block for tab ${tabId}`); } catch (e) { log.warn(`[AutoAttach] Error detaching in finally for tab ${tabId}: ${e.message}`) } } autoAttachInProgress.delete(tabId); decrementDebuggerCount(); } // PERFORMANCE: Decrement counter to allow queued tasks
 }
 
 async function handleWebPageLoadForDebug(tabId, targetUrl) {
@@ -397,14 +516,23 @@ async function handleWebPageLoadForDebug(tabId, targetUrl) {
     
     log.debug(`[Debug Mode] Checking web page: ${targetUrl} (Tab ID: ${tabId})`);
     if (autoAttachInProgress.has(tabId)) { log.debug(`[Debug Mode] Debugger attach already in progress for tab ${tabId}, skipping web page check.`); return; }
+    
+    // PERFORMANCE: Queue if at debugger limit
+    if (!canAttachDebugger()) {
+        log.info(`[Debug Mode] Debugger limit reached, queuing ${targetUrl}`);
+        debuggerQueue.push(() => handleWebPageLoadForDebug(tabId, targetUrl));
+        return;
+    }
+    
     autoAttachInProgress.add(tabId);
+    incrementDebuggerCount();
     let attached = false; let extractor = null; let analysisTimeout = null;
     try {
         log.debug(`[Debug Mode] Attaching debugger to: ${targetUrl} (Tab ID: ${tabId})`);
         await chrome.debugger.attach({ tabId: tabId }, "1.3"); attached = true; log.debug(`[Debug Mode] Attached successfully.`);
         if (typeof HandlerExtractor === 'undefined') { log.warn("[Debug Mode] HandlerExtractor class not available. Cannot analyze scripts."); await chrome.debugger.detach({ tabId: tabId }); attached = false; return; }
         extractor = new HandlerExtractor(); extractor.initialize(targetUrl, []);
-        let analysisCompleteResolve; const analysisCompletionPromise = new Promise(resolve => { analysisCompleteResolve = resolve; }); analysisTimeout = setTimeout(() => { log.warn(`[Debug Mode] Analysis timeout for ${targetUrl}. Detaching.`); analysisCompleteResolve(); }, 15000);
+        let analysisCompleteResolve; const analysisCompletionPromise = new Promise(resolve => { analysisCompleteResolve = resolve; }); analysisTimeout = setTimeout(() => { log.warn(`[Debug Mode] Analysis timeout for ${targetUrl}. Detaching.`); analysisCompleteResolve(); }, 8000); // OPTIMIZED: Reduced from 15s to 8s
         
         let lastScriptParsedAt = Date.now();
         let idleTimer = null;
@@ -497,7 +625,7 @@ async function handleWebPageLoadForDebug(tabId, targetUrl) {
         }
         log.debug("[Debug Mode] Waiting for analysis timeout or detach..."); await analysisCompletionPromise;
     } catch (err) { log.error(`[Debug Mode] Error processing web page tab ${tabId}:`, err.message);
-    } finally { clearTimeout(analysisTimeout); try { chrome.debugger.onEvent.removeListener(onEvent); } catch(e) {} try { chrome.debugger.onDetach.removeListener(onDetach); } catch(e) {} if (attached) { try { await chrome.debugger.detach({ tabId: tabId }); log.debug(`[Debug Mode] Detached in finally block for tab ${tabId}`); } catch (e) { log.warn(`[Debug Mode] Error detaching in finally for tab ${tabId}: ${e.message}`) } } autoAttachInProgress.delete(tabId); }
+    } finally { clearTimeout(analysisTimeout); try { chrome.debugger.onEvent.removeListener(onEvent); } catch(e) {} try { chrome.debugger.onDetach.removeListener(onDetach); } catch(e) {} if (attached) { try { await chrome.debugger.detach({ tabId: tabId }); log.debug(`[Debug Mode] Detached in finally block for tab ${tabId}`); } catch (e) { log.warn(`[Debug Mode] Error detaching in finally for tab ${tabId}: ${e.message}`) } } autoAttachInProgress.delete(tabId); decrementDebuggerCount(); } // PERFORMANCE: Decrement counter to allow queued tasks
 }
 
 async function fetchLatestReleaseInfo(repoOwner, repoName) {
@@ -755,26 +883,190 @@ async function storeHandlerTelemetry(payload) {
 async function getPreExtractedHandler(endpointKey) {
     try {
         const storageKey = `dom-agent-telemetry-${endpointKey}`;
-        const result = await chrome.storage.local.get(storageKey);
-        const telemetry = result[storageKey];
+        console.log(`[FROGPOST-BG] getPreExtractedHandler called with key: ${endpointKey}`);
+        console.log(`[FROGPOST-BG] Storage key: ${storageKey}`);
+        log.debug(`[Telemetry Retrieval] Looking for key: ${storageKey}`);
         
-        if (!telemetry || !telemetry.handlers || telemetry.handlers.length === 0) {
-            return null;
+        let result = await chrome.storage.local.get(storageKey);
+        let telemetry = result[storageKey];
+        console.log(`[FROGPOST-BG] Exact match result:`, telemetry ? 'FOUND' : 'NOT_FOUND');
+        
+        if (telemetry) {
+            console.log(`[FROGPOST-BG] Telemetry object:`, {
+                hasHandlers: !!telemetry.handlers,
+                handlerCount: telemetry.handlers?.length || 0,
+                timestamp: telemetry.timestamp,
+                timestampAge: `${Math.floor((Date.now() - telemetry.timestamp) / 1000)}s ago`,
+                location: telemetry.location,
+                windowId: telemetry.windowId
+            });
+            if (telemetry.handlers && telemetry.handlers.length > 0) {
+                console.log(`[FROGPOST-BG] First handler:`, {
+                    codeLength: telemetry.handlers[0].code?.length || 0,
+                    name: telemetry.handlers[0].name,
+                    hasCode: !!telemetry.handlers[0].code
+                });
+            } else {
+                // Empty handlers - treat as invalid and try fallback
+                console.warn(`[FROGPOST-BG] Exact match found but has EMPTY handlers - will try fallback`);
+                telemetry = null;  // Force fallback matching
+            }
         }
         
-        // Get the best handler (usually the first one, but could apply scoring)
-        const bestHandler = telemetry.handlers[0];
+        // DEBUG: If not found OR empty, check what keys DO exist and try fuzzy matching
+        if (!telemetry || !telemetry.handlers || telemetry.handlers.length === 0) {
+            console.log(`[FROGPOST-BG] Telemetry empty or invalid. Checking reason:`, {
+                exists: !!result[storageKey],
+                exactMatchHandlerCount: result[storageKey]?.handlers?.length || 0,
+                willTryFallback: true
+            });
+            const allStorage = await chrome.storage.local.get(null);
+            const allTelemetryKeys = Object.keys(allStorage).filter(k => k.startsWith('dom-agent-telemetry-'));
+            log.warn(`[Telemetry Retrieval] ❌ Exact match not found`);
+            log.info(`[Telemetry Retrieval] Looking for: ${endpointKey}`);
+            log.info(`[Telemetry Retrieval] Storage key: ${storageKey}`);
+            log.info(`[Telemetry Retrieval] Total telemetry entries: ${allTelemetryKeys.length}`);
+            
+            // FALLBACK: Try aggressive fuzzy matching
+            // Strategy 1: Match origin + pathname (ignore query params)
+            // Strategy 2: Match origin only
+            try {
+                const endpointUrl = new URL(endpointKey);
+                const endpointOrigin = endpointUrl.origin;
+                const endpointPath = endpointUrl.pathname;
+                const endpointOriginPath = endpointOrigin + endpointPath;
+                
+                log.info(`[Telemetry Retrieval] Attempting fallback matches:`);
+                log.info(`  - Origin: ${endpointOrigin}`);
+                log.info(`  - Origin+Path: ${endpointOriginPath}`);
+                
+                // Strategy 1: Match origin + pathname (best match)
+                log.info(`[Telemetry Retrieval] Strategy 1: Matching origin+path = ${endpointOriginPath}`);
+                let originPathMatches = allTelemetryKeys.filter(k => {
+                    const telemetryUrl = k.replace('dom-agent-telemetry-', '');
+                    try {
+                        const telUrl = new URL(telemetryUrl);
+                        const telOriginPath = telUrl.origin + telUrl.pathname;
+                        const matches = telOriginPath === endpointOriginPath;
+                        if (matches) {
+                            log.info(`  ✅ Match found: ${telemetryUrl}`);
+                        }
+                        return matches;
+                    } catch {
+                        return false;
+                    }
+                });
+                
+                // Strategy 2: Match origin only (broader fallback)
+                if (originPathMatches.length === 0) {
+                    log.info(`[Telemetry Retrieval] Strategy 2: Matching origin = ${endpointOrigin}`);
+                    var originMatches = allTelemetryKeys.filter(k => {
+                        const telemetryUrl = k.replace('dom-agent-telemetry-', '');
+                        try {
+                            const telUrl = new URL(telemetryUrl);
+                            const matches = telUrl.origin === endpointOrigin;
+                            if (matches) {
+                                log.info(`  ✅ Match found: ${telemetryUrl}`);
+                            }
+                            return matches;
+                        } catch {
+                            return false;
+                        }
+                    });
+                } else {
+                    var originMatches = [];
+                }
+                
+                // Try Strategy 1 first (origin+path), then Strategy 2 (origin)
+                let matchingKeys = originPathMatches.length > 0 ? originPathMatches : originMatches;
+                
+                log.info(`[Telemetry Retrieval] Found ${matchingKeys.length} potential matches`);
+                
+                if (matchingKeys.length > 0) {
+                    log.success(`[Telemetry Retrieval] Found ${matchingKeys.length} fallback matches`);
+                    if (originPathMatches.length > 0) {
+                        log.info(`  ✅ Using Strategy 1: origin+path match`);
+                    } else {
+                        log.info(`  ⚠️  Using Strategy 2: origin-only match`);
+                    }
+                    
+                    // Use the most recent one (by timestamp)
+                    let bestMatch = null;
+                    let bestTimestamp = 0;
+                    let bestKey = null;
+                    
+                    for (const key of matchingKeys) {
+                        const tel = allStorage[key];
+                        if (tel?.handlers && tel.handlers.length > 0) {
+                            const ts = tel.timestamp || 0;
+                            if (ts > bestTimestamp) {
+                                bestTimestamp = ts;
+                                bestMatch = tel;
+                                bestKey = key.replace('dom-agent-telemetry-', '');
+                            }
+                        }
+                    }
+                    
+                    if (bestMatch) {
+                        log.success(`[Telemetry Retrieval] ✅ Using fallback telemetry:`);
+                        log.info(`  - Original key: ${bestKey}`);
+                        log.info(`  - Timestamp: ${new Date(bestTimestamp).toISOString()}`);
+                        log.info(`  - Handlers: ${bestMatch.handlers.length}`);
+                        telemetry = bestMatch;
+                    }
+                } else {
+                    log.warn(`[Telemetry Retrieval] No fallback matches found for origin ${endpointOrigin}`);
+                }
+            } catch (e) {
+                log.debug(`[Telemetry Retrieval] Fallback matching failed:`, e);
+            }
+            
+            // Still no match
+            if (!telemetry || !telemetry.handlers || telemetry.handlers.length === 0) {
+                return null;
+            }
+        }
+        
+        // CRITICAL: Get the best handler (longest/most complete)
+        console.log(`[FROGPOST-BG] Selecting best handler from ${telemetry.handlers.length} handlers`);
+        telemetry.handlers.forEach((h, i) => {
+            console.log(`[FROGPOST-BG]   Handler ${i+1}: ${(h.code || '').length} chars, name: ${h.name}`);
+        });
+        
+        const bestHandler = telemetry.handlers.reduce((best, current) => {
+            const currentLen = (current.code || '').length;
+            const bestLen = (best.code || '').length;
+            return currentLen > bestLen ? current : best;
+        }, telemetry.handlers[0]);
+        
+        console.log(`[FROGPOST-BG] Selected handler: ${(bestHandler.code || '').length} chars, name: ${bestHandler.name}`);
+        
+        // CRITICAL: Ensure full code is returned, not truncated
+        const fullHandlerCode = bestHandler.code || '';
+        
+        // Quality check: Reject if handler is too short (likely noise)
+        const MIN_LEGITIMATE_HANDLER_LENGTH = 100; // Real handlers are usually >100 chars
+        if (fullHandlerCode.length < MIN_LEGITIMATE_HANDLER_LENGTH) {
+            console.warn(`[FROGPOST-BG] ❌ Handler too short (${fullHandlerCode.length} chars), rejecting telemetry`);
+            log.warn(`[Telemetry Retrieval] Handler rejected: too short (${fullHandlerCode.length} chars < ${MIN_LEGITIMATE_HANDLER_LENGTH})`);
+            return null; // Force fallback to regex analysis
+        }
+        
+        log.debug(`[Handler Retrieval] Retrieved handler for ${endpointKey}: ${fullHandlerCode.length} chars`);
         
         // Return in format expected by Play button
         return {
-            handler: bestHandler.code,
+            handler: fullHandlerCode,  // Full code
+            code: fullHandlerCode,     // Full code
             category: "dom-agent-telemetry",
             method: "FrogPost runtime interception",
             score: 100, // High confidence from runtime interception
             windowId: telemetry.windowId,
             location: telemetry.location,
             timestamp: telemetry.timestamp,
-            source: "DOM Agent Telemetry"
+            source: "DOM Agent Telemetry",
+            length: bestHandler.length,
+            name: bestHandler.name
         };
     } catch (error) {
         log.error("Error in getPreExtractedHandler:", error);
@@ -897,10 +1189,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                     const destUrlStr = typeof destinationUrl === 'string' ? destinationUrl : 'unknown_frame_url';
                     const topLevelUrlRaw = sender?.tab?.url || null;
 
+                    const safeData = sanitizeJsonDeep(processedData, { maxKeysTotal: 50, maxArrayLength: 50, maxDepth: 8 });
+
                     const messageData = {
                         origin: origin || sender.origin || 'unknown',
                         destinationUrl: destUrlStr,
-                        data: processedData, // Send the potentially parsed data
+                        data: safeData, // Send the potentially parsed data with top-level key cap
                         messageType: calculatedMessageType, // Send the refined type
                         timestamp: timestamp || new Date().toISOString(),
                         messageId: `${timestamp || Date.now()}-${Math.random().toString(16).slice(2)}`,
@@ -1081,7 +1375,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 const messageData = {
                     origin: payload.origin,
                     destinationUrl: payload.location,
-                    data: payload.data,
+                    data: sanitizeJsonDeep(payload.data, { maxKeysTotal: 50, maxArrayLength: 50, maxDepth: 8 }),
                     messageType: typeof payload.data,
                     timestamp: new Date(payload.timestamp).toISOString(),
                     messageId: payload.messageId,
@@ -1104,21 +1398,34 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
         case "getPreExtractedHandler":
             // NEW: Retrieve handler from telemetry (called by Play button)
+            console.log('[FROGPOST-BG] ========================================');
+            console.log('[FROGPOST-BG] getPreExtractedHandler message received');
+            console.log('[FROGPOST-BG] Payload:', payload);
             isAsync = true;
             (async () => {
                 try {
                     const endpointKey = payload?.endpointKey;
                     if (!endpointKey) {
+                        console.error('[FROGPOST-BG] Missing endpointKey in payload');
+                        log.error('[getPreExtractedHandler] Missing endpointKey in payload');
                         sendResponse({ success: false, error: 'Missing endpointKey' });
                         return;
                     }
+                    console.log(`[FROGPOST-BG] Looking up telemetry for: ${endpointKey}`);
+                    log.info(`[getPreExtractedHandler] Looking up telemetry for: ${endpointKey}`);
                     const handler = await getPreExtractedHandler(endpointKey);
+                    console.log(`[FROGPOST-BG] getPreExtractedHandler returned:`, handler ? 'FOUND' : 'NULL');
                     if (handler) {
+                        console.log(`[FROGPOST-BG] ✅ Handler found! Length: ${handler.handler?.length || handler.code?.length}`);
+                        log.info(`[getPreExtractedHandler] ✅ Found handler for ${endpointKey}`);
                         sendResponse({ success: true, handler: handler });
                     } else {
+                        console.warn(`[FROGPOST-BG] ❌ No handler found`);
+                        log.warn(`[getPreExtractedHandler] ❌ No handler found for ${endpointKey}`);
                         sendResponse({ success: false, error: 'No pre-extracted handler found' });
                     }
                 } catch (e) {
+                    console.error('[FROGPOST-BG] Exception:', e);
                     sendResponse({ success: false, error: e?.message || 'Unknown error' });
                 }
             })();

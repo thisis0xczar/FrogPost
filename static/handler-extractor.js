@@ -67,6 +67,86 @@ class HandlerExtractor {
         try { console[method === 'success' ? 'log' : (method || 'log')](...args); } catch(_) {}
     }
 
+    // Heuristic: shrink oversized/minified snippets to the actual postMessage handler core
+    _shrinkToHandlerCore(handlerCode) {
+        try {
+            if (!handlerCode || typeof handlerCode !== 'string') return null;
+            const code = handlerCode;
+            // 1) Prefer returning the full binding expression (call/assignment), not just the function
+            // 1a) addEventListener('message', fn [, options])
+            {
+                const m = /addEventListener\s*\(\s*["']message["']\s*,/i.exec(code);
+                if (m) {
+                    // walk forward to the closing parenthesis of this call
+                    let i = m.index; let open = 0; let started = false;
+                    for (; i < code.length; i++) {
+                        const ch = code[i];
+                        if (ch === '(') { open++; started = true; }
+                        else if (ch === ')') { open--; if (started && open === 0) { const end = i + 1; return code.slice(m.index, end); } }
+                    }
+                }
+            }
+            // 1b) onmessage = fn;
+            {
+                const m = /onmessage\s*=\s*(function\s*\([^)]*\)\s*\{[\s\S]*?\}|\([^)]*\)\s*=>\s*\{[\s\S]*?\})/i.exec(code);
+                if (m) {
+                    // extend forward to semicolon or line end to keep the assignment context
+                    let end = m.index + m[0].length; while (end < code.length && code[end] !== ';' && code[end] !== '\n') end++; if (end < code.length) end++;
+                    return code.slice(m.index, end);
+                }
+            }
+            // 3) Anchor on event.data usage and backtrack to function start; then forward to matching brace
+            const pats = [/(?:event|e|evt|msg)\.data/i, /\.data\s*\]/i, /\.data\s*\./i];
+            let anchor = -1; for (const p of pats) { const m = p.exec(code); if (m) { anchor = m.index; break; } }
+            if (anchor >= 0) {
+                let start = anchor;
+                for (let i = anchor; i >= 0; i--) {
+                    const slice = code.slice(Math.max(0, i - 16), i + 1);
+                    if (/function\s*\([^)]*\)\s*$/.test(slice) || /=>\s*\{$/.test(slice) || /\{$/.test(slice)) { start = i; break; }
+                }
+                let open = 0, end = code.length - 1, found = false;
+                for (let i = start; i < code.length; i++) {
+                    const ch = code[i];
+                    if (ch === '{') open++; else if (ch === '}') { open--; if (open === 0) { end = i; found = true; break; } }
+                }
+                if (found && end > start) {
+                    // Try to include small binding context backwards if the call/assignment is immediately before
+                    const pre = code.slice(Math.max(0, start - 200), start);
+                    const bindIdx = pre.search(/addEventListener\s*\(\s*['"]message['"]\s*,\s*$/i);
+                    if (bindIdx >= 0) return code.substring(start - (pre.length - bindIdx), end + 1);
+                    const assignIdx = pre.search(/onmessage\s*=\s*$/i);
+                    if (assignIdx >= 0) return code.substring(start - (pre.length - assignIdx), end + 1);
+                    return code.substring(start, end + 1);
+                }
+            }
+            // 4) Fallback: focused window around message keywords
+            if (code.length > 2000) {
+                const kw = /(onmessage|addEventListener\s*\(\s*['"]message|event\.data|\.postMessage\s*\()/i.exec(code);
+                if (kw) {
+                    const c = kw.index, half = 800; return code.slice(Math.max(0, c - half), Math.min(code.length, c + half));
+                }
+            }
+        } catch(_) {}
+        return null;
+    }
+
+    // Known noisy/minified code families that often get mistaken for handlers
+    _isKnownNoiseNonHandler(handlerCode) {
+        try {
+            if (!handlerCode || typeof handlerCode !== 'string') return false;
+            const noise = [
+                /wpemoji|twemoji|concatemoji|emojiSettings|EmojiObserver/i,          // WordPress emoji loader
+                /supports\.everything|supports\.everythingExceptFlag/i,
+                /Promise\s*\.\s*then|\.then\s*\(/i,
+                /scheduler|MessageChannel|unstable_now/i,                            // React scheduler internals
+                /\bterminate\s*\(/i                                                   // workers/terminals often unrelated to message handler
+            ];
+            const hasNoise = noise.some(p => p.test(handlerCode));
+            // If it matches noise patterns, it's noise - no exceptions
+            return hasNoise;
+        } catch(_) { return false; }
+    }
+
     _isNonPostMessageHandler(handlerCode, handlerFlags) {
         if (!handlerCode || typeof handlerCode !== 'string') return false;
 
@@ -217,55 +297,14 @@ class HandlerExtractor {
     }
 
     analyzeScriptContent(content, sourceIdentifier) {
+        // TELEMETRY-FIRST: Use regex-only extraction (AST parsing removed)
         const handlers = [];
         if (!content || typeof content !== 'string' || content.length < 50) return handlers;
-        this.functionDefinitions.clear();
-        let ast;
-        let parseError = null;
-
-        try {
-            if (typeof acorn === 'undefined') throw new Error("Acorn not loaded");
-            this._log(3, 'debug', `[Extractor] Attempting AST parse (module) for: ${sourceIdentifier}`);
-            ast = acorn.parse(content, {
-                ecmaVersion: 'latest',
-                silent: true, // Keep silent to allow fallback
-                locations: true,
-                sourceType: 'module' // Attempt module parse
-            });
-            this._log(3, 'debug', `[Extractor] AST parsing as MODULE SUCCESS for: ${sourceIdentifier}`);
-
-        } catch (moduleError) {
-            this._log(2, 'warn', `[Extractor] AST module parse failed for ${sourceIdentifier}: ${moduleError.message}. Trying as script...`);
-            try {
-                ast = acorn.parse(content, {
-                    ecmaVersion: 'latest',
-                    silent: true,
-                    locations: true,
-                    sourceType: 'script' // Fallback to script parse
-                });
-                this._log(3, 'debug', `[Extractor] AST parsing as SCRIPT SUCCESS for: ${sourceIdentifier}`);
-            } catch (scriptError) {
-                parseError = scriptError;
-                this._log(1, 'error', `[Extractor] AST parsing FAILED for ${sourceIdentifier} (both module & script): ${scriptError.message}. Falling back to regex.`);
-                ast = null;
-            }
-        }
-
-        if (ast) {
-            this._seedConstStringEnv(ast);
-            try {
-                this._mapFunctionDeclarations(ast);
-                this._mapPrototypeMethods(ast);
-                handlers.push(...this.analyzeAst(ast, content, sourceIdentifier));
-            } catch(walkError) {
-                this._log(1, 'error', `[Extractor] Error during AST walk for ${sourceIdentifier}:`, walkError);
-                handlers.push(...this.analyzeWithRegex(content, sourceIdentifier));
-            }
-        } else {
-            handlers.push(...this.analyzeWithRegex(content, sourceIdentifier));
-        }
-
-        this._log(2, 'debug', `[Extractor] Found ${handlers.length} potential structures in ${sourceIdentifier} (before scoring).`);
+        
+        this._log(2, 'debug', `[Extractor] Using regex-based extraction for: ${sourceIdentifier}`);
+        handlers.push(...this.analyzeWithRegex(content, sourceIdentifier));
+        
+        this._log(2, 'debug', `[Extractor] Found ${handlers.length} potential handlers in ${sourceIdentifier} (regex-based)`);
         return handlers;
     }
 
@@ -668,6 +707,21 @@ class HandlerExtractor {
         if (/JSON\.parse|JSON\.stringify/i.test(handlerCode)) { featureScore += JSON_PROCESSING_BONUS; if (dbg) dbg.contributions.push({rule:'JSON_PROCESSING_BONUS', delta:JSON_PROCESSING_BONUS}); }
         if (/\.type|\.action|\.command|switch.*case|if.*event\.data\./i.test(handlerCode)) { featureScore += TYPE_CHECKING_BONUS; if (dbg) dbg.contributions.push({rule:'TYPE_CHECKING_BONUS', delta:TYPE_CHECKING_BONUS}); }
 
+        // Hard penalties to suppress far-from-handler utility blobs
+        try {
+            const hasExplicitBinding = /(addEventListener\s*\(\s*['"]message['"]|onmessage\s*=)/i.test(handlerCode);
+            const isAstBound = (category?.includes('ast-event-listener') || category?.includes('ast-onmessage'));
+            if (!hasExplicitBinding && !isAstBound && !handlerFlags.hasStrongSignal) {
+                const PEN = -200; featureScore += PEN; if (dbg) dbg.contributions.push({rule:'MISSING_EXPLICIT_BINDING_PENALTY', delta:PEN});
+            }
+            if (this && typeof this._isKnownNoiseNonHandler === 'function' && this._isKnownNoiseNonHandler(handlerCode)) {
+                const PEN2 = -200; featureScore += PEN2; if (dbg) dbg.contributions.push({rule:'KNOWN_NOISE_PENALTY', delta:PEN2});
+            }
+            if (/\bterminate\s*\(/i.test(handlerCode) && !hasExplicitBinding) {
+                const PEN3 = -80; featureScore += PEN3; if (dbg) dbg.contributions.push({rule:'WORKER_LIKE_TERMINATE_PENALTY', delta:PEN3});
+            }
+        } catch(_) {}
+
         if (handlerNode && typeof acorn !== 'undefined' && typeof acorn.walk !== 'undefined') {
             try {
                 const foundSpecificKeys = new Set(); const foundSpecificTypes = new Set();
@@ -736,9 +790,13 @@ class HandlerExtractor {
 
         if (category?.includes('runtime')) { score += 150; if (dbg) dbg.contributions.push({rule:'CATEGORY_RUNTIME', delta:150}); }
         else if (category?.includes('debugger') || category?.includes('breakpoint')) { score += 75; if (dbg) dbg.contributions.push({rule:'CATEGORY_DEBUGGER', delta:75}); }
-        else if (category?.includes('ast-event-listener') || category?.includes('ast-onmessage')) { score += 50; if (dbg) dbg.contributions.push({rule:'CATEGORY_AST', delta:50}); }
+        else if (category?.includes('ast-event-listener') || category?.startsWith('ast-onmessage')) { score += 50; if (dbg) dbg.contributions.push({rule:'CATEGORY_AST', delta:50}); }
         else if (category?.includes('inline-onmessage-attribute')) { score += 5; if (dbg) dbg.contributions.push({rule:'CATEGORY_INLINE', delta:5}); }
-        else if (category?.includes('regex')) { score += 1; if (dbg) dbg.contributions.push({rule:'CATEGORY_REGEX', delta:1}); }
+        else if (category?.includes('regex')) { 
+            // Regex handlers need higher base score to survive feature penalties
+            score += 10; 
+            if (dbg) dbg.contributions.push({rule:'CATEGORY_REGEX', delta:10}); 
+        }
         const finalScore = Math.max(0, score);
         if (dbg) this._log(3, 'debug', `[Score] ${source || 'inline'} (${category}) => ${finalScore}`, { functionName, flags: handlerFlags, breakdown: dbg.contributions });
         return finalScore;
@@ -807,25 +865,78 @@ class HandlerExtractor {
                 try { handlerInfo.handler = handlerInfo.fullScriptContent.substring(handlerInfo.handlerNode.start, handlerInfo.handlerNode.end); } catch {}
             }
 
+            // Heuristically shrink oversized/minified snippets to the likely handler core
+            if (handlerInfo.handler && handlerInfo.handler.length > 800) {
+                const shrunken = this._shrinkToHandlerCore(handlerInfo.handler);
+                if (shrunken && shrunken.length >= 40) {
+                    this._log(2, 'debug', `[getBestHandler] Shrunk oversized candidate from ${handlerInfo.handler.length} → ${shrunken.length}`);
+                    handlerInfo.handler = shrunken;
+                }
+            }
+
             if (!handlerInfo.handler) {
                 if(typeof log !== 'undefined') log.warn(`[getBestHandler Map] Handler candidate ${index} missing handler code. Assigning score 0.`);
                 originalScore = 0;
                 boostedScore = 0;
             } else {
-                originalScore = this.scoreHandler(handlerInfo);
-                boostedScore = originalScore;
+                // If this looks like known noise (e.g., emoji loader, React scheduler), REJECT IT
+                const MIN_LEGITIMATE_HANDLER_LENGTH = 100; // Most real handlers are >100 chars
+                const handlerLength = (handlerInfo.handler || '').length;
+                const isNoise = this._isKnownNoiseNonHandler(handlerInfo.handler);
+                // Don't reject arrow-in-parens handlers even if short - they're method delegates
+                const isMethodDelegate = handlerInfo.category?.includes('arrow-in-parens');
+                const isTooShort = handlerLength < MIN_LEGITIMATE_HANDLER_LENGTH && handlerInfo.category?.includes('regex') && !isMethodDelegate;
+                
+                if (isNoise) {
+                    this._log(1, 'warn', `[getBestHandler] Handler ${index} REJECTED as NOISE (${handlerInfo.source}): ${(handlerInfo.handler || '').substring(0, 100)}...`);
+                    handlerInfo.category = (handlerInfo.category ? handlerInfo.category + '+' : '') + 'noise-filter';
+                    originalScore = 0;
+                    boostedScore = 0;
+                    this._log(1, 'warn', `[getBestHandler] Noise handler score set to: original=${originalScore}, boosted=${boostedScore}`);
+                } else if (isTooShort) {
+                    this._log(2, 'debug', `[getBestHandler] Handler ${index} REJECTED: too short (${handlerLength} chars)`);
+                    handlerInfo.category = (handlerInfo.category ? handlerInfo.category + '+' : '') + 'too-short';
+                    originalScore = 0;
+                    boostedScore = 0;
+                } else {
+                    originalScore = this.scoreHandler(handlerInfo);
+                    boostedScore = originalScore;
+                    this._log(1, 'warn', `[getBestHandler] Handler ${index} (${handlerInfo.source?.split('/').pop()}) scored: ${originalScore}, category: ${handlerInfo.category}`);
+                }
+                
+                this._log(2, 'debug', `[getBestHandler Scoring] Candidate ${index} BEFORE boost: Category=${handlerInfo.category}, OriginalScore=${originalScore}, HandlerLength=${handlerInfo.handler?.length || 0}`);
 
-                if (handlerInfo.category?.includes('prototype') || handlerInfo.category?.includes('objectMethod') || handlerInfo.category?.includes('indirect')) boostedScore += 10;
-                else if (handlerInfo.category?.includes('ast-event-listener-identifier') || handlerInfo.category?.includes('ast-onmessage-assignment-identifier')) boostedScore += 5;
-                else if (handlerInfo.category?.includes('breakpoint')) boostedScore += 20;
+                // CRITICAL: Skip boost logic for rejected handlers (noise, too-short, etc.)
+                if (boostedScore > 0) {
+                    if (handlerInfo.category?.includes('prototype') || handlerInfo.category?.includes('objectMethod') || handlerInfo.category?.includes('indirect')) boostedScore += 10;
+                    else if (handlerInfo.category?.includes('ast-event-listener-identifier') || handlerInfo.category?.includes('ast-onmessage-assignment-identifier')) boostedScore += 5;
+                    else if (handlerInfo.category?.includes('breakpoint')) boostedScore += 20;
+                    else if (handlerInfo.category?.includes('regex')) {
+                        // CRITICAL: Regex-extracted handlers need a boost to be viable
+                        boostedScore += 50;
+                        this._log(2, 'debug', `[getBestHandler Boost] Regex handler detected, adding +50 boost`);
+                    }
 
-                boostedScore += calculateHeuristicBoost(handlerInfo);
-                boostedScore = Math.max(0, boostedScore);
+                    boostedScore += calculateHeuristicBoost(handlerInfo);
+                    boostedScore = Math.max(0, boostedScore);
+                } else {
+                    this._log(1, 'warn', `[getBestHandler] Skipping boost for rejected handler (score=${boostedScore})`);
+                }
             }
 
             this._log(2, 'debug', `[getBestHandler Map] Candidate ${index}: Source=${handlerInfo.source?.substring(handlerInfo.source?.lastIndexOf('/')+1)}, BaseScore=${originalScore}, FinalScore=${boostedScore}`);
-            return { ...handlerInfo, score: boostedScore };
-        }).filter(h => h.score > 0);
+            const result = { ...handlerInfo, score: boostedScore };
+            if (handlerInfo.category?.includes('noise-filter')) {
+                this._log(1, 'warn', `[getBestHandler Map] Returning noise handler with score: ${result.score}, category: ${result.category}`);
+            }
+            return result;
+        }).filter(h => {
+            if (h.score <= 0) {
+                this._log(1, 'warn', `[getBestHandler Filter] Removing handler with score ${h.score}: ${h.source}`);
+                return false;
+            }
+            return true;
+        });
 
         if (scoredHandlers.length === 0) {
             if(typeof log !== 'undefined') log.debug("[getBestHandler] No candidates scored above 0 after boosting/filtering.");
@@ -894,12 +1005,198 @@ class HandlerExtractor {
         return bestHandlerInfo;
     }
 
+    // Helper: Try stripping one path segment from URL (for broken build paths)
+    _tryStripOnePathSegment(url) {
+        try {
+            const u = new URL(url);
+            const pathParts = u.pathname.split('/').filter(Boolean);
+            
+            this._log(2, 'debug', `[URL Strip] Original: ${url}, Path parts: [${pathParts.join(', ')}]`);
+            
+            if (pathParts.length <= 1) {
+                this._log(2, 'debug', `[URL Strip] Too few path segments, cannot strip`);
+                return null;
+            }
+            
+            // Remove one segment from the middle
+            // Example: /costcard/costcard/main.js → /costcard/main.js
+            pathParts.splice(-2, 1);
+            u.pathname = '/' + pathParts.join('/');
+            
+            this._log(2, 'debug', `[URL Strip] Result: ${u.href}`);
+            return u.href;
+        } catch (e) {
+            this._log(2, 'warn', `[URL Strip] Error: ${e.message}`);
+            return null;
+        }
+    }
+
     analyzeWithRegex(content, sourceUrl) {
-        const handlers = []; const onMessageRegex = /\bonmessage\s*=\s*(function\s*\(.*?\)\s*\{[\s\S]*?\})/gi; const addEventListenerRegex = /\.addEventListener\s*\(\s*["']message["']\s*,\s*(function\s*\(.*?\)\s*\{[\s\S]*?\})\s*,?/gi; const addEventListenerIdentifierRegex = /\.addEventListener\s*\(\s*["']message["']\s*,\s*([a-zA-Z0-9_$]+)\s*,?/gi; let match;
-        while ((match = onMessageRegex.exec(content)) !== null) handlers.push({ handler: match[1], category: 'regex-onmessage', source: sourceUrl });
-        while ((match = addEventListenerRegex.exec(content)) !== null) handlers.push({ handler: match[1], category: 'regex-event-listener-inline', source: sourceUrl });
-        while ((match = addEventListenerIdentifierRegex.exec(content)) !== null) { const functionName = match[1]; const funcDefRegex = new RegExp(`(?:function\\s+${functionName}\\s*\\(|(?:var|let|const)\\s+${functionName}\\s*=\\s*function\\s*\\()(\\s*\\(.*?\\)\\s*\\{[\\s\\S]*?\\})`, 'i'); const funcMatch = content.match(funcDefRegex); if (funcMatch?.[0]) { const firstParenIndex = funcMatch[0].indexOf('('); const functionSignatureAndBody = funcMatch[0].substring(firstParenIndex); const fullHandlerText = `function${functionSignatureAndBody}`; handlers.push({ handler: fullHandlerText, category: 'regex-event-listener-identifier', source: sourceUrl, functionName: functionName }); } }
-        return handlers.map(h => ({ ...h, handlerNode: null, fullScriptContent: h.handler }));
+        const handlers = [];
+        let match;
+        
+        // Pattern 1a: window.onmessage = function(...) { ... }
+        const onMessageRegex = /\bonmessage\s*=\s*(function\s*\([^)]*\)\s*\{(?:[^}]|\}(?![\s;]))*\})/gi;
+        while ((match = onMessageRegex.exec(content)) !== null) {
+            handlers.push({ handler: match[1], category: 'regex-onmessage', source: sourceUrl });
+        }
+        
+        // Pattern 1b: window.onmessage = (event) => { ... }
+        const onMessageArrowRegex = /\bonmessage\s*=\s*(\([^)]*\)\s*=>\s*\{(?:[^}]|\}(?![\s;]))*\})/gi;
+        while ((match = onMessageArrowRegex.exec(content)) !== null) {
+            handlers.push({ handler: match[1], category: 'regex-onmessage-arrow', source: sourceUrl });
+        }
+        
+        // Pattern 2: .addEventListener('message', function(...) { ... })
+        const addEventListenerRegex = /\.addEventListener\s*\(\s*["']message["']\s*,\s*(function\s*\([^)]*\)\s*\{(?:[^}]|\}(?!\s*\)))*\})/gi;
+        while ((match = addEventListenerRegex.exec(content)) !== null) {
+            handlers.push({ handler: match[1], category: 'regex-event-listener-inline', source: sourceUrl });
+        }
+        
+        // Pattern 3: .addEventListener('message', (param) => { ... }) - ARROW FUNCTIONS
+        // Match everything from arrow to closing brace before addEventListener's closing paren
+        // Updated to handle multiline and edge cases
+        const arrowFunctionRegex = /\.addEventListener\s*\(\s*["']message["']\s*,\s*(\([^)]*\)\s*=>\s*\{[\s\S]*?\})\s*\)/gi;
+        while ((match = arrowFunctionRegex.exec(content)) !== null) {
+            // Trim trailing whitespace/newlines from captured group
+            const handlerCode = match[1].trim();
+            
+            // Special case: Check if handler just calls another method (e.g., "this.messageReceived(e)")
+            const methodCallMatch = handlerCode.match(/\([^)]*\)\s*=>\s*\{\s*(?:this\.(\w+)|(\w+))\s*\([^)]*\)\s*\}/);
+            if (methodCallMatch) {
+                const methodName = methodCallMatch[1] || methodCallMatch[2]; // Support both this.method and method
+                this._log(2, 'debug', `[Regex] Arrow function calls method: ${methodName}, attempting to extract full method`);
+                // Try to find the method definition in the same file
+                const methodDefRegex = new RegExp(`\\b${methodName}\\s*\\([^)]*\\)\\s*\\{([\\s\\S]{50,5000}?)\\n\\s{0,20}\\}`, 'i');
+                const methodMatch = content.match(methodDefRegex);
+                if (methodMatch) {
+                    const fullMethod = `function ${methodName}${methodMatch[0]}`;
+                    this._log(2, 'info', `[Regex] ✅ Extracted full method ${methodName} (${fullMethod.length} chars) from ${sourceUrl}`);
+                    handlers.push({ handler: fullMethod, category: 'regex-event-listener-arrow+method-ref', source: sourceUrl });
+                    continue; // Skip adding the wrapper
+                } else {
+                    this._log(2, 'debug', `[Regex] Could not find method definition for ${methodName}`);
+                }
+            }
+            
+            handlers.push({ handler: handlerCode, category: 'regex-event-listener-arrow', source: sourceUrl });
+        }
+        
+        // Pattern 4: .addEventListener('message', param => { ... }) - ARROW WITHOUT PARENS
+        const arrowNoParensRegex = /\.addEventListener\s*\(\s*["']message["']\s*,\s*([a-zA-Z_$][a-zA-Z0-9_$]*\s*=>\s*\{[\s\S]*?\})\s*\)/gi;
+        while ((match = arrowNoParensRegex.exec(content)) !== null) {
+            const handlerCode = match[1].trim();
+            handlers.push({ handler: handlerCode, category: 'regex-event-listener-arrow-simple', source: sourceUrl });
+        }
+        
+        // Pattern 4b: .addEventListener('message', (param => { ... })) - ARROW INSIDE PARENS (Azure pattern)
+        const arrowInParensRegex = /\.addEventListener\s*\(\s*["']message["']\s*,\s*\(([a-zA-Z_$][a-zA-Z0-9_$]*\s*=>\s*\{[\s\S]*?\})\s*\)\s*\)/gi;
+        while ((match = arrowInParensRegex.exec(content)) !== null) {
+            const handlerCode = match[1].trim();
+            
+            // Check if handler just calls another method
+            const methodCallMatch = handlerCode.match(/([a-zA-Z_$][a-zA-Z0-9_$]*)\s*=>\s*\{\s*(?:this\.(\w+)|(\w+))\s*\([^)]*\)\s*\}/);
+            if (methodCallMatch) {
+                const methodName = methodCallMatch[2] || methodCallMatch[3];
+                this._log(2, 'debug', `[Regex] Arrow-in-parens calls method: ${methodName}, attempting to extract`);
+                
+                // Try multiple patterns for method definition (function, class method, arrow, etc.)
+                const patterns = [
+                    // Class/object method: methodName(params) { body }
+                    new RegExp(`${methodName}\\s*\\([^)]*\\)\\s*\\{([\\s\\S]{50,5000}?)\\n\\s{0,20}\\}`, 'i'),
+                    // Function: function methodName(params) { body }
+                    new RegExp(`function\\s+${methodName}\\s*\\([^)]*\\)\\s*\\{([\\s\\S]{50,5000}?)\\n\\s{0,20}\\}`, 'i'),
+                    // Arrow: const/let/var methodName = (params) => { body }
+                    new RegExp(`(?:const|let|var)\\s+${methodName}\\s*=\\s*\\([^)]*\\)\\s*=>\\s*\\{([\\s\\S]{50,5000}?)\\n\\s{0,20}\\}`, 'i')
+                ];
+                
+                let methodMatch = null;
+                for (const pattern of patterns) {
+                    methodMatch = content.match(pattern);
+                    if (methodMatch) break;
+                }
+                
+                if (methodMatch) {
+                    const fullMethod = `function ${methodName}${methodMatch[0].substring(methodMatch[0].indexOf(methodName) + methodName.length)}`;
+                    this._log(2, 'info', `[Regex] ✅ Extracted method ${methodName} (${fullMethod.length} chars)`);
+                    handlers.push({ handler: fullMethod, category: 'regex-event-listener-arrow-in-parens+method-ref', source: sourceUrl });
+                    continue;
+                } else {
+                    this._log(2, 'debug', `[Regex] Method ${methodName} not found in ${sourceUrl}`);
+                }
+            }
+            
+            handlers.push({ handler: handlerCode, category: 'regex-event-listener-arrow-in-parens', source: sourceUrl });
+        }
+        
+        // Pattern 5: .addEventListener('message', handlerName) - identifier reference
+        const addEventListenerIdentifierRegex = /\.addEventListener\s*\(\s*["']message["']\s*,\s*([a-zA-Z0-9_$]+)\s*[,)]/gi;
+        while ((match = addEventListenerIdentifierRegex.exec(content)) !== null) {
+            const functionName = match[1];
+            // Try to find the function definition (regular function or arrow function)
+            const funcDefRegex = new RegExp(
+                `(?:function\\s+${functionName}\\s*\\(|(?:var|let|const)\\s+${functionName}\\s*=\\s*(?:function\\s*\\(|\\([^)]*\\)\\s*=>|[a-zA-Z_$][a-zA-Z0-9_$]*\\s*=>))([\\s\\S]{0,5000}?)(?:\\n(?:function|var|let|const|class)|$)`,
+                'i'
+            );
+            const funcMatch = content.match(funcDefRegex);
+            if (funcMatch?.[0]) {
+                handlers.push({ 
+                    handler: funcMatch[0], 
+                    category: 'regex-event-listener-identifier', 
+                    source: sourceUrl, 
+                    functionName: functionName 
+                });
+            }
+        }
+        
+        // Pattern 6: Minified addEventListener (no spaces, webpack-style)
+        // e.g., addEventListener("message",function(e){...},!1)
+        const minifiedRegex = /addEventListener\(["']message["'],function\(([^)]*)\)\{((?:[^{}]|\{(?:[^{}]|\{[^{}]*\})*\})*)\}/gi;
+        while ((match = minifiedRegex.exec(content)) !== null) {
+            const fullHandler = 'function(' + match[1] + '){' + match[2] + '}';
+            handlers.push({ 
+                handler: fullHandler, 
+                category: 'regex-minified-addEventListener', 
+                source: sourceUrl 
+            });
+        }
+        
+        // Pattern 7: React useEffect with postMessage listener
+        // e.g., useEffect(() => { window.addEventListener('message', handler) }, [])
+        const reactUseEffectRegex = /useEffect\s*\(\s*\(\)\s*=>\s*\{([^}]*addEventListener\s*\(\s*["']message["']\s*,\s*([^)]+)\)[^}]*)\}/gi;
+        while ((match = reactUseEffectRegex.exec(content)) !== null) {
+            const effectBody = match[1];
+            const handlerRef = match[2];
+            // Try to extract the actual handler function from the effect body
+            handlers.push({ 
+                handler: effectBody, 
+                category: 'regex-react-useEffect', 
+                source: sourceUrl,
+                note: 'React useEffect with message listener'
+            });
+        }
+        
+        // Pattern 8: Variable declaration then addEventListener (split pattern)
+        // e.g., const handler = e => {...}; window.addEventListener('message', handler)
+        const splitDeclarationRegex = /(?:const|let|var)\s+(\w+)\s*=\s*((?:function\s*\([^)]*\)|(?:\([^)]*\)|[a-zA-Z_$][a-zA-Z0-9_$]*)\s*=>)\s*\{(?:[^{}]|\{(?:[^{}]|\{[^{}]*\})*\})*\})[\s\S]{0,200}?addEventListener\s*\(\s*["']message["']\s*,\s*\1\s*[,)]/gi;
+        while ((match = splitDeclarationRegex.exec(content)) !== null) {
+            const variableName = match[1];
+            const handlerCode = match[2];
+            handlers.push({ 
+                handler: handlerCode, 
+                category: 'regex-split-declaration', 
+                source: sourceUrl,
+                functionName: variableName 
+            });
+        }
+        
+        return handlers.map(h => ({ 
+            ...h, 
+            handlerNode: null, 
+            fullScriptContent: h.handler,
+            handlerFlags: {},  // Empty flags for regex-extracted handlers
+            score: 0  // Will be calculated by scoreHandler
+        }));
     }
 
     // REMOVED: extractDynamicallyViaDebugger
@@ -910,11 +1207,98 @@ class HandlerExtractor {
     // This heavy breakpoint-based validation has been removed for the slim fallback.
     // Primary extraction now happens via FrogPost DOM agent runtime telemetry.
 
+    // Webpack bundle unwrapping for better SPA handler detection
+    _unwrapWebpackBundle(content, sourceUrl) {
+        const handlers = [];
+        
+        // Pattern 1: Webpack 4/5 IIFE pattern
+        // (function(modules) { ... })([function(e,t,n){...}, function(e,t,n){...}])
+        const webpackIIFEPattern = /\(function\s*\([^)]*\)\s*\{[\s\S]*?\}\)\s*\(\s*\[([\s\S]+?)\]\s*\)/g;
+        let match;
+        
+        while ((match = webpackIIFEPattern.exec(content)) !== null) {
+            try {
+                const modulesArray = match[1];
+                const modules = this._extractWebpackModules(modulesArray);
+                
+                this._log(2, 'info', `[Webpack] Found ${modules.length} webpack modules in bundle`);
+                
+                modules.forEach((moduleCode, idx) => {
+                    const moduleHandlers = this.analyzeScriptContent(moduleCode, `${sourceUrl}#webpack-module-${idx}`);
+                    moduleHandlers.forEach(h => {
+                        handlers.push({
+                            ...h,
+                            category: h.category + '-webpack',
+                            source: `${sourceUrl}#webpack-module-${idx}`
+                        });
+                    });
+                });
+            } catch (e) {
+                this._log(2, 'warn', `[Webpack] Failed to extract modules: ${e.message}`);
+            }
+        }
+        
+        return handlers;
+    }
+    
+    _extractWebpackModules(modulesString) {
+        const modules = [];
+        let depth = 0;
+        let currentModule = '';
+        let inFunction = false;
+        
+        for (let i = 0; i < modulesString.length; i++) {
+            const char = modulesString[i];
+            
+            // Detect function start
+            if (char === 'f' && modulesString.substring(i, i + 8) === 'function') {
+                if (depth === 0) {
+                    inFunction = true;
+                }
+            }
+            
+            if (char === '{') {
+                depth++;
+            } else if (char === '}') {
+                depth--;
+                
+                if (depth === 0 && inFunction) {
+                    currentModule += char;
+                    modules.push(currentModule.trim());
+                    currentModule = '';
+                    inFunction = false;
+                    
+                    // Skip comma and whitespace
+                    while (i + 1 < modulesString.length && /[,\s]/.test(modulesString[i + 1])) {
+                        i++;
+                    }
+                    continue;
+                }
+            }
+            
+            if (inFunction || depth > 0) {
+                currentModule += char;
+            }
+        }
+        
+        // Add last module if exists
+        if (currentModule.trim().length > 0) {
+            modules.push(currentModule.trim());
+        }
+        
+        this._log(2, 'debug', `[Webpack] Extracted ${modules.length} modules from bundle`);
+        return modules;
+    }
+
 }
 
 // New methods added to support dashboard calls
 HandlerExtractor.prototype.extractStaticallyWithContext = async function(targetUrl, messageKeys, messageTypes, messageValues) {
     const handlers = new Set();
+    
+    // TELEMETRY-FIRST: Regex-based extraction only (AST removed)
+    this._log(1, 'debug', '[Static Context] Using regex-based handler extraction');
+    
     try {
         this._log(1, 'debug', `[Static Context] Fetching HTML for: ${targetUrl}`);
         const res = await fetch(targetUrl, { credentials: 'omit', cache: 'no-store' });
@@ -927,10 +1311,51 @@ HandlerExtractor.prototype.extractStaticallyWithContext = async function(targetU
         let m;
         while ((m = srcRegex.exec(html)) !== null) {
             try {
-                const absolute = new URL(m[1], targetUrl).href;
+                let scriptSrc = m[1];
+                
+                // CRITICAL FIX: Detect duplicate path segments in relative URLs
+                // Example: page is /costcard/index.html, script is "costcard/main.js"
+                // This creates /costcard/costcard/main.js (wrong!)
+                // Fix: Detect and remove the duplicate segment
+                if (!scriptSrc.startsWith('http://') && !scriptSrc.startsWith('https://') && !scriptSrc.startsWith('//')) {
+                    try {
+                        const baseUrl = new URL(targetUrl);
+                        const basePath = baseUrl.pathname;
+                        const baseDir = basePath.substring(0, basePath.lastIndexOf('/') + 1); // e.g., "/costcard/"
+                        const baseDirSegments = baseDir.split('/').filter(Boolean); // ["costcard"]
+                        const scriptSegments = scriptSrc.split('/').filter(Boolean); // ["costcard", "main.js"]
+                        
+                        // Check if first segment of script matches last segment of base directory
+                        if (baseDirSegments.length > 0 && scriptSegments.length > 0) {
+                            const lastBaseSeg = baseDirSegments[baseDirSegments.length - 1];
+                            const firstScriptSeg = scriptSegments[0];
+                            
+                            if (lastBaseSeg === firstScriptSeg) {
+                                // Remove duplicate segment from script src
+                                scriptSegments.shift();
+                                const fixedSrc = scriptSegments.join('/');
+                                this._log(1, 'warn', `[URL Resolution] Duplicate path segment detected! Original: ${scriptSrc}, Fixed: ${fixedSrc}`);
+                                scriptSrc = fixedSrc;
+                            }
+                        }
+                    } catch (e) {
+                        // If analysis fails, continue with original scriptSrc
+                        this._log(2, 'debug', `[URL Resolution] Duplicate detection failed: ${e.message}`);
+                    }
+                }
+                
+                const absolute = new URL(scriptSrc, targetUrl).href;
+                
+                // Debug log for URL resolution
+                this._log(2, 'debug', `[URL Resolution] Page: ${targetUrl}, Script src: ${m[1]}, Resolved: ${absolute}`);
+                
                 // Skip extension and data URLs
-                if (!absolute.startsWith('chrome-extension://') && !absolute.startsWith('data:')) srcs.add(absolute);
-            } catch (_) {}
+                if (!absolute.startsWith('chrome-extension://') && !absolute.startsWith('data:')) {
+                    srcs.add(absolute);
+                }
+            } catch (err) {
+                this._log(2, 'warn', `[URL Resolution] Failed to resolve: ${m[1]} from ${targetUrl}:`, err.message);
+            }
         }
 
         // Extract inline scripts
@@ -948,19 +1373,74 @@ HandlerExtractor.prototype.extractStaticallyWithContext = async function(targetU
 
         this._log(1, 'debug', `[Static Context] Found ${srcs.size} external script(s). Fetching...`, Array.from(srcs).slice(0, 30));
         const fetchLimit = 40; // Avoid fetching too many scripts
-        let fetchedCount = 0;
-        for (const src of srcs) {
-            if (fetchedCount >= fetchLimit) break;
-            try {
-                const sres = await fetch(src, { credentials: 'omit', cache: 'no-store' });
-                if (!sres.ok) { fetchedCount++; continue; }
-                const js = await sres.text();
+        const srcsArray = Array.from(srcs).slice(0, fetchLimit);
+        
+        // PERFORMANCE OPTIMIZATION: Batch fetch scripts in parallel (10 at a time)
+        const BATCH_SIZE = 10;
+        let totalFetched = 0;
+        
+        for (let i = 0; i < srcsArray.length; i += BATCH_SIZE) {
+            const batch = srcsArray.slice(i, i + BATCH_SIZE);
+            this._log(2, 'debug', `[Static Context] Fetching batch ${Math.floor(i/BATCH_SIZE) + 1}/${Math.ceil(srcsArray.length/BATCH_SIZE)} (${batch.length} scripts)`);
+            
+            const batchResults = await Promise.all(
+                batch.map(async (src) => {
+                    try {
+                        let sres = await fetch(src, { credentials: 'omit', cache: 'no-store' });
+                        
+                        // CRITICAL: If 404, try removing one path segment (common build issue)
+                        if (!sres.ok && sres.status === 404) {
+                            this._log(2, 'warn', `[Static Context] ❌ 404: ${src}`);
+                            const altUrl = this._tryStripOnePathSegment(src);
+                            if (altUrl && altUrl !== src) {
+                                this._log(2, 'debug', `[Static Context] Trying alternate URL: ${altUrl}`);
+                                try {
+                                    const altRes = await fetch(altUrl, { credentials: 'omit', cache: 'no-store' });
+                                    if (altRes.ok) {
+                                        sres = altRes;
+                                        this._log(2, 'success', `[Static Context] ✓ Alternate URL worked!`);
+                                    }
+                                } catch (e) {
+                                    // Silent fail
+                                }
+                            }
+                        }
+                        
+                        if (!sres.ok) return null;
+                        
+                        const js = await sres.text();
+                        return { src, js };
+                    } catch (e) {
+                        this._log(2, 'warn', `[Static Context] Failed to fetch ${src}: ${e.message}`);
+                        return null;
+                    }
+                })
+            );
+            
+            // Analyze all successful fetches in the batch
+            for (const result of batchResults) {
+                if (!result) continue;
+                
+                const { src, js } = result;
+                totalFetched++;
+                
+                this._log(2, 'debug', `[Static Context] Analyzing script: ${js.length} bytes from ${src.split('/').pop()}`);
+                
+                // First: try webpack unwrapping for bundled code
+                const webpackHandlers = this._unwrapWebpackBundle(js, src);
+                webpackHandlers.forEach(h => handlers.add(h));
+                if (webpackHandlers.length > 0) {
+                    this._log(1, 'success', `[Static Context] Webpack: Found ${webpackHandlers.length} handler(s) in webpack bundle`);
+                }
+                
+                // Second: regular analysis on full script
                 const found = this.analyzeScriptContent(js, src);
                 found.forEach(h => handlers.add(h));
-                this._log(2, 'debug', `[Static Context] Analyzed ${src}. Found ${found.length} candidate(s).`);
-            } catch (_) { /* ignore individual script failures */ }
-            fetchedCount++;
+                this._log(1, 'info', `[Static Context] Analyzed ${src.split('/').pop()}. Found ${found.length} candidate(s) via regex.`);
+            }
         }
+        
+        this._log(1, 'success', `[Static Context] Successfully fetched ${totalFetched}/${srcsArray.length} scripts in parallel batches`);
         this._log(1, 'success', `[Static Context] Extraction complete. Candidates: ${handlers.size}`);
     } catch (e) {
         this._log(1, 'error', `[Static Context] Error: ${e?.message || e}`);

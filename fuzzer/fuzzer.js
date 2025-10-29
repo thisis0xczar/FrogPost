@@ -203,7 +203,10 @@
                 return;
             }
 
-            const base = JSON.parse(JSON.stringify(struct.original));
+            // OPTIMIZED: Use structuredClone (3-5x faster than JSON round-trip)
+            const base = typeof structuredClone !== 'undefined' 
+                ? structuredClone(struct.original)
+                : JSON.parse(JSON.stringify(struct.original));
             const fields = this.extractAllFields(base);
 
             const strFields = fields.filter(f => {
@@ -245,7 +248,10 @@
                     if (total >= this.fuzzerConfig.maxTotalPayloads) return;
 
                     try {
-                        const modMsg = JSON.parse(JSON.stringify(base));
+                        // OPTIMIZED: Use structuredClone
+                        const modMsg = typeof structuredClone !== 'undefined' 
+                            ? structuredClone(base)
+                            : JSON.parse(JSON.stringify(base));
                         this.setNestedValue(modMsg, field, payload);
 
                         this.payloads.push({
@@ -266,7 +272,7 @@
         }
 
         generateRawStringPayloads(orig, payloadList) { if (typeof orig !== 'string' || !payloadList || payloadList.length === 0) return; const max = Math.min(this.maxPayloadsPerField, 30); let count = 0; const selPayloads = this.fuzzerConfig.randomizePayloadSelection ? [...payloadList].sort(()=>0.5-Math.random()).slice(0, max) : payloadList.slice(0, max); for (const p of selPayloads) { if (count >= this.fuzzerConfig.maxTotalPayloads) return; this.payloads.push({ type: 'raw_string_replace', payload: p, severity: 'high', isRawString: true, original: orig }); count++; if (count >= this.fuzzerConfig.maxTotalPayloads) return; const variants = [`${p}${orig}`, `${orig}${p}`]; if (orig.length > 10) { const mid=Math.floor(orig.length/2); variants.push(orig.substring(0,mid)+p+orig.substring(mid)); } for (const inj of variants) { if (count >= this.fuzzerConfig.maxTotalPayloads) return; this.payloads.push({ type: `raw_string_inject`, payload: inj, severity: 'high', isRawString: true, original: orig }); count++; } } }
-        generateCallbackPayloads() { if (!this.callbackUrl || !window.FuzzingPayloads?.CALLBACK_URL) return; const templates = window.FuzzingPayloads.CALLBACK_URL; for (const tmpl of templates) { if (this.payloads.length >= this.fuzzerConfig.maxTotalPayloads) return; const pStr = tmpl.replace(/%%CALLBACK_URL%%/g, this.callbackUrl); for (const struct of this.messageStructures) { if (struct.type === 'object' && struct.original) { const paths = this.vulnerablePaths.length>0?this.vulnerablePaths:Object.entries(struct.fieldTypes||{}).filter(([,t])=>t==='string').slice(0,5).map(([p])=>({path:p,sinkType:'generic_string',severity:'medium'})); if (paths.length===0&&struct.fields?.length>0) paths.push({path:struct.fields[0],sinkType:'first_field',severity:'low'}); for (const vuln of paths) { if (this.payloads.length >= this.fuzzerConfig.maxTotalPayloads) return; try { const target = vuln.path; if (!target) continue; const modMsg = JSON.parse(JSON.stringify(struct.original)); this.setNestedValue(modMsg, target, pStr); this.payloads.push({ type: 'callback_url_object', sinkType: vuln.sinkType, targetPath: target, fullPath: vuln.fullPath, payload: modMsg, severity: 'critical' }); } catch {} } } else if (struct.type === 'raw_string') { if (this.payloads.length >= this.fuzzerConfig.maxTotalPayloads) return; this.payloads.push({ type: 'callback_url_raw', payload: pStr, severity: 'critical', isRawString: true, original: struct.original }); if (this.payloads.length >= this.fuzzerConfig.maxTotalPayloads) return; this.payloads.push({ type: 'callback_url_combined', payload: `${struct.original||''}${pStr}`, severity: 'critical', isRawString: true, original: struct.original }); } } } }
+        generateCallbackPayloads() { if (!this.callbackUrl || !window.FuzzingPayloads?.CALLBACK_URL) return; const templates = window.FuzzingPayloads.CALLBACK_URL; for (const tmpl of templates) { if (this.payloads.length >= this.fuzzerConfig.maxTotalPayloads) return; const pStr = tmpl.replace(/%%CALLBACK_URL%%/g, this.callbackUrl); for (const struct of this.messageStructures) { if (struct.type === 'object' && struct.original) { const paths = this.vulnerablePaths.length>0?this.vulnerablePaths:Object.entries(struct.fieldTypes||{}).filter(([,t])=>t==='string').slice(0,5).map(([p])=>({path:p,sinkType:'generic_string',severity:'medium'})); if (paths.length===0&&struct.fields?.length>0) paths.push({path:struct.fields[0],sinkType:'first_field',severity:'low'}); for (const vuln of paths) { if (this.payloads.length >= this.fuzzerConfig.maxTotalPayloads) return; try { const target = vuln.path; if (!target) continue; const modMsg = typeof structuredClone !== 'undefined' ? structuredClone(struct.original) : JSON.parse(JSON.stringify(struct.original)); this.setNestedValue(modMsg, target, pStr); this.payloads.push({ type: 'callback_url_object', sinkType: vuln.sinkType, targetPath: target, fullPath: vuln.fullPath, payload: modMsg, severity: 'critical' }); } catch {} } } else if (struct.type === 'raw_string') { if (this.payloads.length >= this.fuzzerConfig.maxTotalPayloads) return; this.payloads.push({ type: 'callback_url_raw', payload: pStr, severity: 'critical', isRawString: true, original: struct.original }); if (this.payloads.length >= this.fuzzerConfig.maxTotalPayloads) return; this.payloads.push({ type: 'callback_url_combined', payload: `${struct.original||''}${pStr}`, severity: 'critical', isRawString: true, original: struct.original }); } } } }
         generateOriginFuzzingPayloads() {
             if (!this.fuzzerConfig.enableOriginFuzzing) return;
             let genOrigins = new Set(['null', 'https://evil.com', 'data:text/html,foo', 'blob:http://localhost/123']);
@@ -304,7 +310,7 @@
                     if (this.payloads.length >= this.fuzzerConfig.maxTotalPayloads) break;
                     if (struct.type==='object'&&struct.original) {
                         try {
-                            const modMsg=JSON.parse(JSON.stringify(struct.original));
+                            const modMsg = typeof structuredClone !== 'undefined' ? structuredClone(struct.original) : JSON.parse(JSON.stringify(struct.original));
                             const keys=['origin','senderOrigin','sourceOrigin'];
                             let found=false;
                             for(const k of keys){
@@ -331,10 +337,10 @@
             let count = 0;
             for (const s of this.messageStructures) {
                 if (s.type === 'raw_string' || !s.original) continue;
-                const base = JSON.parse(JSON.stringify(s.original));
+                const base = typeof structuredClone !== 'undefined' ? structuredClone(s.original) : JSON.parse(JSON.stringify(s.original));
                 for (const { field, value } of vectors) {
                     if (count >= this.fuzzerConfig.maxTotalPayloads) return;
-                    const fuzzed = JSON.parse(JSON.stringify(base));
+                    const fuzzed = typeof structuredClone !== 'undefined' ? structuredClone(base) : JSON.parse(JSON.stringify(base));
                     try {
                         let target = fuzzed;
                         let nested = Object.keys(fuzzed).find(k => this.isPlainObject(fuzzed[k]));
@@ -356,7 +362,7 @@
                         if (field.startsWith('__proto__')) {
                             try {
                                 if (count >= this.fuzzerConfig.maxTotalPayloads) return;
-                                const top = JSON.parse(JSON.stringify(base));
+                                const top = typeof structuredClone !== 'undefined' ? structuredClone(base) : JSON.parse(JSON.stringify(base));
                                 top[field] = value;
                                 this.payloads.push({
                                     type: 'prototype_pollution_direct',
@@ -377,7 +383,7 @@
             for (const struct of this.messageStructures) {
                 if (!struct || !struct.original) continue;
                 if (struct.type === 'object') {
-                    const base = JSON.parse(JSON.stringify(struct.original));
+                    const base = typeof structuredClone !== 'undefined' ? structuredClone(struct.original) : JSON.parse(JSON.stringify(struct.original));
                     const fields = this.extractAllFields(base);
                     const fieldCount = Math.min(fields.length, 10);
                     const selFields = fields.sort(() => 0.5 - Math.random()).slice(0, fieldCount);
@@ -388,7 +394,7 @@
                         for (const p of selPayloads) {
                             if (addCount >= count) return;
                             try {
-                                const modMsg = JSON.parse(JSON.stringify(base));
+                                const modMsg = typeof structuredClone !== 'undefined' ? structuredClone(base) : JSON.parse(JSON.stringify(base));
                                 this.setNestedValue(modMsg, field, p);
                                 this.payloads.push({
                                     type: 'additional',

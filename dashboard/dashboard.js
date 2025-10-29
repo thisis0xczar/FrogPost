@@ -1570,6 +1570,7 @@ function setActiveUrl(url) {
 function createActionButtonContainer(endpointKey) {
     const buttonContainer = document.createElement("div");
     buttonContainer.className = "button-container";
+    
     const playButton = document.createElement("button");
     playButton.className = "iframe-check-button";
     playButton.setAttribute("data-endpoint", endpointKey);
@@ -1584,6 +1585,9 @@ function createActionButtonContainer(endpointKey) {
     const handlerExists = endpointsWithDetectedHandlers.has(endpointKey);
     const traceInfo = traceButtonStates.get(endpointKey);
     const reportInfo = reportButtonStates.get(endpointKey);
+    
+    // CRITICAL: Check if endpoint is marked as failed (CSP/embedding blocked)
+    const failureInfo = isEndpointFailed(endpointKey);
 
     if (isExtensionUrl) {
         if (handlerExists) {
@@ -1596,12 +1600,19 @@ function createActionButtonContainer(endpointKey) {
             updateReportButton(reportButton, 'disabled', endpointKey);
         }
     } else {
-        const savedPlayStateInfo = buttonStates.get(endpointKey);
-        updateButton(playButton, savedPlayStateInfo?.state || 'start', savedPlayStateInfo?.options || {});
-        const canTrace = playButton.classList.contains('success') || playButton.classList.contains('green') || playButton.classList.contains('launch');
-        updateTraceButton(traceButton, traceInfo?.state || (canTrace ? 'default' : 'disabled'), traceInfo?.options || {});
-        const canReport = traceButton.classList.contains('green') || traceButton.classList.contains('success');
-        updateReportButton(reportButton, reportInfo || (canReport ? 'default' : 'disabled'), endpointKey);
+        // If endpoint failed (CSP blocked), override state to show error
+        if (failureInfo) {
+            updateButton(playButton, 'error', { errorMessage: failureInfo.reason });
+            updateTraceButton(traceButton, 'disabled');
+            updateReportButton(reportButton, 'disabled', endpointKey);
+        } else {
+            const savedPlayStateInfo = buttonStates.get(endpointKey);
+            updateButton(playButton, savedPlayStateInfo?.state || 'start', savedPlayStateInfo?.options || {});
+            const canTrace = playButton.classList.contains('success') || playButton.classList.contains('green') || playButton.classList.contains('launch');
+            updateTraceButton(traceButton, traceInfo?.state || (canTrace ? 'default' : 'disabled'), traceInfo?.options || {});
+            const canReport = traceButton.classList.contains('green') || traceButton.classList.contains('success');
+            updateReportButton(reportButton, reportInfo || (canReport ? 'default' : 'disabled'), endpointKey);
+        }
     }
 
     playButton.addEventListener("click", (e) => { e.stopPropagation(); handlePlayButtonWithTimeout(endpointKey, playButton); });
@@ -1611,6 +1622,17 @@ function createActionButtonContainer(endpointKey) {
     buttonContainer.appendChild(playButton);
     buttonContainer.appendChild(traceButton);
     buttonContainer.appendChild(reportButton);
+    
+    // Add exploitability badge if report exists
+    const traceReportsMap = window.traceReports || new Map();
+    const report = traceReportsMap.get(endpointKey);
+    if (report?.exploitability && report.exploitability.level !== 'INFO' && report.exploitability.level !== 'UNKNOWN') {
+        const badge = document.createElement('span');
+        badge.className = `exploit-badge exploit-${report.exploitability.level.toLowerCase()}`;
+        badge.textContent = report.exploitability.level;
+        badge.title = `${report.exploitability.impact}\n${report.exploitability.recommendation}`;
+        buttonContainer.appendChild(badge);
+    }
     
     return buttonContainer;
 }
@@ -2364,6 +2386,27 @@ function initializeMessageHandling() {
                             } else {
                                 window.frogPostState.messages.push(newMsg);
                             }
+
+                            // Enforce per-iframe message cap (keep last 30 for each destination iframe)
+                            try {
+                                const destKey = getStorageKeyForUrl(newMsg.destinationUrl || '');
+                                if (destKey) {
+                                    const indicesForDest = [];
+                                    for (let i = 0; i < window.frogPostState.messages.length; i++) {
+                                        const msg = window.frogPostState.messages[i];
+                                        const key = getStorageKeyForUrl(msg.destinationUrl || '');
+                                        if (key === destKey) indicesForDest.push(i);
+                                    }
+                                    const over = indicesForDest.length - 30;
+                                    if (over > 0) {
+                                        // Remove oldest entries for this iframe (by array order)
+                                        for (let j = 0; j < over; j++) {
+                                            const removeIndex = indicesForDest[j] - j; // adjust for prior removals
+                                            window.frogPostState.messages.splice(removeIndex, 1);
+                                        }
+                                    }
+                                }
+                            } catch (e) { /* ignore */ }
                             needsUiUpdate = true;
                             
                             // Trigger Auto Pilot for new iframe if enabled
@@ -2441,7 +2484,20 @@ function initializeMessageHandling() {
                 if (response.messages && Array.isArray(response.messages)) {
                     const filteredMessages = response.messages.filter(msg => !(typeof msg.data === 'object' && msg.data !== null && msg.data.hasOwnProperty(TEST_MESSAGE_KEY) && msg.data[TEST_MESSAGE_KEY] === TEST_MESSAGE_VALUE));
                     window.frogPostState.messages.length = 0;
-                    window.frogPostState.messages.push(...filteredMessages);
+                    // Apply per-iframe cap as we ingest initial messages
+                    const byDest = new Map();
+                    for (const m of filteredMessages) {
+                        const key = getStorageKeyForUrl(m.destinationUrl || '');
+                        if (!byDest.has(key)) byDest.set(key, []);
+                        byDest.get(key).push(m);
+                    }
+                    const capped = [];
+                    byDest.forEach(list => {
+                        // Keep last 30 per destination
+                        if (list.length > 30) list = list.slice(-30);
+                        capped.push(...list);
+                    });
+                    window.frogPostState.messages.push(...capped);
                 }
                 if (response.handlerEndpointKeys && Array.isArray(response.handlerEndpointKeys)) {
                     knownHandlerEndpoints.clear();
@@ -2722,43 +2778,53 @@ async function checkCSPHeaders(url) {
     try {
         log.info(`[CSP Check] Checking framing headers for: ${url}`);
         let finalStatus = { canEmbed: true, reason: 'No blocking headers found', headers: {}, warnings: [], testedAncestors: [] };
-        let headResponse = null;
+        let finalUrl = url; // Track final URL after redirects
+        let response = null;
 
-        // 1. Send HEAD request first
+        // OPTIMIZED: Try HEAD/GET first (fast, no tab opening), only use debugger if needed
+        log.debug(`[CSP Check] Trying HEAD/GET request first (optimized path)...`);
+        let headResponse = null;
         try {
             headResponse = await fetch(url, {
                 method: 'HEAD',
                 mode: 'cors',
                 credentials: 'omit',
-                signal: AbortSignal.timeout(5000)
+                signal: AbortSignal.timeout(3000)
             });
-        } catch (headError) {
-            log.warn(`[CSP Check] HEAD request failed: ${headError.message}. Proceeding with GET...`);
-            finalStatus.warnings.push(`HEAD request failed: ${headError.message}.`);
-        }
-
-        // 2. Fallback to GET request if HEAD failed or no headers found
-        let getResponse = null;
-        if (!headResponse || !headResponse.ok || (!headResponse.headers.get('content-security-policy') && !headResponse.headers.get('x-frame-options'))) {
-            try {
-                getResponse = await fetch(url, {
-                    method: 'GET',
-                    mode: 'cors',
-                    credentials: 'omit',
-                    signal: AbortSignal.timeout(8000)
-                });
-            } catch (getError) {
-                log.warn(`[CSP Check] GET request also failed: ${getError.message}. Will attempt debugger-assisted header read.`);
+            
+            // Check if we got CSP/XFO headers from HEAD
+            const hasCspHeaders = headResponse.headers.get('content-security-policy') || headResponse.headers.get('x-frame-options');
+            
+            if (headResponse.ok && hasCspHeaders) {
+                log.debug(`[CSP Check] ✓ Got headers from HEAD request (fast path)`);
+                response = headResponse;
             }
+        } catch (e) {
+            log.debug(`[CSP Check] HEAD failed: ${e.message}`);
         }
-        let response = getResponse || headResponse;
+        
+        // If HEAD didn't work or didn't get headers, use debugger API
         if (!response || !response.ok) {
-            // 2b. Use background debugger to fetch headers if normal fetch failed
+            log.debug(`[CSP Check] Falling back to debugger API for accurate redirect tracking...`);
             const debugResult = await new Promise(resolve => {
                 try { chrome.runtime.sendMessage({ type: 'fetchResponseHeaders', url }, resolve); } catch (e) { resolve(null); }
             });
+            
             if (debugResult && debugResult.success) {
+                // Use debugger result as primary source
                 finalStatus.headers = Object.assign({}, finalStatus.headers, debugResult.headers || {});
+                
+                // CRITICAL: Use finalUrl from debugger if redirects occurred
+                if (debugResult.finalUrl && debugResult.finalUrl !== url) {
+                    finalUrl = debugResult.finalUrl;
+                    log.warn(`[CSP Check] ⚠️ REDIRECT DETECTED: ${url} → ${finalUrl}`);
+                    finalStatus.warnings.push(`URL redirected from ${url} to ${finalUrl}`);
+                    if (debugResult.redirectChain && debugResult.redirectChain.length > 0) {
+                        const chain = debugResult.redirectChain.map(r => `${r.status}: ${r.to}`).join(' → ');
+                        log.info(`[CSP Check] Redirect chain: ${chain}`);
+                    }
+                }
+                
                 // Build a synthetic response-like reader
                 const lower = key => key && (key.toLowerCase ? key.toLowerCase() : String(key).toLowerCase());
                 const getHeader = name => debugResult.headers[lower(name)] || debugResult.headers[name] || null;
@@ -2767,15 +2833,43 @@ async function checkCSPHeaders(url) {
                     headers: { get: getHeader }
                 };
             } else {
-                log.warn(`[CSP Check] Unable to read headers via fetch or debugger: ${debugResult?.error || 'unknown error'}`);
-                finalStatus.canEmbed = false;
-                finalStatus.reason = `Network error: Could not retrieve headers`;
-                return finalStatus;
+                // Debugger failed, try GET as final fallback
+                log.warn(`[CSP Check] Debugger API failed: ${debugResult?.error || 'unknown error'}. Trying GET...`);
+                try {
+                    const getResponse = await fetch(url, {
+                        method: 'GET',
+                        mode: 'cors',
+                        credentials: 'omit',
+                        signal: AbortSignal.timeout(5000)
+                    });
+                    
+                    if (getResponse.ok) {
+                        response = getResponse;
+                        if (getResponse.url && getResponse.url !== url) {
+                            finalUrl = getResponse.url;
+                            log.warn(`[CSP Check] ⚠️ REDIRECT DETECTED (GET): ${url} → ${finalUrl}`);
+                            finalStatus.warnings.push(`URL redirected from ${url} to ${finalUrl}`);
+                        }
+                    }
+                } catch (getError) {
+                    log.warn(`[CSP Check] GET request also failed: ${getError.message}.`);
+                }
             }
+        }
+        
+        // Store final URL for later use
+        finalStatus.finalUrl = finalUrl;
+        if (!response || !response.ok) {
+            log.error(`[CSP Check] Unable to read headers via any method`);
+            finalStatus.canEmbed = false;
+            finalStatus.reason = `Network error: Could not retrieve headers`;
+            return finalStatus;
         }
 
         // Build set of ancestor origins to test against frame-ancestors
-        const resourceOrigin = new URL(url).origin;
+        // CRITICAL: Use finalUrl (after redirects), not original url
+        const resourceOrigin = new URL(finalUrl).origin;
+        log.info(`[CSP Check] Resource origin (after redirects): ${resourceOrigin}`);
         const testedAncestors = new Set();
         testedAncestors.add(window.location.origin);
         try {
@@ -2798,28 +2892,57 @@ async function checkCSPHeaders(url) {
             }
         }
 
-        // If fetch succeeded but headers are not CORS-exposed, use debugger-assisted read
+        // Get CSP header (already retrieved by debugger or fetch)
         let cspHeader = response.headers.get('content-security-policy') || response.headers.get('Content-Security-Policy');
-        if (!xfo && !cspHeader) {
-            const debugResult2 = await new Promise(resolve => {
-                try { chrome.runtime.sendMessage({ type: 'fetchResponseHeaders', url }, resolve); } catch (e) { resolve(null); }
-            });
-            if (debugResult2 && debugResult2.success && debugResult2.headers) {
-                const lower = k => (k || '').toLowerCase();
-                const getH = name => debugResult2.headers[lower(name)] || debugResult2.headers[name] || null;
-                const xfoDbg = getH('x-frame-options');
-                const cspDbg = getH('content-security-policy');
-                if (xfoDbg) {
-                    xfo = xfoDbg;
-                    const xfoLower = xfo.toLowerCase();
-                    finalStatus.headers['X-Frame-Options'] = xfoLower;
-                    if (xfoLower === 'deny') xfoDecision = { canEmbed: false, reason: 'X-Frame-Options: DENY' };
-                    else if (xfoLower === 'sameorigin') {
-                        const sameOrigin = Array.from(testedAncestors).some(a => a === resourceOrigin);
-                        xfoDecision = sameOrigin ? { canEmbed: true, reason: 'X-Frame-Options: SAMEORIGIN (same-origin)' } : { canEmbed: false, reason: 'X-Frame-Options: SAMEORIGIN (cross-origin)' };
+        
+        // CRITICAL: Check for meta refresh redirects (client-side redirects via HTML)
+        // These won't show up as HTTP redirects but will cause the iframe to navigate
+        if (finalStatus.headers && !finalUrl.startsWith('chrome-extension://')) {
+            try {
+                log.debug(`[CSP Check] Checking for meta refresh redirects...`);
+                const htmlResponse = await fetch(finalUrl, {
+                    method: 'GET',
+                    mode: 'cors',
+                    credentials: 'omit',
+                    signal: AbortSignal.timeout(5000)
+                });
+                const htmlContent = await htmlResponse.text();
+                
+                // Match: <meta http-equiv="refresh" content="0; url=https://example.com/" />
+                const metaRefreshMatch = htmlContent.match(/<meta[^>]+http-equiv=["']?refresh["']?[^>]+content=["']([^"']+)["'][^>]*>/i);
+                if (metaRefreshMatch) {
+                    const content = metaRefreshMatch[1];
+                    const urlMatch = content.match(/url=([^;]+)/i);
+                    if (urlMatch) {
+                        const metaRefreshUrl = urlMatch[1].trim();
+                        try {
+                            const absoluteMetaUrl = new URL(metaRefreshUrl, finalUrl).href;
+                            if (absoluteMetaUrl !== finalUrl) {
+                                log.warn(`[CSP Check] ⚠️ META REFRESH DETECTED: ${finalUrl} → ${absoluteMetaUrl}`);
+                                finalStatus.warnings.push(`Meta refresh redirect from ${finalUrl} to ${absoluteMetaUrl}`);
+                                
+                                // RECURSIVELY check CSP on the meta refresh destination
+                                log.info(`[CSP Check] Recursively checking CSP on meta refresh destination...`);
+                                const metaRefreshResult = await checkCSPHeaders(absoluteMetaUrl);
+                                
+                                // Use the most restrictive result
+                                if (!metaRefreshResult.canEmbed) {
+                                    finalStatus.canEmbed = false;
+                                    finalStatus.reason = `Meta refresh destination blocked: ${metaRefreshResult.reason}`;
+                                    finalStatus.finalUrl = absoluteMetaUrl;
+                                    finalStatus.warnings.push(...metaRefreshResult.warnings);
+                                    log.warn(`[CSP Check] Meta refresh destination ${absoluteMetaUrl} blocks embedding`);
+                                } else {
+                                    finalStatus.warnings.push(`Meta refresh destination ${absoluteMetaUrl} allows embedding`);
+                                }
+                            }
+                        } catch (e) {
+                            log.warn(`[CSP Check] Failed to parse meta refresh URL: ${metaRefreshUrl}`, e.message);
+                        }
                     }
                 }
-                if (cspDbg) cspHeader = cspDbg;
+            } catch (e) {
+                log.debug(`[CSP Check] Meta refresh check failed: ${e.message}`);
             }
         }
 
@@ -2878,22 +3001,22 @@ async function checkCSPHeaders(url) {
             }
         }
 
-        // 5. Check for CSP in meta tags (only if not found in headers)
-        if (getResponse && !cspHeader) {
-            const htmlContent = await getResponse.text();
-            const metaCspMatch = htmlContent.match(/<meta[^>]+http-equiv=["']?content-security-policy["']?[^>]+content=["']([^"']+)["'][^>]*>/i);
-            if (metaCspMatch) {
-                finalStatus.headers['meta-csp'] = metaCspMatch[1];
-                finalStatus.warnings.push("CSP found in meta tag, which is less secure and ignores frame-ancestors.");
-            }
-        }
-
-        // 6. If CSP lacked frame-ancestors, apply XFO decision
+        // Note: Meta CSP tags are ignored (they don't support frame-ancestors anyway)
+        
+        // 5. If CSP lacked frame-ancestors, apply XFO decision
         if (!/frame-ancestors\s+[^;]+/i.test(cspHeader || '')) {
             if (xfoDecision) { finalStatus.canEmbed = xfoDecision.canEmbed; finalStatus.reason = xfoDecision.reason; }
         }
 
+        // Add redirect warning to reason if URL changed
+        if (finalUrl !== url) {
+            finalStatus.reason = `${finalStatus.reason} (URL redirected to ${finalUrl})`;
+        }
+        
         log.success(`[CSP Check] Final status for ${url}:`, finalStatus);
+        if (finalUrl !== url) {
+            log.warn(`[CSP Check] ⚠️ IMPORTANT: CSP evaluated on redirected URL: ${finalUrl}`);
+        }
         return finalStatus;
 
     } catch (error) {
@@ -3089,7 +3212,7 @@ async function handlePlayButton(endpoint, button, skipCheck = false, silentMode 
             if (!silentMode && !hideFromUser) {
                 showToastNotification("Checking CSP compatibility for iframe embedding...", "info", 3000);
             }
-            const cspResult = await checkCSPHeaders(endpointUrlForAnalysis);
+            let cspResult = await checkCSPHeaders(endpointUrlForAnalysis);
             log.info(`[Play] Enhanced CSP check result:`, cspResult);
 
             if (!cspResult.canEmbed) {
@@ -3108,11 +3231,38 @@ async function handlePlayButton(endpoint, button, skipCheck = false, silentMode 
                 
                 if (modalResult.action === 'retry' && modalResult.modifiedUrl) {
                     log.info("[Play] User modified URL after CSP block. Retrying check...");
-                    endpointUrlForAnalysis = modalResult.modifiedUrl;
-                    analysisStorageKey = getStorageKeyForUrl(endpointUrlForAnalysis);
-                    launchInProgressEndpoints.delete(endpointKey);
-                    await handlePlayButton(endpointUrlForAnalysis, button, false, silentMode);
-                    return;
+                    const modifiedUrl = modalResult.modifiedUrl;
+                    const originalTelemetryKey = analysisStorageKey; // Save original key for telemetry
+                    
+                    // Retry CSP check with modified URL
+                    const retryResult = await checkCSPHeaders(modifiedUrl);
+                    log.info(`[Play] CSP check result for modified URL:`, retryResult);
+                    
+                    if (retryResult.canEmbed) {
+                        log.success(`[Play] CSP bypass successful with modified URL`);
+                        // Use modified URL for embedding, but keep original key for telemetry
+                        endpointUrlForAnalysis = modifiedUrl;
+                        successfullyAnalyzedUrl = modifiedUrl;
+                        // ⚠️ CRITICAL: analysisStorageKey stays as original for telemetry!
+                        log.info(`[Play] Telemetry key (original): ${analysisStorageKey}`);
+                        log.info(`[Play] Embedding URL (modified): ${successfullyAnalyzedUrl}`);
+                        
+                        // Store mapping: original endpoint → original storage key (NOT modified URL!)
+                        // This mapping tells Launch Fuzzer where to find the data
+                        const mappingKey = `analyzed-url-for-${endpointKey}`;
+                        await chrome.storage.local.set({ [mappingKey]: analysisStorageKey });
+                        log.info(`[Play] Stored mapping: ${mappingKey} → ${analysisStorageKey}`);
+                        
+                        // ⚠️ Update cspResult so the next check passes
+                        cspResult = retryResult;
+                        
+                        // Continue to handler extraction (don't return)
+                    } else {
+                        log.error(`[Play] Modified URL still blocked: ${retryResult.reason}`);
+                        showToastNotification(`Modified URL still blocked: ${retryResult.reason}`, 'error');
+                        updateButton(button, 'start');
+                        return;
+                    }
                 } else if (modalResult.action === 'continue') {
                     log.warn(`[Play] User chose to continue analysis despite CSP block: ${cspResult.reason}`);
                     proceedSilentlyOnError = true;
@@ -3125,13 +3275,22 @@ async function handlePlayButton(endpoint, button, skipCheck = false, silentMode 
             }
 
             if (cspResult.canEmbed || proceedSilentlyOnError) {
-                successfullyAnalyzedUrl = endpointUrlForAnalysis;
-                analysisStorageKey = getStorageKeyForUrl(successfullyAnalyzedUrl);
+                // Only set successfullyAnalyzedUrl if not already set by CSP bypass flow
+                if (!successfullyAnalyzedUrl) {
+                    successfullyAnalyzedUrl = endpointUrlForAnalysis;
+                }
+                // ⚠️ CRITICAL: Only update analysisStorageKey if not a CSP bypass scenario
+                // If successfullyAnalyzedUrl !== endpointUrlForAnalysis, it means CSP was bypassed
+                // and analysisStorageKey should stay as the original URL
+                if (successfullyAnalyzedUrl === endpointUrlForAnalysis && !analysisStorageKey) {
+                    analysisStorageKey = getStorageKeyForUrl(successfullyAnalyzedUrl);
+                }
                 if (cspResult.canEmbed) {
                     log.success(`[Play] Initial embedding check passed for ${successfullyAnalyzedUrl}`);
                 } else {
                     log.warn(`[Play] Proceeding with analysis for ${successfullyAnalyzedUrl} despite earlier check failures/uncertainty.`);
                 }
+                log.info(`[Play] Final keys - Telemetry: ${analysisStorageKey}, Embedding: ${successfullyAnalyzedUrl}`);
             } else {
                 throw new Error("Failed to determine a valid URL for analysis or user cancelled.");
             }
@@ -3175,10 +3334,29 @@ async function handlePlayButton(endpoint, button, skipCheck = false, silentMode 
                 }
 
                 // Try to retrieve pre-extracted handler from DOM agent telemetry
-                const preExtractedResult = await chrome.runtime.sendMessage({
-                    type: 'getPreExtractedHandler',
-                    payload: { endpointKey: analysisStorageKey }
-                });
+                log.info(`[Play] Requesting pre-extracted handler for key: ${analysisStorageKey}`);
+                
+                // Check if runtime is available (background script might be terminated)
+                if (!chrome?.runtime?.id) {
+                    log.error(`[Play] Chrome runtime not available - extension context invalidated`);
+                    if (!hideFromUser) {
+                        showToastNotification("⚠️ Extension reloaded. Please refresh dashboard.", "error", 5000);
+                    }
+                } else {
+                    log.debug(`[Play] Chrome runtime available, ID: ${chrome.runtime.id}`);
+                }
+                
+                let preExtractedResult = null;
+                try {
+                    preExtractedResult = await chrome.runtime.sendMessage({
+                        type: 'getPreExtractedHandler',
+                        payload: { endpointKey: analysisStorageKey }
+                    });
+                    log.info(`[Play] Telemetry retrieval response:`, JSON.stringify(preExtractedResult, null, 2));
+                } catch (err) {
+                    log.error(`[Play] Error retrieving telemetry:`, err);
+                    log.error(`[Play] Error details:`, err?.message || 'Unknown error', err?.stack || 'No stack trace');
+                }
 
                 if (preExtractedResult?.success && preExtractedResult?.handler) {
                     // SUCCESS: Found pre-extracted handler from DOM agent!
@@ -3192,6 +3370,9 @@ async function handlePlayButton(endpoint, button, skipCheck = false, silentMode 
                 } else {
                     // Fallback: No pre-extracted handler found
                     log.warn("[Play] No pre-extracted handler found in telemetry. Using slim fallback...");
+                    if (preExtractedResult) {
+                        log.debug(`[Play] Telemetry response details:`, { success: preExtractedResult?.success, hasHandler: !!preExtractedResult?.handler, error: preExtractedResult?.error });
+                    }
                     
                     if (!hideFromUser) {
                         updateButton(button, 'analyze', { message: 'Using fallback extraction...' });
@@ -3224,6 +3405,60 @@ async function handlePlayButton(endpoint, button, skipCheck = false, silentMode 
                         foundHandlerObject = null;
                         if (!hideFromUser) {
                             showToastNotification("⚠️ No handlers found", "warning", 4000);
+                        }
+                    }
+                }
+                
+                // ZOMBIE ENDPOINT EXTRACTION: If no handler found, check if this is a zombie endpoint (0 messages)
+                if (!foundHandlerObject) {
+                    const messageCount = getMessageCount(originalFullEndpoint);
+                    if (messageCount === 0) {
+                        log.info('[Play] Zombie endpoint detected (0 messages). Attempting extraction...');
+                        
+                        if (!hideFromUser) {
+                            updateButton(button, 'analyze', { message: 'Zombie endpoint - extracting...' });
+                            showToastNotification('🧟 Zombie endpoint - attempting handler extraction...', 'info', 3000);
+                        }
+                        
+                        // Strategy: Static AST analysis for zombie endpoints
+                        try {
+                            log.info('[Zombie] Attempting static AST analysis...');
+                            
+                            const zombieExtractor = new HandlerExtractor();
+                            const staticHandlers = await zombieExtractor.extractStaticallyWithContext(
+                                originalFullEndpoint, 
+                                new Set(), // no message keys
+                                new Set(), // no message types
+                                new Set()  // no message values
+                            );
+                            
+                            if (staticHandlers && staticHandlers.length > 0) {
+                                const bestStatic = zombieExtractor.getBestHandler(staticHandlers);
+                                if (bestStatic) {
+                                    foundHandlerObject = {
+                                        handler: bestStatic.code,
+                                        code: bestStatic.code,
+                                        source: 'static-ast-zombie',
+                                        score: bestStatic.score || 50,
+                                        category: 'static-zombie'
+                                    };
+                                    log.success('[Zombie] Handler extracted via static analysis');
+                                    if (!hideFromUser) {
+                                        showToastNotification('✅ Zombie handler extracted', 'success', 3000);
+                                    }
+                                }
+                            } else {
+                                log.warn('[Zombie] Static analysis found no handlers');
+                            }
+                        } catch (zombieError) {
+                            log.error('[Zombie] Static analysis failed:', zombieError);
+                        }
+                        
+                        if (!foundHandlerObject) {
+                            log.error('[Zombie] All extraction methods failed for zombie endpoint');
+                            if (!hideFromUser) {
+                                showToastNotification('❌ No handler found for zombie endpoint', 'error', 3000);
+                            }
                         }
                     }
                 }
@@ -5314,22 +5549,53 @@ async function cleanExtensionStorage() {
             'llm_api_key'
         ];
         
+        // CRITICAL: Also preserve data keys (telemetry, reports, caches)
+        const preserveKeyPatterns = [
+            'dom-agent-telemetry-',    // Handler telemetry from runtime
+            'trace-report-',            // Saved trace reports
+            'failed-endpoints',         // Failed endpoint cache
+            'ignored-endpoints',        // User-ignored endpoints
+            'autopilot-scanned-endpoints', // Auto Pilot history
+            'frogpost-messages-',       // Intercepted messages
+        ];
+        
         // Clear local storage except preserved keys
-        const localKeysToRemove = Object.keys(allLocalStorage).filter(key => !preserveKeys.includes(key));
+        const localKeysToRemove = Object.keys(allLocalStorage).filter(key => {
+            // Keep if in exact match list
+            if (preserveKeys.includes(key)) return false;
+            // Keep if matches any pattern
+            if (preserveKeyPatterns.some(pattern => key.startsWith(pattern))) return false;
+            return true;
+        });
+        
+        const telemetryCount = Object.keys(allLocalStorage).filter(k => k.startsWith('dom-agent-telemetry-')).length;
+        const messagesCount = Object.keys(allLocalStorage).filter(k => k.startsWith('frogpost-messages-')).length;
+        log.info(`[Storage Cleanup] Preserving ${telemetryCount} telemetry entries, ${messagesCount} message caches`);
+        
         if (localKeysToRemove.length > 0) {
             await chrome.storage.local.remove(localKeysToRemove);
-            log.info(`[Storage Cleanup] Cleared ${localKeysToRemove.length} local storage keys`);
+            log.info(`[Storage Cleanup] Cleared ${localKeysToRemove.length} local storage keys (preserved ${Object.keys(allLocalStorage).length - localKeysToRemove.length})`);
+        } else {
+            log.info(`[Storage Cleanup] No local storage keys to clear`);
         }
         
         // Clear session storage except preserved keys
-        const sessionKeysToRemove = Object.keys(allSessionStorage).filter(key => !preserveKeys.includes(key));
+        const sessionKeysToRemove = Object.keys(allSessionStorage).filter(key => {
+            if (preserveKeys.includes(key)) return false;
+            if (preserveKeyPatterns.some(pattern => key.startsWith(pattern))) return false;
+            return true;
+        });
         if (sessionKeysToRemove.length > 0) {
             await chrome.storage.session.remove(sessionKeysToRemove);
             log.info(`[Storage Cleanup] Cleared ${sessionKeysToRemove.length} session storage keys`);
         }
         
         // Clear sync storage except preserved keys
-        const syncKeysToRemove = Object.keys(allSyncStorage).filter(key => !preserveKeys.includes(key));
+        const syncKeysToRemove = Object.keys(allSyncStorage).filter(key => {
+            if (preserveKeys.includes(key)) return false;
+            if (preserveKeyPatterns.some(pattern => key.startsWith(pattern))) return false;
+            return true;
+        });
         if (syncKeysToRemove.length > 0) {
             await chrome.storage.sync.remove(syncKeysToRemove);
             log.info(`[Storage Cleanup] Cleared ${syncKeysToRemove.length} sync storage keys`);
@@ -5365,6 +5631,38 @@ async function cleanExtensionStorage() {
     }
 }
 
+/**
+ * Load existing handler telemetry from storage on dashboard initialization
+ * This ensures handlers captured before dashboard opened are available
+ */
+async function loadExistingTelemetry() {
+    try {
+        log.info('[Init] Querying all existing handler telemetry from storage...');
+        
+        // Get all storage keys
+        const allStorage = await chrome.storage.local.get(null);
+        const telemetryKeys = Object.keys(allStorage).filter(k => k.startsWith('dom-agent-telemetry-'));
+        
+        log.info(`[Init] Found ${telemetryKeys.length} existing telemetry entries`);
+        
+        // For each telemetry entry, ensure it's properly mapped
+        telemetryKeys.forEach(key => {
+            const endpointKey = key.replace('dom-agent-telemetry-', '');
+            const telemetry = allStorage[key];
+            
+            if (telemetry?.handlers && telemetry.handlers.length > 0) {
+                knownHandlerEndpoints.add(endpointKey);
+                log.debug(`[Init] Loaded telemetry for: ${endpointKey} (${telemetry.handlers.length} handlers)`);
+            }
+        });
+        
+        log.success(`[Init] Loaded ${knownHandlerEndpoints.size} handler endpoints from telemetry`);
+        requestUiUpdate();
+    } catch (error) {
+        log.error('[Init] Error loading existing telemetry:', error);
+    }
+}
+
 window.addEventListener('DOMContentLoaded', async () => {
     printBanner();
     displayCurrentVersion();
@@ -5374,6 +5672,9 @@ window.addEventListener('DOMContentLoaded', async () => {
     
     // Initialize Auto Pilot state
     await initializeAutoPilot();
+    
+    // CRITICAL: Load existing telemetry from storage
+    await loadExistingTelemetry();
     
     await checkServerStatus();
     updateServerStatusUI();
@@ -6016,6 +6317,15 @@ async function markEndpointAsFailed(endpointKey, reason) {
     });
     await saveFailedEndpoints();
     log.info(`[Failed Cache] Marked ${endpointKey} as failed: ${reason}`);
+    
+    // CRITICAL: Update button state to error
+    buttonStates.set(endpointKey, {
+        state: 'error',
+        options: { errorMessage: reason }
+    });
+    
+    // CRITICAL: Trigger UI update to show red button
+    requestUiUpdate();
 }
 
 // Check if endpoint previously failed
@@ -6040,6 +6350,15 @@ async function clearFailedEndpoint(endpointKey) {
         failedEndpoints.delete(endpointKey);
         await saveFailedEndpoints();
         log.info(`[Failed Cache] Cleared failed status for ${endpointKey}`);
+        
+        // CRITICAL: Reset button state to default
+        buttonStates.set(endpointKey, {
+            state: 'start',
+            options: {}
+        });
+        
+        // CRITICAL: Trigger UI update to restore button
+        requestUiUpdate();
     }
 }
 
@@ -6269,7 +6588,8 @@ async function startBatchUrlScan(urls) {
     let failCount = 0;
     
     log.info(`[Batch Scan] ═══════════════════════════════════════════════════`);
-    log.info(`[Batch Scan] Starting sequential scan of ${urls.length} URLs`);
+    log.info(`[Batch Scan] Starting sequential scan of ${urls.length} endpoint URLs`);
+    log.info(`[Batch Scan] Strategy: Open endpoint → Wait for handler detection → Analyze`);
     log.info(`[Batch Scan] ═══════════════════════════════════════════════════`);
     
     for (let i = 0; i < urls.length; i++) {
@@ -6278,88 +6598,87 @@ async function startBatchUrlScan(urls) {
         
         // Clear, organized progress message
         log.info(`\n[Batch Scan] ─────────────────────────────────────────────────`);
-        log.info(`[Batch Scan] 📍 URL ${urlNum}/${urls.length}: ${url}`);
+        log.info(`[Batch Scan] 📍 Endpoint ${urlNum}/${urls.length}: ${url}`);
         log.info(`[Batch Scan] ─────────────────────────────────────────────────`);
         
         updateAutoPilotFooter(`Scanning ${urlNum}/${urls.length}: ${url}`);
         
+        let tabId = null;
+        
         try {
-            // Get the endpoint key
+            // Get the endpoint key for this URL
             const endpointKey = getStorageKeyForUrl(url);
             log.info(`[Batch Scan] [${urlNum}/${urls.length}] Endpoint key: ${endpointKey}`);
             
-            // CRITICAL: Check CSP headers BEFORE attempting to scan
-            // This prevents false positives from endpoints that block framing
-            log.info(`[Batch Scan] [${urlNum}/${urls.length}] Step 1/3: Checking CSP headers...`);
-            const cspResult = await checkCSPHeaders(endpointKey);
-            
-            if (!cspResult.canEmbed) {
-                log.warn(`[Batch Scan] [${urlNum}/${urls.length}] ❌ CSP blocks framing: ${cspResult.reason}`);
-                log.debug(`[Batch Scan] [${urlNum}/${urls.length}] CSP Headers:`, cspResult.headers);
-                
-                // Store CSP error state so button shows correctly when UI updates
-                buttonStates.set(endpointKey, { 
-                    state: 'error', 
-                    options: { errorMessage: `CSP Blocked: ${cspResult.reason}` } 
-                });
-                
-                // Update button immediately if it exists
-                let button = document.querySelector(`.iframe-check-button[data-endpoint="${endpointKey}"]`);
-                if (button) {
-                    updateButton(button, 'error', { errorMessage: `CSP Blocked: ${cspResult.reason}` });
-                }
-                
-                // Trigger UI update to ensure button is rendered with error state
-                requestUiUpdate();
-                
+            // OPTIMIZED: Skip if already failed recently (within cache duration)
+            const failureInfo = isEndpointFailed(endpointKey);
+            if (failureInfo) {
+                log.warn(`[Batch Scan] [${urlNum}/${urls.length}] ⏭ Skipping (previously failed: ${failureInfo.reason})`);
                 failCount++;
-                log.warn(`[Batch Scan] [${urlNum}/${urls.length}] Skipped (CSP blocked) - Moving to next URL\n`);
-                continue; // Skip to next URL
+                continue;
             }
             
-            log.success(`[Batch Scan] [${urlNum}/${urls.length}] ✓ CSP check passed`);
+            // Step 1: Open URL in a new tab to allow DOM agent to inject and capture handlers
+            log.info(`[Batch Scan] [${urlNum}/${urls.length}] Step 1/3: Opening endpoint in new tab...`);
+            const tab = await chrome.tabs.create({ url: url, active: false });
+            tabId = tab.id;
+            log.success(`[Batch Scan] [${urlNum}/${urls.length}] ✓ Tab created (ID: ${tabId})`);
             
-            // Find or create button element for this URL
-            let button = document.querySelector(`.iframe-check-button[data-endpoint="${endpointKey}"]`);
+            // Step 2: Wait for page to load and DOM agent to capture handlers
+            log.info(`[Batch Scan] [${urlNum}/${urls.length}] Step 2/3: Waiting for page load and handler detection...`);
             
-            if (!button) {
-                // Create a temporary button for scanning
-                button = document.createElement('button');
-                button.className = 'iframe-check-button';
-                button.setAttribute('data-endpoint', endpointKey);
-            }
+            // OPTIMIZED: Reduced initial wait from 4s to 2s
+            await new Promise(resolve => setTimeout(resolve, 2000));
             
-            // CRITICAL: Reset button state to prevent Launch from being triggered
-            // Batch scan should ONLY do Play+Trace, NEVER Launch
-            buttonStates.delete(endpointKey);
-            
-            // Run Play with silent mode and hide from user (skipCheck=false, silentMode=true, hideFromUser=true)
-            log.info(`[Batch Scan] [${urlNum}/${urls.length}] Step 2/3: Running Play (handler extraction)...`);
-            await handlePlayButtonWithTimeout(endpointKey, button, false, true, true);
-            
-            // Wait for handler extraction to complete with polling
-            log.info(`[Batch Scan] [${urlNum}/${urls.length}] Waiting for handler extraction...`);
-            let handlerCheckAttempts = 0;
-            const maxAttempts = 10;
+            // Poll to check if handler was detected
+            let totalWaitTime = 2000;
+            const maxWaitTime = 7000; // OPTIMIZED: Reduced from 12s to 7s
+            const pollInterval = 500; // OPTIMIZED: Poll more frequently (500ms vs 1s)
             let hasHandler = false;
             
-            while (handlerCheckAttempts < maxAttempts) {
-                await new Promise(resolve => setTimeout(resolve, 500));
+            while (totalWaitTime < maxWaitTime) {
+                await new Promise(resolve => setTimeout(resolve, pollInterval));
+                totalWaitTime += pollInterval;
+                
+                // Check if handler was detected for this endpoint
                 hasHandler = endpointsWithDetectedHandlers.has(endpointKey);
-                handlerCheckAttempts++;
                 
                 if (hasHandler) {
-                    log.success(`[Batch Scan] [${urlNum}/${urls.length}] ✓ Handler detected after ${handlerCheckAttempts * 0.5}s`);
+                    log.success(`[Batch Scan] [${urlNum}/${urls.length}] ✓ Handler detected after ${totalWaitTime/1000}s`);
                     break;
                 }
             }
             
             if (!hasHandler) {
-                log.warn(`[Batch Scan] [${urlNum}/${urls.length}] ⚠ No handler detected after ${maxAttempts * 0.5}s`);
+                log.warn(`[Batch Scan] [${urlNum}/${urls.length}] ⚠ No handler detected after ${maxWaitTime/1000}s - endpoint may not have postMessage listeners`);
             }
             
-            if (hasHandler) {
-                // Find trace button
+            // Step 3: Run Play+Trace analysis regardless (fallback to static analysis if needed)
+            log.info(`[Batch Scan] [${urlNum}/${urls.length}] Step 3/3: Running Play+Trace analysis...`);
+            
+            // Find or create button element
+            let button = document.querySelector(`.iframe-check-button[data-endpoint="${endpointKey}"]`);
+            
+            if (!button) {
+                button = document.createElement('button');
+                button.className = 'iframe-check-button';
+                button.setAttribute('data-endpoint', endpointKey);
+            }
+            
+            // Reset button state
+            buttonStates.delete(endpointKey);
+            
+            // Run Play (handler extraction) - will use runtime telemetry if available, else fallback
+            await handlePlayButtonWithTimeout(endpointKey, button, false, true, true);
+            
+            // OPTIMIZED: Reduced wait from 1.5s to 0.3s
+            await new Promise(resolve => setTimeout(resolve, 300));
+            
+            // Check if handler was successfully extracted
+            const handlerExtracted = endpointsWithDetectedHandlers.has(endpointKey);
+            
+            if (handlerExtracted) {
+                // Run Trace
                 let traceButton = document.querySelector(`.iframe-trace-button[data-endpoint="${endpointKey}"]`);
                 
                 if (!traceButton) {
@@ -6368,14 +6687,13 @@ async function startBatchUrlScan(urls) {
                     traceButton.setAttribute('data-endpoint', endpointKey);
                 }
                 
-                // Run Trace with silent mode
-                log.info(`[Batch Scan] [${urlNum}/${urls.length}] Step 3/3: Running Trace (analysis)...`);
+                log.info(`[Batch Scan] [${urlNum}/${urls.length}] Running Trace analysis...`);
                 if (window.handleTraceButton) {
                     await window.handleTraceButton(endpointKey, traceButton, true);
                 }
                 
-                // Wait for trace to complete
-                await new Promise(resolve => setTimeout(resolve, 2000));
+                // OPTIMIZED: Reduced wait from 1.5s to 0.3s
+                await new Promise(resolve => setTimeout(resolve, 300));
                 
                 successCount++;
                 log.success(`[Batch Scan] [${urlNum}/${urls.length}] ✅ COMPLETED SUCCESSFULLY`);
@@ -6387,12 +6705,21 @@ async function startBatchUrlScan(urls) {
         } catch (error) {
             failCount++;
             log.error(`[Batch Scan] [${urlNum}/${urls.length}] ❌ ERROR: ${error.message}`);
+        } finally {
+            // Always close the tab
+            if (tabId) {
+                try {
+                    await chrome.tabs.remove(tabId);
+                    log.info(`[Batch Scan] [${urlNum}/${urls.length}] Tab closed`);
+                } catch (e) {
+                    log.debug(`[Batch Scan] Could not close tab ${tabId}: ${e.message}`);
+                }
+            }
         }
         
-        // Delay between URLs to ensure clean separation
+        // OPTIMIZED: Reduced delay between URLs from 1.5s to 0.5s
         if (i < urls.length - 1) {
-            log.info(`[Batch Scan] Waiting before next URL...\n`);
-            await new Promise(resolve => setTimeout(resolve, 1500));
+            await new Promise(resolve => setTimeout(resolve, 500));
         }
     }
     
@@ -6410,7 +6737,7 @@ async function startBatchUrlScan(urls) {
         await enableAutoPilot(true); // true = silent enable
     }
     
-    showToastNotification(`Batch scan complete: ${successCount} succeeded, ${failCount} failed`, successCount > 0 ? 'success' : 'warning', 5000);
+    showToastNotification(`Batch scan complete: ${successCount} succeeded, ${failCount} failed out of ${urls.length} endpoint(s)`, successCount > 0 ? 'success' : 'warning', 5000);
     
     // Refresh UI
     requestUiUpdate();
