@@ -36,13 +36,40 @@
     const messageEvents = new Map();
     let isActive = true;
 
-    // VERBOSE DEBUG MODE - TEMPORARILY ENABLED FOR DEBUGGING
-    const VERBOSE_DEBUG = true;
+    // Debug mode - false by default, can be enabled via background script message
+    let VERBOSE_DEBUG = false;
+    
+    // Try to load debug mode from localStorage (set by background script via content script)
+    try {
+        const storedDebugMode = localStorage.getItem('__frogPostDebugMode');
+        if (storedDebugMode === 'true') {
+            VERBOSE_DEBUG = true;
+        }
+    } catch (e) {
+        // localStorage not available or blocked
+    }
+    
     const debugLog = (...args) => {
         if (VERBOSE_DEBUG) {
             console.log(`%c[FrogPost Agent ${windowId.substring(0, 8)}]`, 'color: #00ff00; font-weight: bold', ...args);
         }
     };
+    
+    // Listen for debug mode changes from background script
+    window.addEventListener('message', (event) => {
+        if (event.data && event.data.type === '__FROGPOST_SET_DEBUG_MODE__') {
+            VERBOSE_DEBUG = event.data.enabled === true;
+            try {
+                if (VERBOSE_DEBUG) {
+                    localStorage.setItem('__frogPostDebugMode', 'true');
+                } else {
+                    localStorage.removeItem('__frogPostDebugMode');
+                }
+            } catch (e) {
+                // localStorage not available
+            }
+        }
+    });
 
     // Deep JSON sanitizer: caps total keys across nested structure and array lengths
     function sanitizeJsonDeep(value, options = {}) {
@@ -512,6 +539,54 @@
                 $$$listeners.add(window.onmessage);
                 // Send handler immediately (real-time capture)
                 sendHandlerImmediately(window.onmessage);
+            }
+            
+            // ENHANCED: Also scan for addEventListener('message') calls that happened before injection
+            // This catches handlers registered in scripts that loaded before our agent
+            try {
+                // Get all event listeners (if browser exposes them)
+                // Note: Most browsers don't expose this, but we try anyway
+                if (window.getEventListeners) {
+                    const listeners = window.getEventListeners(window);
+                    if (listeners && listeners.message) {
+                        listeners.message.forEach(listener => {
+                            if (typeof listener.listener === 'function' && !$$$listeners.has(listener.listener)) {
+                                $$$listeners.add(listener.listener);
+                                sendHandlerImmediately(listener.listener);
+                            }
+                        });
+                    }
+                }
+            } catch (e) {
+                // getEventListeners not available (expected in most browsers)
+            }
+            
+            // ENHANCED: Periodic rescan for handlers that register after initial load
+            // This helps catch lazy-loaded handlers
+            setTimeout(() => {
+                try {
+                    // Check if new handlers were added
+                    if (window.onmessage && typeof window.onmessage === 'function' && !$$$listeners.has(window.onmessage)) {
+                        $$$listeners.add(window.onmessage);
+                        sendHandlerImmediately(window.onmessage);
+                    }
+                } catch (e) {
+                    // Silent fail
+                }
+            }, 3000); // Rescan after 3 seconds
+            
+            // Additional rescan after DOM is fully loaded
+            if (document.readyState === 'loading') {
+                document.addEventListener('DOMContentLoaded', () => {
+                    setTimeout(() => {
+                        try {
+                            if (window.onmessage && typeof window.onmessage === 'function' && !$$$listeners.has(window.onmessage)) {
+                                $$$listeners.add(window.onmessage);
+                                sendHandlerImmediately(window.onmessage);
+                            }
+                        } catch (e) {}
+                    }, 2000);
+                });
             }
         } catch (error) {
             // Silent fail

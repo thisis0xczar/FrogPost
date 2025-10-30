@@ -259,6 +259,15 @@
             if (sendResponse) sendResponse({ success: true });
             return false;
         }
+        // Forward debug mode changes to DOM agent
+        if (message.type === '__FROGPOST_SET_DEBUG_MODE__') {
+            window.postMessage({
+                type: '__FROGPOST_SET_DEBUG_MODE__',
+                enabled: message.enabled
+            }, '*');
+            if (sendResponse) sendResponse({ success: true });
+            return false;
+        }
         return false;
     });
 

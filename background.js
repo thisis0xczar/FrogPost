@@ -13,13 +13,24 @@ try {
     console.error("Background.js: Failed to import handler-extractor.js", e);
 }
 
-let debugMode = true; // Flag to control debug logging - TEMPORARILY ENABLED FOR DEBUGGING
+let debugMode = false; // Flag to control debug logging - Loaded from storage, false by default
+const DEBUG_MODE_STORAGE_KEY = 'frogpostDebugMode';
+
+// Load debug mode from storage on startup
+(async () => {
+    try {
+        const result = await chrome.storage.local.get([DEBUG_MODE_STORAGE_KEY]);
+        debugMode = result[DEBUG_MODE_STORAGE_KEY] || false;
+    } catch (error) {
+        debugMode = false;
+    }
+})();
 
 const log = {
     debug: (...args) => { if (debugMode) console.debug("BG:", ...args); },
     info: (...args) => { if (debugMode) console.info("BG:", ...args); },
-    warn: (...args) => { if (debugMode) console.warn("BG:", ...args); },
-    error: (...args) => { if (debugMode) console.error("BG:", ...args); },
+    warn: (...args) => { console.warn("BG:", ...args); }, // Always show warnings
+    error: (...args) => { console.error("BG:", ...args); }, // Always show errors
     handler: (...args) => { if (debugMode) console.log("BG HANDLER:", ...args); },
     scan: (...args) => { if (debugMode) console.log("BG SCAN:", ...args); },
 };
@@ -63,12 +74,79 @@ class BoundedSet extends Set {
 }
 
 /**
+ * LRUCache - Least Recently Used cache implementation
+ * Efficiently tracks access order and evicts least recently used entries
+ */
+class LRUCache extends Map {
+    constructor(maxSize = 100) {
+        super();
+        this.maxSize = maxSize;
+        this.accessOrder = []; // Track access order (most recent at end)
+    }
+    
+    get(key) {
+        if (super.has(key)) {
+            // Move to end (most recently used)
+            this._updateAccess(key);
+            return super.get(key);
+        }
+        return undefined;
+    }
+    
+    set(key, value) {
+        if (super.has(key)) {
+            // Update existing entry and move to end
+            super.set(key, value);
+            this._updateAccess(key);
+        } else {
+            // Add new entry
+            if (this.size >= this.maxSize) {
+                // Evict least recently used (first in accessOrder)
+                const lruKey = this.accessOrder.shift();
+                if (lruKey !== undefined) {
+                    super.delete(lruKey);
+                }
+            }
+            super.set(key, value);
+            this.accessOrder.push(key);
+        }
+        return this;
+    }
+    
+    delete(key) {
+        if (super.has(key)) {
+            super.delete(key);
+            const index = this.accessOrder.indexOf(key);
+            if (index !== -1) {
+                this.accessOrder.splice(index, 1);
+            }
+        }
+        return super.has(key);
+    }
+    
+    clear() {
+        super.clear();
+        this.accessOrder = [];
+    }
+    
+    _updateAccess(key) {
+        const index = this.accessOrder.indexOf(key);
+        if (index !== -1) {
+            // Move to end (most recently used)
+            this.accessOrder.splice(index, 1);
+            this.accessOrder.push(key);
+        }
+    }
+}
+
+/**
  * In-Memory Handler Cache for Real-Time Capture
  * Stores handlers immediately when detected by DOM agent
+ * Uses LRU eviction to keep most recently accessed handlers
  */
-const handlerCache = new Map(); // Key: URL, Value: { handlers: [{code, name, timestamp}], lastUpdate: timestamp }
 const MAX_CACHE_SIZE = 500;
 const MAX_HANDLERS_PER_URL = 10;
+const handlerCache = new LRUCache(MAX_CACHE_SIZE);
 
 let frameConnections = new BoundedMap(50); // Limit to 50 frame connections
 let messageBuffer;
@@ -428,7 +506,14 @@ async function injectDOMAgent(tabId, frameId = 0) {
 function agentFunctionToInject() { const AGENT_VERSION = 'v11_postMsg_inline'; const agentFlag = `__frogPostAgentInjected_${AGENT_VERSION}`; if (window[agentFlag]) return { success: true, alreadyInjected: true, message: `Agent ${AGENT_VERSION} already present.` }; window[agentFlag] = true; let errors = []; const MAX_LISTENER_CODE_LENGTH = 15000; const originalWindowAddEventListener = window.addEventListener; const capturedListenerSources = new Set(); const safeToString = (func) => { try { return func.toString(); } catch (e) { return `[Error converting function: ${e?.message}]`; } }; const sendListenerToForwarder = (listenerCode, contextInfo, destinationUrl) => { try { const codeStr = typeof listenerCode === 'string' ? listenerCode : safeToString(listenerCode); if (!codeStr || codeStr.includes('[native code]') || codeStr.length < 25) { return; } const fingerprint = codeStr.replace(/\s+/g, '').substring(0, 250); if (capturedListenerSources.has(fingerprint)) { return; } capturedListenerSources.add(fingerprint); let stack = ''; try { throw new Error('CaptureStack'); } catch (e) { stack = e.stack || ''; } const payload = { listenerCode: codeStr.substring(0, MAX_LISTENER_CODE_LENGTH), stackTrace: stack, destinationUrl: destinationUrl || window.location.href, context: contextInfo }; window.postMessage({ type: 'frogPostAgent->ForwardToBackground', payload: payload }, window.location.origin || '*'); } catch (e) { errors.push(`sendListener Error (${contextInfo}): ${e.message}`); } }; try { window.addEventListener = function (type, listener, options) { if (type === 'message' && typeof listener === 'function') { sendListenerToForwarder(listener, 'window.addEventListener', window.location.href); } return originalWindowAddEventListener.apply(this, arguments); }; } catch (e) { errors.push(`addEventListener hook failed: ${e.message}`); window.addEventListener = originalWindowAddEventListener; } try { if (window.EventTarget && window.EventTarget.prototype) { const originalProtoAddEventListener = window.EventTarget.prototype.addEventListener; window.EventTarget.prototype.addEventListener = function(type, listener, options) { try { const isWindowLike = this === window || this === self || (typeof Window !== 'undefined' && this instanceof Window); const isMessagePort = typeof MessagePort !== 'undefined' && this instanceof MessagePort; if ((isWindowLike || isMessagePort) && type === 'message' && typeof listener === 'function') { sendListenerToForwarder(listener, isMessagePort ? 'EventTarget(MessagePort).addEventListener' : 'EventTarget(Window).addEventListener', window.location.href); } } catch(e) { errors.push(`EventTarget.prototype.addEventListener hook inner failed: ${e.message}`); } return originalProtoAddEventListener.apply(this, arguments); }; } } catch(e) { errors.push(`EventTarget.prototype.addEventListener hook failed: ${e.message}`); }
  let _currentWindowOnmessage = window.onmessage; try { Object.defineProperty(window, 'onmessage', { set: function (listener) { _currentWindowOnmessage = listener; if (typeof listener === 'function') { sendListenerToForwarder(listener, 'window.onmessage_set', window.location.href); } }, get: function () { return _currentWindowOnmessage; }, configurable: true, enumerable: true }); if (typeof _currentWindowOnmessage === 'function') { sendListenerToForwarder(_currentWindowOnmessage, 'window.onmessage_initial', window.location.href); } } catch (e) { errors.push(`onmessage hook failed: ${e.message}`); } try { const originalPortAddEventListener = MessagePort.prototype.addEventListener; MessagePort.prototype.addEventListener = function (type, listener, options) { try { if (type === 'message' && typeof listener === 'function') { sendListenerToForwarder(listener, 'port.addEventListener', window.location.href); } } catch(e) { errors.push(`port.addEventListener inner: ${e.message}`); } return originalPortAddEventListener.apply(this, arguments); }; const portOnMessageDescriptor = Object.getOwnPropertyDescriptor(MessagePort.prototype, 'onmessage'); const originalPortSetter = portOnMessageDescriptor?.set; const originalPortGetter = portOnMessageDescriptor?.get; const portOnmessageTracker = new WeakMap(); Object.defineProperty(MessagePort.prototype, 'onmessage', { set: function(listener) { try { portOnmessageTracker.set(this, listener); if (typeof listener === 'function') { sendListenerToForwarder(listener, 'port.onmessage_set', window.location.href); } if (originalPortSetter) originalPortSetter.call(this, listener); } catch(e) { errors.push(`port.onmessage set inner: ${e.message}`); } }, get: function() { try { let value = portOnmessageTracker.get(this); if (value === undefined && originalPortGetter) value = originalPortGetter.call(this); return value; } catch(e) { errors.push(`port.onmessage get inner: ${e.message}`); return undefined; } }, configurable: true, enumerable: true }); } catch (e) { errors.push(`MessagePort hook failed: ${e.message}`); } return { success: errors.length === 0, alreadyInjected: false, errors: errors, logsAdded: true }; }
 async function loadHandlerEndpoints() { try { const result = await chrome.storage.session.get([HANDLER_ENDPOINT_KEYS_STORAGE_KEY]); if (result[HANDLER_ENDPOINT_KEYS_STORAGE_KEY]) { endpointsWithDetectedHandlers = new Set(result[HANDLER_ENDPOINT_KEYS_STORAGE_KEY]); } else { endpointsWithDetectedHandlers = new Set(); } } catch (e) { endpointsWithDetectedHandlers = new Set(); } }
-async function saveHandlerEndpoints() { try { const data = { [HANDLER_ENDPOINT_KEYS_STORAGE_KEY]: Array.from(endpointsWithDetectedHandlers) }; storageBatcher.set(data, { immediate: true }); await storageBatcher.forceFlush(); } catch (e) {} }
+async function saveHandlerEndpoints() { 
+    try { 
+        const data = { [HANDLER_ENDPOINT_KEYS_STORAGE_KEY]: Array.from(endpointsWithDetectedHandlers) }; 
+        // Use batched storage - will flush within 100ms or when queue is full
+        // This reduces I/O overhead while still maintaining reasonable freshness
+        storageBatcher.set(data);
+    } catch (e) {} 
+}
 function disconnectNativeHost() { if (nativePort) { nativePort.disconnect(); nativePort = null; } }
 async function detachDebugger(debuggee) { const sessionKey = `${debuggee.tabId}:${debuggee.frameId || 0}`; if (activeDebugSessions.has(sessionKey)) { try { await new Promise((resolve, reject) => { chrome.debugger.detach(debuggee, () => { if (chrome.runtime.lastError) reject(chrome.runtime.lastError); else resolve(); }); }); log.debug(`Debugger detached from ${sessionKey}`); } catch (error) { log.warn(`Error detaching debugger from ${sessionKey}:`, error.message); } finally { activeDebugSessions.delete(sessionKey); } } }
 async function analyzeHandlerDynamically(details, sendResponse) { const { targetTabId, targetFrameId = 0, handlerSnippet, pointsOfInterest = [] } = details; if (!targetTabId) { sendResponse({ success: false, error: "Missing targetTabId" }); return; } const debuggee = { tabId: targetTabId }; if (targetFrameId !== 0) { debuggee.frameId = targetFrameId; } const sessionKey = `${debuggee.tabId}:${debuggee.frameId || 0}`; if (activeDebugSessions.has(sessionKey)) { sendResponse({ success: false, error: "Debugger session already active for this target" }); return; } let results = { variableStates: {}, errors: [] }; let breakpointId = null; try { await new Promise((resolve, reject) => { chrome.debugger.attach(debuggee, "1.3", () => { if (chrome.runtime.lastError) reject(new Error(`Attach failed: ${chrome.runtime.lastError.message}`)); else resolve(); }); }); activeDebugSessions.set(sessionKey, { target: debuggee, status: 'attached' }); log.debug(`Debugger attached to ${sessionKey}`); await new Promise((resolve, reject) => { chrome.debugger.sendCommand(debuggee, "Debugger.enable", {}, () => { if (chrome.runtime.lastError) reject(new Error(`Debugger.enable failed: ${chrome.runtime.lastError.message}`)); else resolve(); }); }); const scriptSource = await new Promise((resolve, reject) => { chrome.debugger.sendCommand(debuggee, "Debugger.getScriptSource", { scriptId: "SOME_SCRIPT_ID_PLACEHOLDER" }, (result) => { if (chrome.runtime.lastError) reject(new Error(`getScriptSource failed: ${chrome.runtime.lastError.message}`)); else resolve(result?.scriptSource); }); }); const location = { scriptId: "SOME_SCRIPT_ID_PLACEHOLDER", lineNumber: 0, columnNumber: 0 }; breakpointId = await new Promise((resolve, reject) => { chrome.debugger.sendCommand(debuggee, "Debugger.setBreakpoint", { location: location }, (result) => { if (chrome.runtime.lastError) reject(new Error(`setBreakpoint failed: ${chrome.runtime.lastError.message}`)); else resolve(result?.breakpointId); }); }); if (!breakpointId) throw new Error("Failed to set breakpoint."); log.debug(`Breakpoint set for ${sessionKey} at simplified location`); const eventListener = (source, method, params) => { if (source.tabId === debuggee.tabId && (!debuggee.frameId || source.frameId === debuggee.frameId)) { if (method === "Debugger.paused" && params.hitBreakpoints?.includes(breakpointId)) { log.debug(`Breakpoint hit for ${sessionKey}`); const callFrameId = params.callFrames[0].callFrameId; Promise.all(pointsOfInterest.map(varName => new Promise((resolve) => { chrome.debugger.sendCommand(debuggee, "Debugger.evaluateOnCallFrame", { callFrameId: callFrameId, expression: varName, objectGroup: "tempInspect", returnByValue: false, generatePreview: true }, (evalResult) => { if (chrome.runtime.lastError) { results.errors.push(`Eval error for ${varName}: ${chrome.runtime.lastError.message}`); resolve(); } else { results.variableStates[varName] = evalResult?.result; resolve(); } }); }))).then(async () => { chrome.debugger.sendCommand(debuggee, "Debugger.resume", {}, () => { if (chrome.runtime.lastError) log.warn(`Resume failed: ${chrome.runtime.lastError.message}`); }); await new Promise(resolve => setTimeout(resolve, 500)); chrome.debugger.onEvent.removeListener(eventListener); await detachDebugger(debuggee); sendResponse({ success: true, results: results }); }).catch(async (evalErr) => { results.errors.push(`Evaluation error: ${evalErr.message}`); chrome.debugger.onEvent.removeListener(eventListener); await detachDebugger(debuggee); sendResponse({ success: false, results: results }); }); } else if (method === "Debugger.resumed") {} } }; chrome.debugger.onEvent.addListener(eventListener); log.debug(`Debugger setup complete for ${sessionKey}. Waiting for breakpoint...`); } catch (error) { log.error(`Dynamic analysis error for ${sessionKey}:`, error); results.errors.push(error.message); if (breakpointId) { try { await new Promise(r => chrome.debugger.sendCommand(debuggee, "Debugger.removeBreakpoint", { breakpointId }, r)); } catch {} } await detachDebugger(debuggee); sendResponse({ success: false, results: results }); } }
@@ -493,7 +578,9 @@ async function handleExtensionPageLoad(tabId, targetUrl) {
                                     const endpointKey = normalizeEndpointUrl(targetUrl)?.normalized || targetUrl; log.debug(`[AutoAttach] Best handler found for ${endpointKey} from script ${url}:`, bestHandlerInfo.category);
                                     if (!endpointsWithDetectedHandlers.has(endpointKey)) { endpointsWithDetectedHandlers.add(endpointKey); await saveHandlerEndpoints(); }
                                     notifyDashboard("handlerCapturedForEndpoint", { endpointKey: endpointKey, handlerInfo: { category: bestHandlerInfo.category, source: bestHandlerInfo.source, functionName: bestHandlerInfo.functionName, score: bestHandlerInfo.score } });
-                                    const bestHandlerStorageKey = `best-handler-${endpointKey}`; await chrome.storage.local.set({ [bestHandlerStorageKey]: bestHandlerInfo }); log.debug(`[AutoAttach] Saved best handler for ${endpointKey} to storage.`);
+                                    const bestHandlerStorageKey = `best-handler-${endpointKey}`; 
+                                    storageBatcher.set({ [bestHandlerStorageKey]: bestHandlerInfo }); 
+                                    log.debug(`[AutoAttach] Saved best handler for ${endpointKey} to storage.`);
                                 }
                             }
                         }
@@ -579,7 +666,7 @@ async function handleWebPageLoadForDebug(tabId, targetUrl) {
                             const best = extractor.getBestHandler(found);
                             if (best?.handler) {
                                 const endpointKey = normalizeEndpointUrl(targetUrl)?.normalized || targetUrl;
-                                await chrome.storage.local.set({ [`best-handler-${endpointKey}`]: best });
+                                storageBatcher.set({ [`best-handler-${endpointKey}`]: best });
                                 notifyDashboard("handlerCaptured", { endpoint: targetUrl, bestHandler: { fn: best.functionName, score: best.score } });
                             }
                         }
@@ -605,7 +692,9 @@ async function handleWebPageLoadForDebug(tabId, targetUrl) {
                                     const endpointKey = normalizeEndpointUrl(targetUrl)?.normalized || targetUrl; log.debug(`[Debug Mode] Best handler found for ${endpointKey} from script ${url}:`, bestHandlerInfo.category);
                                     if (!endpointsWithDetectedHandlers.has(endpointKey)) { endpointsWithDetectedHandlers.add(endpointKey); await saveHandlerEndpoints(); }
                                     notifyDashboard("handlerCapturedForEndpoint", { endpointKey: endpointKey, handlerInfo: { category: bestHandlerInfo.category, source: bestHandlerInfo.source, functionName: bestHandlerInfo.functionName, score: bestHandlerInfo.score } });
-                                    const bestHandlerStorageKey = `best-handler-${endpointKey}`; await chrome.storage.local.set({ [bestHandlerStorageKey]: bestHandlerInfo }); log.debug(`[Debug Mode] Saved best handler for ${endpointKey} to storage.`);
+                                    const bestHandlerStorageKey = `best-handler-${endpointKey}`; 
+                                    storageBatcher.set({ [bestHandlerStorageKey]: bestHandlerInfo }); 
+                                    log.debug(`[Debug Mode] Saved best handler for ${endpointKey} to storage.`);
                                 }
                             }
                         }
@@ -893,22 +982,93 @@ async function getPreExtractedHandler(endpointKey) {
         if (debugMode) console.log(`[FROGPOST-BG] getPreExtractedHandler called with key: ${endpointKey}`);
         
         // PRIORITY 1: Check in-memory real-time cache (NEW SYSTEM)
+        // Try exact match first
         if (handlerCache.has(endpointKey)) {
             const cacheEntry = handlerCache.get(endpointKey);
             if (cacheEntry.handlers && cacheEntry.handlers.length > 0) {
-                // Return the LAST detected handler (most recent, usually the real one)
                 const handler = cacheEntry.handlers[cacheEntry.handlers.length - 1];
                 if (debugMode) console.log(`[FROGPOST-BG] ✅ Found handler in real-time cache: ${handler.code.length} chars, ${cacheEntry.handlers.length} total handlers for URL`);
-                // Return in the format dashboard expects: { handler: code, category, score, ... }
                 return { 
-                    handler: handler.code,  // Dashboard expects 'handler' not 'code'
+                    handler: handler.code,
                     name: handler.name, 
                     source: 'realtime-cache',
                     category: 'realtime-capture',
-                    score: 1000  // High score to prioritize real-time handlers
+                    score: 1000
                 };
             }
         }
+        
+        // Try normalized variations (with/without trailing slash, with/without query params)
+        const normalized = normalizeEndpointUrl(endpointKey);
+        if (normalized?.normalized && normalized.normalized !== endpointKey) {
+            if (handlerCache.has(normalized.normalized)) {
+                const cacheEntry = handlerCache.get(normalized.normalized);
+                if (cacheEntry.handlers && cacheEntry.handlers.length > 0) {
+                    const handler = cacheEntry.handlers[cacheEntry.handlers.length - 1];
+                    if (debugMode) console.log(`[FROGPOST-BG] ✅ Found handler in cache via normalized key: ${normalized.normalized}`);
+                    return { 
+                        handler: handler.code,
+                        name: handler.name, 
+                        source: 'realtime-cache',
+                        category: 'realtime-capture',
+                        score: 1000
+                    };
+                }
+            }
+        }
+        
+        // Try variations: with/without trailing slash
+        const variations = [
+            endpointKey.endsWith('/') ? endpointKey.slice(0, -1) : endpointKey + '/',
+            endpointKey,
+            normalized?.normalized
+        ].filter(Boolean);
+        
+        for (const variant of variations) {
+            if (variant && handlerCache.has(variant)) {
+                const cacheEntry = handlerCache.get(variant);
+                if (cacheEntry.handlers && cacheEntry.handlers.length > 0) {
+                    const handler = cacheEntry.handlers[cacheEntry.handlers.length - 1];
+                    if (debugMode) console.log(`[FROGPOST-BG] ✅ Found handler in cache via variant: ${variant}`);
+                    return { 
+                        handler: handler.code,
+                        name: handler.name, 
+                        source: 'realtime-cache',
+                        category: 'realtime-capture',
+                        score: 1000
+                    };
+                }
+            }
+        }
+        
+        // Try origin-only matching (last resort)
+        try {
+            const endpointUrl = new URL(endpointKey);
+            const originOnly = endpointUrl.origin;
+            
+            // Check all cache entries for matching origin
+            for (const [cachedUrl, cacheEntry] of handlerCache.entries()) {
+                try {
+                    const cachedUrlObj = new URL(cachedUrl);
+                    if (cachedUrlObj.origin === originOnly && cacheEntry.handlers && cacheEntry.handlers.length > 0) {
+                        const handler = cacheEntry.handlers[cacheEntry.handlers.length - 1];
+                        if (debugMode) console.log(`[FROGPOST-BG] ✅ Found handler in cache via origin match: ${cachedUrl}`);
+                        return { 
+                            handler: handler.code,
+                            name: handler.name, 
+                            source: 'realtime-cache',
+                            category: 'realtime-capture',
+                            score: 1000
+                        };
+                    }
+                } catch (e) {
+                    // Skip invalid URLs
+                }
+            }
+        } catch (e) {
+            // endpointKey might not be a valid URL
+        }
+        
         if (debugMode) console.log(`[FROGPOST-BG] No handler in real-time cache, falling back to old telemetry...`);
         
         // FALLBACK: Check old telemetry system (DEPRECATED)
@@ -1151,7 +1311,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                                 if (existingIndex === -1) {
                                     listeners.push(newListenerData);
                                     if (listeners.length > 30) listeners = listeners.slice(-30);
-                                    await chrome.storage.local.set({ [storageKey]: listeners });
+                                    storageBatcher.set({ [storageKey]: listeners });
                                     response = { success: true, action: "saved" };
                                     if (isValidListenerCode(listenerCode)) { needsHandlerUpdateNotification = true; }
                                 } else {
@@ -1256,6 +1416,207 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             case 'stopServer': isAsync = true; chrome.runtime.sendNativeMessage(NATIVE_HOST_NAME, { action: 'stopServer' }, (response) => { if (responseFunction) { try { responseFunction({ success: !chrome.runtime.lastError && response?.success, error: chrome.runtime.lastError?.message || response?.error }); } catch(e){} } }); disconnectNativeHost(); return true;
             case 'analyzeHandlerDynamically': isAsync = true; analyzeHandlerDynamically(payload, responseFunction); return true;
             case "setDebuggerMode": if (typeof payload?.enabled === 'boolean') { isDebuggerApiModeGloballyEnabled = payload.enabled; log.info(`Background Debugger API Mode set to: ${isDebuggerApiModeGloballyEnabled}`); if (responseFunction) responseFunction({ success: true }); } else { if (responseFunction) responseFunction({ success: false, error: "Invalid payload for setDebuggerMode" }); } return false;
+            case "setDebugMode": 
+                isAsync = true;
+                (async () => {
+                    if (typeof payload?.enabled === 'boolean') { 
+                        debugMode = payload.enabled;
+                        try {
+                            await chrome.storage.local.set({ [DEBUG_MODE_STORAGE_KEY]: debugMode });
+                            log.info(`Debug mode ${debugMode ? 'enabled' : 'disabled'}`);
+                            if (responseFunction) responseFunction({ success: true });
+                            
+                            // Broadcast debug mode change to all tabs so DOM agents can update
+                            try {
+                                const tabs = await chrome.tabs.query({});
+                                for (const tab of tabs) {
+                                    if (tab.url && (tab.url.startsWith('http://') || tab.url.startsWith('https://'))) {
+                                        chrome.tabs.sendMessage(tab.id, {
+                                            type: '__FROGPOST_SET_DEBUG_MODE__',
+                                            enabled: debugMode
+                                        }).catch(() => {}); // Ignore errors for tabs that don't have content script
+                                    }
+                                }
+                            } catch (e) {
+                                // Ignore broadcast errors
+                            }
+                        } catch (error) {
+                            log.error("Error saving debug mode:", error);
+                            if (responseFunction) responseFunction({ success: false, error: error.message });
+                        }
+                    } else {
+                        if (responseFunction) responseFunction({ success: false, error: "Invalid payload for setDebugMode" });
+                    }
+                })();
+                return true;
+            case "zombieDebuggerScan":
+                isAsync = true;
+                (async () => {
+                    try {
+                        const { url, endpointKey } = payload || {};
+                        if (!url) {
+                            if (responseFunction) responseFunction({ success: false, error: 'Missing url' });
+                            return;
+                        }
+                        
+                        log.info(`[Zombie Debugger] Starting debugger scan for ${url}`);
+                        
+                        // Check if debugger mode is enabled
+                        const debuggerModeResult = await chrome.storage.local.get(['debuggerApiModeEnabled']);
+                        if (!debuggerModeResult?.debuggerApiModeEnabled) {
+                            if (responseFunction) responseFunction({ success: false, error: 'Debugger API mode not enabled' });
+                            return;
+                        }
+                        
+                        // Queue if at debugger limit
+                        if (!canAttachDebugger()) {
+                            log.warn(`[Zombie Debugger] Debugger limit reached, queuing ${url}`);
+                            debuggerQueue.push(() => {
+                                chrome.runtime.sendMessage({
+                                    type: 'zombieDebuggerScan',
+                                    payload: payload
+                                }, responseFunction);
+                            });
+                            if (responseFunction) responseFunction({ success: false, error: 'Debugger queue full, will retry' });
+                            return;
+                        }
+                        
+                        incrementDebuggerCount();
+                        let tabId = null;
+                        let attached = false;
+                        let handlerFound = null;
+                        
+                        try {
+                            // Create tab
+                            const tab = await chrome.tabs.create({ url: url, active: false });
+                            tabId = tab.id;
+                            
+                            // Wait for page to load
+                            await new Promise(resolve => setTimeout(resolve, 2000));
+                            
+                            // Attach debugger
+                            await chrome.debugger.attach({ tabId }, '1.3');
+                            attached = true;
+                            log.debug(`[Zombie Debugger] Attached to tab ${tabId}`);
+                            
+                            // Enable domains
+                            await Promise.all([
+                                chrome.debugger.sendCommand({ tabId }, 'Page.enable'),
+                                chrome.debugger.sendCommand({ tabId }, 'Runtime.enable'),
+                                chrome.debugger.sendCommand({ tabId }, 'Debugger.enable')
+                            ]);
+                            
+                            // Set breakpoint on message listener registration
+                            try {
+                                await chrome.debugger.sendCommand({ tabId }, 'DOMDebugger.setEventListenerBreakpoint', { eventName: 'message' });
+                            } catch (e) {
+                                // Ignore if already set
+                            }
+                            
+                            // Set up event listener
+                            const eventListener = async (source, method, params) => {
+                                if (source.tabId !== tabId) return;
+                                
+                                if (method === 'Debugger.paused' && params?.reason === 'EventListener') {
+                                    try {
+                                        const frame = params.callFrames?.[0];
+                                        const scriptId = frame?.location?.scriptId;
+                                        if (scriptId && typeof HandlerExtractor !== 'undefined') {
+                                            const { scriptSource } = await chrome.debugger.sendCommand({ tabId }, 'Debugger.getScriptSource', { scriptId });
+                                            if (scriptSource) {
+                                                const extractor = new HandlerExtractor();
+                                                const foundHandlers = extractor.analyzeScriptContent(scriptSource, `zombie_${scriptId}`);
+                                                if (foundHandlers && foundHandlers.length > 0) {
+                                                    const bestHandler = extractor.getBestHandler(foundHandlers);
+                                                    if (bestHandler && bestHandler.handler) {
+                                                        handlerFound = bestHandler;
+                                                        log.success(`[Zombie Debugger] Found handler via breakpoint`);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    } catch (e) {
+                                        log.warn(`[Zombie Debugger] Error processing breakpoint:`, e);
+                                    }
+                                    
+                                    // Resume execution
+                                    try {
+                                        await chrome.debugger.sendCommand({ tabId }, 'Debugger.resume');
+                                    } catch {}
+                                }
+                                
+                                // Also check script parsing
+                                if (method === 'Debugger.scriptParsed') {
+                                    const { scriptId, url: scriptUrl } = params || {};
+                                    if (scriptUrl && typeof HandlerExtractor !== 'undefined') {
+                                        try {
+                                            const { scriptSource } = await chrome.debugger.sendCommand({ tabId }, 'Debugger.getScriptSource', { scriptId });
+                                            if (scriptSource && scriptSource.length < 1500000) {
+                                                const extractor = new HandlerExtractor();
+                                                const foundHandlers = extractor.analyzeScriptContent(scriptSource, scriptUrl);
+                                                if (foundHandlers && foundHandlers.length > 0) {
+                                                    const bestHandler = extractor.getBestHandler(foundHandlers);
+                                                    if (bestHandler && bestHandler.handler && !handlerFound) {
+                                                        handlerFound = bestHandler;
+                                                        log.success(`[Zombie Debugger] Found handler via script parsing`);
+                                                    }
+                                                }
+                                            }
+                                        } catch (e) {
+                                            // Ignore errors
+                                        }
+                                    }
+                                }
+                            };
+                            
+                            chrome.debugger.onEvent.addListener(eventListener);
+                            
+                            // Wait for handler discovery (max 8 seconds)
+                            await new Promise(resolve => setTimeout(resolve, 8000));
+                            
+                            chrome.debugger.onEvent.removeListener(eventListener);
+                            
+                            if (handlerFound) {
+                                if (responseFunction) responseFunction({ 
+                                    success: true, 
+                                    handler: handlerFound 
+                                });
+                            } else {
+                                if (responseFunction) responseFunction({ 
+                                    success: false, 
+                                    error: 'No handler found within timeout' 
+                                });
+                            }
+                            
+                        } catch (error) {
+                            log.error(`[Zombie Debugger] Error:`, error);
+                            if (responseFunction) responseFunction({ 
+                                success: false, 
+                                error: error.message || 'Unknown error' 
+                            });
+                        } finally {
+                            if (attached && tabId) {
+                                try {
+                                    await chrome.debugger.detach({ tabId });
+                                } catch {}
+                            }
+                            if (tabId) {
+                                try {
+                                    await chrome.tabs.remove(tabId);
+                                } catch {}
+                            }
+                            decrementDebuggerCount();
+                        }
+                        
+                    } catch (error) {
+                        log.error(`[Zombie Debugger] Top-level error:`, error);
+                        if (responseFunction) responseFunction({ 
+                            success: false, 
+                            error: error.message || 'Unknown error' 
+                        });
+                    }
+                })();
+                return true;
             case "contentScriptReady":
                 try {
                     const tabId = sender?.tab?.id;
@@ -1404,7 +1765,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             }
             if (payload?.location && payload?.handler) {
                 const url = payload.location;
-                if (debugMode) console.log(`[FROGPOST-BG] ✅ Caching handler for: ${url}`);
+                // CRITICAL FIX: Normalize URL when storing in cache for consistent lookup
+                const normalizedUrl = normalizeEndpointUrl(url)?.normalized || url;
+                
+                if (debugMode) console.log(`[FROGPOST-BG] ✅ Caching handler for: ${url} (normalized: ${normalizedUrl})`);
                 const handlerData = {
                     code: payload.handler.code || payload.handler,
                     name: payload.handler.name || 'anonymous',
@@ -1412,12 +1776,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                     source: 'dom-agent-realtime'
                 };
                 
-                // Get or create cache entry for this URL
-                if (!handlerCache.has(url)) {
-                    handlerCache.set(url, { handlers: [], lastUpdate: Date.now() });
+                // Get or create cache entry for this URL (use normalized key!)
+                if (!handlerCache.has(normalizedUrl)) {
+                    handlerCache.set(normalizedUrl, { handlers: [], lastUpdate: Date.now() });
                 }
                 
-                const cacheEntry = handlerCache.get(url);
+                const cacheEntry = handlerCache.get(normalizedUrl);
                 
                 // Deduplicate: check if this exact handler already exists
                 const isDuplicate = cacheEntry.handlers.some(h => h.code === handlerData.code);
@@ -1431,17 +1795,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                     }
                     
                     if (debugMode) {
-                        if (debugMode) console.log(`[FROGPOST-BG] Handler cached for ${url}: ${handlerData.code.substring(0, 80)}...`);
+                        if (debugMode) console.log(`[FROGPOST-BG] Handler cached for ${normalizedUrl}: ${handlerData.code.substring(0, 80)}...`);
                         if (debugMode) console.log(`[FROGPOST-BG] Cache now has ${cacheEntry.handlers.length} handler(s) for this URL`);
                     }
                 }
-                
-                // LRU eviction: if cache is too large, remove oldest URL
-                if (handlerCache.size > MAX_CACHE_SIZE) {
-                    const oldestKey = handlerCache.keys().next().value;
-                    handlerCache.delete(oldestKey);
-                    if (debugMode) if (debugMode) console.log(`[FROGPOST-BG] Cache evicted oldest URL: ${oldestKey}`);
-                }
+                // LRU cache automatically handles eviction when size exceeds MAX_CACHE_SIZE
             }
             break;
 

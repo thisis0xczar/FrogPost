@@ -3119,13 +3119,72 @@ async function handlePlayButton(endpoint, button, skipCheck = false, silentMode 
             }
             if (!successfulUrl) successfulUrl = analysisKeyToUse;
 
-
-            const [traceReport, storedPayloads, storedMessages] = await Promise.all([
+            // Try to find trace report with multiple fallback strategies
+            let traceReport = null;
+            let storedPayloads = null;
+            let storedMessages = null;
+            
+            // Strategy 1: Try with analysisKeyToUse (primary)
+            [traceReport, storedPayloads, storedMessages] = await Promise.all([
                 window.traceReportStorage.getTraceReport(analysisKeyToUse),
                 window.traceReportStorage.getReportPayloads(analysisKeyToUse),
                 retrieveMessagesWithFallbacks(analysisKeyToUse, endpointKey)
             ]);
-
+            
+            // Strategy 2: If not found, check all mappings to find any trace report for this endpoint
+            if (!traceReport) {
+                log.debug(`[Launch] No trace report found for ${analysisKeyToUse}, checking all mappings...`);
+                try {
+                    // Get all storage keys that start with 'analyzed-url-for-'
+                    const allStorage = await new Promise(resolve => chrome.storage.local.get(null, resolve));
+                    const mappingKeys = Object.keys(allStorage).filter(k => k.startsWith('analyzed-url-for-'));
+                    
+                    // Try each mapping to see if it has a trace report
+                    for (const mapKey of mappingKeys) {
+                        const mappedKey = allStorage[mapKey];
+                        if (mappedKey) {
+                            const testReport = await window.traceReportStorage.getTraceReport(mappedKey);
+                            if (testReport) {
+                                // Found a trace report! Check if it matches our endpoint
+                                // Compare normalized URLs - if they match origin + pathname, use it
+                                const testNormalized = normalizeEndpointUrl(mappedKey);
+                                const currentNormalized = normalizeEndpointUrl(endpointKey);
+                                
+                                if (testNormalized && currentNormalized && 
+                                    testNormalized.components && currentNormalized.components &&
+                                    testNormalized.components.origin === currentNormalized.components.origin &&
+                                    testNormalized.components.path === currentNormalized.components.path) {
+                                    log.info(`[Launch] Found matching trace report via mapping: ${mapKey} → ${mappedKey}`);
+                                    analysisKeyToUse = mappedKey;
+                                    [traceReport, storedPayloads, storedMessages] = await Promise.all([
+                                        window.traceReportStorage.getTraceReport(mappedKey),
+                                        window.traceReportStorage.getReportPayloads(mappedKey),
+                                        retrieveMessagesWithFallbacks(mappedKey, endpointKey)
+                                    ]);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                } catch (e) {
+                    log.debug(`[Launch] Error during fallback lookup:`, e);
+                }
+            }
+            
+            // Strategy 3: Try with original endpointKey directly (in case normalization differs)
+            if (!traceReport && analysisKeyToUse !== endpointKey) {
+                log.debug(`[Launch] Trying original endpointKey: ${endpointKey}`);
+                const directReport = await window.traceReportStorage.getTraceReport(endpointKey);
+                if (directReport) {
+                    log.info(`[Launch] Found trace report with original endpointKey`);
+                    analysisKeyToUse = endpointKey;
+                    [traceReport, storedPayloads, storedMessages] = await Promise.all([
+                        window.traceReportStorage.getTraceReport(endpointKey),
+                        window.traceReportStorage.getReportPayloads(endpointKey),
+                        retrieveMessagesWithFallbacks(endpointKey, endpointKey)
+                    ]);
+                }
+            }
 
             if (!traceReport) throw new Error(`No trace report found for analysis key ${analysisKeyToUse}. Run Play & Trace again.`);
             let handlerCode = traceReport?.analyzedHandler?.handler || traceReport?.analyzedHandler?.code;
@@ -3252,6 +3311,15 @@ async function handlePlayButton(endpoint, button, skipCheck = false, silentMode 
                         const mappingKey = `analyzed-url-for-${endpointKey}`;
                         await chrome.storage.local.set({ [mappingKey]: analysisStorageKey });
                         log.info(`[Play] Stored mapping: ${mappingKey} → ${analysisStorageKey}`);
+                        
+                        // Also store reverse mapping: modified endpoint → original storage key
+                        // This ensures Launch Fuzzer can find the report even if URL was modified
+                        const modifiedEndpointKey = getStorageKeyForUrl(modifiedUrl);
+                        if (modifiedEndpointKey !== endpointKey) {
+                            const reverseMappingKey = `analyzed-url-for-${modifiedEndpointKey}`;
+                            await chrome.storage.local.set({ [reverseMappingKey]: analysisStorageKey });
+                            log.info(`[Play] Stored reverse mapping: ${reverseMappingKey} → ${analysisStorageKey}`);
+                        }
                         
                         // ⚠️ Update cspResult so the next check passes
                         cspResult = retryResult;
@@ -3392,13 +3460,41 @@ async function handlePlayButton(endpoint, button, skipCheck = false, silentMode 
 
                     if (potentialHandlers && potentialHandlers.length > 0) {
                         log.info(`[Slim Fallback] Found ${potentialHandlers.length} handlers via AST analysis`);
-                        foundHandlerObject = extractor.getBestHandler(potentialHandlers);
                         
-                        if (foundHandlerObject) {
-                            log.info(`[Slim Fallback] Selected best handler via scoring`);
-                            if (!hideFromUser) {
-                                showToastNotification(`✅ Handler found via fallback`, "success", 3000);
+                        // Filter out noise handlers but keep score 0 handlers (might be valid)
+                        const validHandlers = potentialHandlers.filter(h => {
+                            return h.category && !h.category.includes('noise-filter') && h.handler && h.handler.length > 0;
+                        });
+                        
+                        if (validHandlers.length > 0) {
+                            foundHandlerObject = extractor.getBestHandler(validHandlers);
+                            
+                            // If best handler has score 0 or was filtered out, use first valid handler
+                            if (!foundHandlerObject || foundHandlerObject.score === 0) {
+                                const messageCount = getMessageCount(originalFullEndpoint);
+                                // For zombie endpoints (0 messages), accept score 0 handlers
+                                if (messageCount === 0 && validHandlers.length > 0) {
+                                    const fallbackHandler = validHandlers[0];
+                                    foundHandlerObject = {
+                                        handler: fallbackHandler.code || fallbackHandler.handler,
+                                        code: fallbackHandler.code || fallbackHandler.handler,
+                                        source: 'slim-fallback-zombie',
+                                        score: 50, // Minimum score
+                                        category: fallbackHandler.category || 'zombie-fallback'
+                                    };
+                                    log.info(`[Slim Fallback] Accepted low-score handler for zombie endpoint`);
+                                }
                             }
+                            
+                            if (foundHandlerObject) {
+                                log.info(`[Slim Fallback] Selected best handler via scoring`);
+                                if (!hideFromUser) {
+                                    showToastNotification(`✅ Handler found via fallback`, "success", 3000);
+                                }
+                            }
+                        } else {
+                            log.warn("[Play] Slim fallback found handlers but all filtered as noise");
+                            foundHandlerObject = null;
                         }
                     } else {
                         log.warn("[Play] Slim fallback found no handlers");
@@ -3409,49 +3505,236 @@ async function handlePlayButton(endpoint, button, skipCheck = false, silentMode 
                     }
                 }
                 
-                // ZOMBIE ENDPOINT EXTRACTION: If no handler found, check if this is a zombie endpoint (0 messages)
+                // ZOMBIE ENDPOINT EXTRACTION: Enhanced multi-strategy handler discovery
                 if (!foundHandlerObject) {
                     const messageCount = getMessageCount(originalFullEndpoint);
                     if (messageCount === 0) {
-                        log.info('[Play] Zombie endpoint detected (0 messages). Attempting extraction...');
+                        log.info('[Play] Zombie endpoint detected (0 messages). Attempting enhanced extraction...');
                         
                         if (!hideFromUser) {
                             updateButton(button, 'analyze', { message: 'Zombie endpoint - extracting...' });
                             showToastNotification('🧟 Zombie endpoint - attempting handler extraction...', 'info', 3000);
                         }
                         
-                        // Strategy: Static AST analysis for zombie endpoints
+                        // STRATEGY 1: Proactive DOM Agent Injection & Wait
+                        // Inject DOM agent into a hidden iframe and wait for handlers to register
                         try {
-                            log.info('[Zombie] Attempting static AST analysis...');
-                            
-                            const zombieExtractor = new HandlerExtractor();
-                            const staticHandlers = await zombieExtractor.extractStaticallyWithContext(
-                                originalFullEndpoint, 
-                                new Set(), // no message keys
-                                new Set(), // no message types
-                                new Set()  // no message values
-                            );
-                            
-                            if (staticHandlers && staticHandlers.length > 0) {
-                                const bestStatic = zombieExtractor.getBestHandler(staticHandlers);
-                                if (bestStatic) {
-                                    foundHandlerObject = {
-                                        handler: bestStatic.code,
-                                        code: bestStatic.code,
-                                        source: 'static-ast-zombie',
-                                        score: bestStatic.score || 50,
-                                        category: 'static-zombie'
+                            log.info('[Zombie] Strategy 1: Proactive DOM agent injection...');
+                            const zombieHandler = await new Promise(async (resolve) => {
+                                let handlerFound = false;
+                                const timeout = setTimeout(() => {
+                                    if (!handlerFound) resolve(null);
+                                }, 5000); // Wait up to 5 seconds - multiple cache checks catch late handlers
+                                
+                                // Listen for handler detection messages from background script
+                                const handlerListener = (msg) => {
+                                    if (msg?.type === 'realTimeHandlerDetected' || msg?.type === 'handler-detected') {
+                                        const payload = msg.payload || msg;
+                                        const handlerUrl = payload?.location || payload?.windowId;
+                                        const normalizedHandlerUrl = normalizeEndpointUrl(handlerUrl);
+                                        const normalizedTarget = normalizeEndpointUrl(successfullyAnalyzedUrl);
+                                        
+                                        // Match by normalized URL (origin + pathname)
+                                        if (normalizedHandlerUrl && normalizedTarget &&
+                                            normalizedHandlerUrl.components && normalizedTarget.components &&
+                                            normalizedHandlerUrl.components.origin === normalizedTarget.components.origin &&
+                                            normalizedHandlerUrl.components.path === normalizedTarget.components.path) {
+                                            handlerFound = true;
+                                            clearTimeout(timeout);
+                                            chrome.runtime.onMessage.removeListener(handlerListener);
+                                            
+                                            const handlerCode = payload?.handler?.code || payload?.handler || payload?.code;
+                                            if (handlerCode) {
+                                                resolve({
+                                                    handler: handlerCode,
+                                                    code: handlerCode,
+                                                    source: 'zombie-dom-agent',
+                                                    score: 900,
+                                                    category: 'zombie-dom-capture'
+                                                });
+                                            } else {
+                                                resolve(null);
+                                            }
+                                        }
+                                    }
+                                };
+                                chrome.runtime.onMessage.addListener(handlerListener);
+                                
+                                // Check handler cache directly (with multiple retries)
+                                const checkCache = async (attempt = 0) => {
+                                    if (handlerFound) return;
+                                    
+                                    const response = await new Promise((resolve) => {
+                                        chrome.runtime.sendMessage({
+                                            type: 'getPreExtractedHandler',
+                                            payload: { endpointKey: analysisStorageKey }
+                                        }, resolve);
+                                    });
+                                    
+                                    if (response?.success && response?.handler) {
+                                        handlerFound = true;
+                                        clearTimeout(timeout);
+                                        chrome.runtime.onMessage.removeListener(handlerListener);
+                                        resolve({
+                                            handler: response.handler.handler || response.handler.code,
+                                            code: response.handler.handler || response.handler.code,
+                                            source: 'zombie-dom-agent',
+                                            score: 900,
+                                            category: 'zombie-dom-capture'
+                                        });
+                                    } else if (attempt < 3) {
+                                        // Retry cache check with shorter intervals (max 3 retries)
+                                        // Total time: 0s, 1.5s, 3s, 4.5s = ~4.5s max, well within 5s timeout
+                                        setTimeout(() => checkCache(attempt + 1), 1500);
+                                    }
+                                };
+                                
+                                // Initial cache check
+                                checkCache();
+                                
+                                // Create hidden iframe and inject DOM agent
+                                try {
+                                    const iframe = document.createElement('iframe');
+                                    iframe.style.display = 'none';
+                                    iframe.style.width = '1px';
+                                    iframe.style.height = '1px';
+                                    iframe.src = successfullyAnalyzedUrl;
+                                    iframe.onload = () => {
+                                        log.debug('[Zombie] Iframe loaded, waiting for handler detection...');
+                                        // Give DOM agent time to inject and scan - retry cache checks at intervals
+                                        setTimeout(() => checkCache(0), 1500);
+                                        setTimeout(() => checkCache(1), 3000);
+                                        setTimeout(() => checkCache(2), 4500);
                                     };
-                                    log.success('[Zombie] Handler extracted via static analysis');
-                                    if (!hideFromUser) {
-                                        showToastNotification('✅ Zombie handler extracted', 'success', 3000);
+                                    document.body.appendChild(iframe);
+                                    
+                                    // Cleanup after timeout
+                                    setTimeout(() => {
+                                        if (!handlerFound) {
+                                            try { iframe.remove(); } catch(e) {}
+                                        }
+                                    }, 6000);
+                                } catch (iframeError) {
+                                    log.warn('[Zombie] Iframe injection failed:', iframeError);
+                                }
+                            });
+                            
+                            if (zombieHandler) {
+                                foundHandlerObject = zombieHandler;
+                                log.success('[Zombie] Handler extracted via DOM agent injection');
+                                if (!hideFromUser) {
+                                    showToastNotification('✅ Zombie handler extracted via DOM agent', 'success', 3000);
+                                }
+                            }
+                        } catch (domAgentError) {
+                            log.warn('[Zombie] DOM agent injection failed:', domAgentError);
+                        }
+                        
+                        // STRATEGY 2: Debugger API Scanning (if enabled)
+                        if (!foundHandlerObject) {
+                            try {
+                                const debuggerModeResult = await chrome.storage.local.get(['debuggerApiModeEnabled']);
+                                if (debuggerModeResult?.debuggerApiModeEnabled) {
+                                    log.info('[Zombie] Strategy 2: Debugger API scanning...');
+                                    
+                                    // Request background script to use debugger API
+                                    const debuggerResult = await new Promise((resolve) => {
+                                        chrome.runtime.sendMessage({
+                                            type: 'zombieDebuggerScan',
+                                            payload: { url: successfullyAnalyzedUrl, endpointKey: analysisStorageKey }
+                                        }, (response) => {
+                                            resolve(response);
+                                        });
+                                        
+                                        // Timeout after 8 seconds
+                                        setTimeout(() => {
+                                            if (!resolve.called) {
+                                                resolve.called = true;
+                                                resolve({ success: false, error: 'Timeout' });
+                                            }
+                                        }, 8000);
+                                    });
+                                    
+                                    if (debuggerResult?.success && debuggerResult?.handler) {
+                                        foundHandlerObject = {
+                                            handler: debuggerResult.handler.code || debuggerResult.handler,
+                                            code: debuggerResult.handler.code || debuggerResult.handler,
+                                            source: 'zombie-debugger-api',
+                                            score: 850,
+                                            category: 'zombie-debugger-capture'
+                                        };
+                                        log.success('[Zombie] Handler extracted via debugger API');
+                                        if (!hideFromUser) {
+                                            showToastNotification('✅ Zombie handler extracted via debugger', 'success', 3000);
+                                        }
                                     }
                                 }
-                            } else {
-                                log.warn('[Zombie] Static analysis found no handlers');
+                            } catch (debuggerError) {
+                                log.warn('[Zombie] Debugger API scan failed:', debuggerError);
                             }
-                        } catch (zombieError) {
-                            log.error('[Zombie] Static analysis failed:', zombieError);
+                        }
+                        
+                        // STRATEGY 3: Enhanced Static AST Analysis
+                        if (!foundHandlerObject) {
+                            try {
+                                log.info('[Zombie] Strategy 3: Enhanced static AST analysis...');
+                                
+                                const zombieExtractor = new HandlerExtractor();
+                                const staticHandlers = await zombieExtractor.extractStaticallyWithContext(
+                                    successfullyAnalyzedUrl, 
+                                    new Set(), // no message keys
+                                    new Set(), // no message types
+                                    new Set()  // no message values
+                                );
+                                
+                                if (staticHandlers && staticHandlers.length > 0) {
+                                    // For zombie endpoints, accept ANY handler found (even score 0)
+                                    // Filter out noise but keep handlers with score 0
+                                    const validHandlers = staticHandlers.filter(h => {
+                                        // Keep handlers that aren't marked as noise
+                                        return h.category && !h.category.includes('noise-filter') && h.handler && h.handler.length > 0;
+                                    });
+                                    
+                                    if (validHandlers.length > 0) {
+                                        // Get best handler, but if score is 0, still accept it for zombie mode
+                                        const bestStatic = zombieExtractor.getBestHandler(validHandlers);
+                                        
+                                        // If best handler was filtered out (score 0), use first valid handler
+                                        if (!bestStatic || bestStatic.score === 0) {
+                                            const fallbackHandler = validHandlers[0];
+                                            if (fallbackHandler) {
+                                                foundHandlerObject = {
+                                                    handler: fallbackHandler.code || fallbackHandler.handler,
+                                                    code: fallbackHandler.code || fallbackHandler.handler,
+                                                    source: 'zombie-static-ast',
+                                                    score: 50, // Minimum score for zombie handlers
+                                                    category: 'zombie-static-analysis'
+                                                };
+                                                log.success('[Zombie] Handler extracted via static analysis (accepted low-score handler)');
+                                                if (!hideFromUser) {
+                                                    showToastNotification('✅ Zombie handler extracted via static analysis', 'success', 3000);
+                                                }
+                                            }
+                                        } else if (bestStatic) {
+                                            foundHandlerObject = {
+                                                handler: bestStatic.code,
+                                                code: bestStatic.code,
+                                                source: 'zombie-static-ast',
+                                                score: bestStatic.score || 50,
+                                                category: 'zombie-static-analysis'
+                                            };
+                                            log.success('[Zombie] Handler extracted via static analysis');
+                                            if (!hideFromUser) {
+                                                showToastNotification('✅ Zombie handler extracted via static analysis', 'success', 3000);
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    log.warn('[Zombie] Static analysis found no handlers');
+                                }
+                            } catch (zombieError) {
+                                log.error('[Zombie] Static analysis failed:', zombieError);
+                            }
                         }
                         
                         if (!foundHandlerObject) {
@@ -5383,21 +5666,28 @@ async function restoreLastReport(endpointKey) {
   try {
     if (!endpointKey) return;
     
-    console.log(`🔄 [Restore] Checking for saved report for ${endpointKey}`);
+    // Only log when debug mode is enabled (reduce console spam)
+    if (debugMode) {
+      log.debug(`[Restore] Checking for saved report for ${endpointKey}`);
+    }
+    
     const stored = await window.traceReportStorage.getTraceReport(endpointKey);
     const payloads = await window.traceReportStorage.getReportPayloads(endpointKey);
     
     if (stored && stored.details && stored.timestamp) {
-      console.log(`🎨 [Restore] Rendering saved report from ${new Date(stored.timestamp).toLocaleString()}`);
+      log.info(`[Restore] Rendering saved report from ${new Date(stored.timestamp).toLocaleString()}`);
       renderReportUI(stored, payloads || []);
     } else {
-      console.log(`ℹ️ [Restore] No saved report found for ${endpointKey}.`);
+      // Only log when debug mode is enabled (reduce console spam)
+      if (debugMode) {
+        log.debug(`[Restore] No saved report found for ${endpointKey}.`);
+      }
       const reportContent = document.getElementById('report-content');
       if (reportContent) {
       }
     }
   } catch (e) {
-    console.warn('⚠️ [Restore] Restore report failed', e);
+    log.warn('[Restore] Restore report failed', e);
   }
 }
 
