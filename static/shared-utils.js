@@ -1,7 +1,7 @@
 /**
  * FrogPost Extension - Shared Utilities
  * Created: 2025-10-22
- * Purpose: Centralized utility functions to reduce code duplication
+ * Refined on: 2025-11-15 * Purpose: Centralized utility functions to reduce code duplication
  */
 
 /**

@@ -2,7 +2,7 @@
  * FrogPost Performance Utilities
  * Shared optimization functions for debouncing, throttling, and caching
  * Created: 2025-10-24
- */
+ * Refined on: 2025-11-15 */
 
 /**
  * Debounce function - delays execution until after wait time has elapsed
