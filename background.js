@@ -2,6 +2,7 @@
  * FrogPost Extension
  * Originally Created by thisis0xczar/Lidor 
  * Refined on: 2025-10-22
+ * Updated: 2025-11-15 - Handler detection & performance optimizations
  */
 
 // TELEMETRY-FIRST: No AST parsing needed

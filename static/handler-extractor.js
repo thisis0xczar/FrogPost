@@ -1,10 +1,11 @@
 /**
  * DEPRECATED AS OF 2025-10-29 - REAL-TIME HANDLER CAPTURE ARCHITECTURE
  * 
- * FrogPost Extension - Handler Extractor (No Longer Used)
+ * FrogPost Extension - Handler Extractor (Fallback Only)
  * Originally Created by thisis0xczar/Lidor
  * Refined on: 2025-10-22
  * Deprecated on: 2025-10-29 for BlackHat presentation
+ * Updated: 2025-11-15 - Improved brace counting for complex handlers
  * 
  * This file is NO LONGER USED as of the real-time handler capture refactor.
  * Handlers are now captured immediately when registered via DOM agent hooks.

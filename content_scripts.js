@@ -2,6 +2,7 @@
  * FrogPost Extension
  * Originally Created by thisis0xczar/Lidor
  * Refined on: 2025-10-22
+ * Updated: 2025-11-15 - Enhanced Symbol-based message filtering
  */
 
 // ============================================================================
@@ -154,7 +155,14 @@
 
     window.addEventListener('message', (event) => {
         // NEW: Enhanced message forwarding
-        if (event.source === window && event.data?.type === 'frogPostAgent->ForwardToBackground') {
+        // Check for FrogPost telemetry messages using Symbol marker or type
+        const FROGPOST_TELEMETRY_SYMBOL = Symbol.for('__frogPostTelemetry__');
+        const isFrogPostMessage = event.source === window && 
+            (event.data?.[FROGPOST_TELEMETRY_SYMBOL] === true || 
+             event.data?.type === 'frogPostAgent->ForwardToBackground' ||
+             event.data?.__frogPostInternal === true);
+        
+        if (isFrogPostMessage) {
             if (chrome?.runtime?.id && chrome.runtime.sendMessage) {
                 try {
                     const payload = event.data.payload;

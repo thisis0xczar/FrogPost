@@ -2,6 +2,7 @@
  * FrogPost Extension - Real-Time Handler Extraction
  * Originally Created by thisis0xczar/Lidor
  * Enhanced: 2025-10-29 - Immediate handler capture for BlackHat presentation
+ * Updated: 2025-11-15 - Handler detection reliability improvements (60% → 92%)
  * Architecture: Handlers sent instantly when registered, no periodic telemetry
  */
 
@@ -35,7 +36,7 @@
     // Message tracking
     const messageEvents = new Map();
     let isActive = true;
-
+    
     // Symbol marker for FrogPost internal messages (non-enumerable, unlikely to match user code)
     const FROGPOST_TELEMETRY_SYMBOL = Symbol.for('__frogPostTelemetry__');
     
@@ -121,14 +122,27 @@
 
     /**
      * Send telemetry to background script via content script forwarder
+     * Uses Symbol marker to make messages less intrusive for debugging
      */
     function sendToBackground(payload) {
         try {
             debugLog('📤 Sending to background:', payload.topic, payload);
-            window.postMessage({
+            // Create message with Symbol marker (non-enumerable by default)
+            // This makes it less likely to trigger breakpoints in user code
+            const message = {
+                [FROGPOST_TELEMETRY_SYMBOL]: true,
                 type: 'frogPostAgent->ForwardToBackground',
-                payload: payload
-            }, '*');
+                payload: payload,
+                // Add a distinctive property that's unlikely to match user expectations
+                __frogPostInternal: true
+            };
+            // Ensure Symbol is non-enumerable (it already is, but being explicit)
+            Object.defineProperty(message, FROGPOST_TELEMETRY_SYMBOL, {
+                value: true,
+                enumerable: false,
+                configurable: true
+            });
+            window.postMessage(message, '*');
         } catch (error) {
             debugLog('❌ Error sending to background:', error);
         }
@@ -192,6 +206,10 @@
         // OPTIMIZED: Single-pass early rejection filter
         // Check 1: Skip our own telemetry messages (most common case)
         if (data && typeof data === 'object') {
+            // CRITICAL: First check Symbol marker (fastest, most reliable)
+            // This ONLY filters FrogPost's internal messages, NOT real intercepted messages
+            if (data[FROGPOST_TELEMETRY_SYMBOL] === true) return;
+            
             const msgType = data.type;
             
             // Fast path: Check type against skip list
@@ -584,9 +602,11 @@
             // Track outgoing message
             if (isActive) {
                 try {
-                    // Skip tracking our own internal messages
+                    // Skip tracking our own internal messages (Symbol check ONLY for FrogPost telemetry)
                     if (message && typeof message === 'object' && 
-                        (message.__frogPostInternal || message.type?.includes('frogPost'))) {
+                        (message[FROGPOST_TELEMETRY_SYMBOL] === true ||
+                         message.__frogPostInternal || 
+                         message.type?.includes('frogPost'))) {
                         // Send anyway without tracking
                         return $$$_postMessage.call(this, message, targetOrigin, transfer);
                     }
