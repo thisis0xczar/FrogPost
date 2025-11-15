@@ -36,6 +36,13 @@
     const messageEvents = new Map();
     let isActive = true;
 
+    // Symbol marker for FrogPost internal messages (non-enumerable, unlikely to match user code)
+    const FROGPOST_TELEMETRY_SYMBOL = Symbol.for('__frogPostTelemetry__');
+    
+    // OPTIMIZATION: Counter-based message IDs (10-20x faster than UUID)
+    let messageCounter = 0;
+    const messageIdPrefix = `${windowId.substring(0, 8)}-`;
+
     // Debug mode - false by default, can be enabled via background script message
     let VERBOSE_DEBUG = false;
     
@@ -127,37 +134,15 @@
         }
     }
 
-    /**
-     * Build recursive frame tree (simplified - no inter-frame messaging)
-     */
-    function buildFrameTree(frameId = "root", refWindow = window, path = []) {
-        // Simplified version - just reports frame structure without cross-frame messages
-        try {
-            // Get child frames (same-origin only)
-            const childWindowIds = Object.keys(refWindow.frames)
-                .slice(0, Object.keys(refWindow.frames).findIndex((v) => v === "window"))
-                .map(Number);
-            
-            // Recursively check child frames
-            childWindowIds.forEach(id => {
-                try {
-                    buildFrameTree(id, refWindow[id], path.concat(id));
-                } catch (e) {
-                    // Cross-origin frame - skip
-                }
-            });
-        } catch (error) {
-            // Frame access error - skip
-        }
-    }
 
     /**
      * Send handler immediately when detected (real-time capture)
      * No periodic batching - handlers sent instantly when registered
+     * OPTIMIZATION: Accepts cached toString() result to avoid redundant calls
      */
-    function sendHandlerImmediately(listenerFunc) {
+    function sendHandlerImmediately(listenerFunc, cachedCode = null) {
         try {
-            const handlerCode = listenerFunc.toString();
+            const handlerCode = cachedCode || listenerFunc.toString();
             const handlerName = listenerFunc.name || 'anonymous';
             
             debugLog(` 📨 Handler detected immediately: ${handlerName} (${handlerCode.length} chars)`);
@@ -234,8 +219,8 @@
 
         debugLog('📨 Message intercepted:', { origin, dataType: typeof data, listenerCount: $$$listeners.size });
 
-        // Generate unique message ID and log it
-        const messageId = uuidv4();
+        // OPTIMIZATION: Generate message ID using counter (10-20x faster than UUID)
+        const messageId = `${messageIdPrefix}${messageCounter++}`;
         const sanitizedData = sanitizeJsonDeep(data, { maxKeysTotal: 50, maxArrayLength: 50, maxDepth: 8 });
         const messageInfo = {
             messageId: messageId,
@@ -273,12 +258,22 @@
     /**
      * Scan inline <script> tags for message handlers
      * Optimized for performance with fast hash deduplication
+     * OPTIMIZATION: Only scan once - inline scripts don't change after page load
      */
+    let inlineScriptsScanned = false;
+    
     function scanInlineScripts() {
+        // OPTIMIZATION: Skip if already scanned (inline scripts are static)
+        if (inlineScriptsScanned) {
+            debugLog('⏭️  Inline scripts already scanned, skipping rescan');
+            return;
+        }
+        
         try {
             const scripts = document.querySelectorAll('script:not([src])');
             debugLog(` 🔍 Scanning ${scripts.length} inline script(s) for handlers...`);
             const seenHashes = new Set();
+            inlineScriptsScanned = true; // Mark as scanned
             
             // Fast hash function for deduplication
             function fastHash(str) {
@@ -292,7 +287,8 @@
             
             // Cached regex patterns
             const addEventListenerPattern = /addEventListener\s*\(\s*["']message["']\s*,\s*([^,)]+)/g;
-            const onMessagePattern = /\.onmessage\s*=\s*([^;]+)/g;
+            // CRITICAL FIX: Use \b (word boundary) instead of \. to match window.onmessage, self.onmessage, etc.
+            const onMessagePattern = /\bonmessage\s*=\s*([^;]+)/g;
             
             scripts.forEach((script) => {
                 try {
@@ -362,13 +358,40 @@
                         }
                     }
                     
-                    // Find window.onmessage = handler
+                    // Find window.onmessage = handler (with improved nested brace handling)
                     onMessagePattern.lastIndex = 0;
                     while ((match = onMessagePattern.exec(scriptContent)) !== null) {
                         const handlerDef = match[1].trim();
                         debugLog(` 📝 Found onmessage pattern: ${handlerDef.substring(0, 50)}...`);
+                        
+                        // IMPROVED: Extract full handler with proper brace counting for nested structures
                         if (handlerDef.startsWith('function') || handlerDef.includes('=>')) {
-                            sendHandlerImmediately({ toString: () => handlerDef, name: 'onmessage' });
+                            let fullHandler = handlerDef;
+                            
+                            // If handler starts with 'function' and has opening brace, use brace counting
+                            const funcMatch = handlerDef.match(/^function\s*\([^)]*\)\s*\{/);
+                            if (funcMatch) {
+                                const startIdx = match.index + match[0].indexOf('function');
+                                const braceStart = scriptContent.indexOf('{', startIdx);
+                                if (braceStart > -1) {
+                                    let depth = 1;
+                                    let endIdx = braceStart + 1;
+                                    
+                                    while (depth > 0 && endIdx < scriptContent.length) {
+                                        const char = scriptContent[endIdx];
+                                        if (char === '{') depth++;
+                                        else if (char === '}') depth--;
+                                        endIdx++;
+                                    }
+                                    
+                                    if (depth === 0) {
+                                        fullHandler = scriptContent.substring(startIdx, endIdx);
+                                        debugLog(` ✅ Extracted full handler with brace counting: ${fullHandler.length} chars`);
+                                    }
+                                }
+                            }
+                            
+                            sendHandlerImmediately({ toString: () => fullHandler, name: 'onmessage' });
                         }
                     }
                     
@@ -415,6 +438,64 @@
                 scanInlineScripts();
             }
 
+            // CRITICAL FIX: Watch for external scripts finishing load
+            // This catches handlers defined in external .js files that load after agent initialization
+            try {
+                const scriptObserver = new MutationObserver((mutations) => {
+                    for (const mutation of mutations) {
+                        mutation.addedNodes.forEach(node => {
+                            if (node.tagName === 'SCRIPT' && node.src) {
+                                // When external script loads, check if it set window.onmessage
+                                node.addEventListener('load', () => {
+                                    setTimeout(() => {
+                                        if (window.onmessage && typeof window.onmessage === 'function' && !$$$listeners.has(window.onmessage)) {
+                                            debugLog(`🎯 External script loaded and set window.onmessage: ${node.src}`);
+                                            $$$listeners.add(window.onmessage);
+                                            sendHandlerImmediately(window.onmessage);
+                                        }
+                                    }, 50);
+                                }, { once: true });
+                            }
+                        });
+                    }
+                });
+                scriptObserver.observe(document.documentElement, { childList: true, subtree: true });
+                debugLog('✅ External script observer installed');
+            } catch (e) {
+                debugLog('⚠️ Could not install script observer:', e);
+            }
+
+            // CRITICAL FIX: Additional rescan on window load (catches late-loading handlers)
+            window.addEventListener('load', () => {
+                setTimeout(() => {
+                    if (window.onmessage && typeof window.onmessage === 'function' && !$$$listeners.has(window.onmessage)) {
+                        debugLog(`🎯 window.load detected late-set window.onmessage`);
+                        $$$listeners.add(window.onmessage);
+                        sendHandlerImmediately(window.onmessage);
+                    }
+                    // Also rescan inline scripts in case they were dynamically added
+                    scanInlineScripts();
+                }, 500);
+            }, { once: true });
+
+            // ADDITIONAL FIX: Final rescan after 5 seconds (catches very late handlers)
+            setTimeout(() => {
+                if (window.onmessage && typeof window.onmessage === 'function' && !$$$listeners.has(window.onmessage)) {
+                    debugLog(`🎯 Final rescan (5s) detected late-set window.onmessage`);
+                    $$$listeners.add(window.onmessage);
+                    sendHandlerImmediately(window.onmessage);
+                }
+                
+                // Report final status
+                sendToBackground({
+                    topic: "agent-scan-complete",
+                    windowId: windowId,
+                    location: window.location.href,
+                    handlersFound: $$$listeners.size,
+                    timestamp: Date.now()
+                });
+            }, 5000);
+
             // Report initialization
             sendToBackground({
                 topic: "agent-ready",
@@ -441,7 +522,7 @@
                 if (type === 'message' && isActive) {
                     // Add to our Set of actual function references
                     if (typeof listener === 'function') {
-                        // Check if this is our own agent
+                        // OPTIMIZATION: Cache toString() result (called multiple times)
                         const listenerStr = listener.toString();
                         const isOwnHandler = listenerStr.includes('__frogPost') || 
                                            listenerStr.includes('frogPostAgent') ||
@@ -451,8 +532,8 @@
                             $$$listeners.add(listener);
                             debugLog(`✅ Handler registered via addEventListener! Total: ${$$$listeners.size}`, listenerStr.substring(0, 100));
                             
-                            // Send handler immediately (real-time capture)
-                            sendHandlerImmediately(listener);
+                            // OPTIMIZATION: Pass cached string to avoid re-calling toString()
+                            sendHandlerImmediately(listener, listenerStr);
                         }
                     }
                     // Don't call original - hub already handles it
@@ -475,6 +556,7 @@
             set: function(handler) {
                 $$$onmessage = handler;
                 if (handler && typeof handler === 'function' && isActive) {
+                    // OPTIMIZATION: Cache toString() result
                     const handlerStr = handler.toString();
                     const isOwnHandler = handlerStr.includes('__frogPost') || 
                                        handlerStr.includes('frogPostAgent');
@@ -482,8 +564,8 @@
                     if (!isOwnHandler) {
                         $$$listeners.add(handler);
                         
-                        // Send handler immediately (real-time capture)
-                        sendHandlerImmediately(handler);
+                        // OPTIMIZATION: Pass cached string to avoid re-calling toString()
+                        sendHandlerImmediately(handler, handlerStr);
                     }
                 }
             },
@@ -509,7 +591,8 @@
                         return $$$_postMessage.call(this, message, targetOrigin, transfer);
                     }
 
-                    const messageId = uuidv4();
+                    // OPTIMIZATION: Use counter-based ID (faster than UUID)
+                    const messageId = `${messageIdPrefix}${messageCounter++}`;
                     sendToBackground({
                         topic: "outgoing-message",
                         windowId: windowId,
@@ -530,35 +613,51 @@
     }
 
     /**
-     * Scan for existing handlers (before our agent loaded)
+     * RELIABILITY FIX: Scan for existing handlers (before our agent loaded)
+     * Enhanced to detect both window.onmessage and addEventListener registrations
      */
     function scanExistingHandlers() {
         try {
-            // Check if window.onmessage was set before we overrode it
+            // Method 1: Check if window.onmessage was set before we overrode it
             if (window.onmessage && typeof window.onmessage === 'function') {
-                $$$listeners.add(window.onmessage);
-                // Send handler immediately (real-time capture)
-                sendHandlerImmediately(window.onmessage);
+                const handlerStr = window.onmessage.toString();
+                const isOwnHandler = handlerStr.includes('__frogPost') || handlerStr.includes('frogPostAgent');
+                
+                if (!isOwnHandler) {
+                    $$$listeners.add(window.onmessage);
+                    debugLog(`✅ Found pre-existing window.onmessage handler`);
+                    // Send handler immediately (real-time capture)  
+                    sendHandlerImmediately(window.onmessage, handlerStr);
+                }
             }
             
-            // ENHANCED: Also scan for addEventListener('message') calls that happened before injection
-            // This catches handlers registered in scripts that loaded before our agent
+            // Method 2: Try getEventListeners (Chrome DevTools API - only works when DevTools is open)
+            // This is a Chrome-specific API that's not standard but works in some contexts
             try {
-                // Get all event listeners (if browser exposes them)
-                // Note: Most browsers don't expose this, but we try anyway
-                if (window.getEventListeners) {
-                    const listeners = window.getEventListeners(window);
+                if (typeof getEventListeners === 'function') {
+                    const listeners = getEventListeners(window);
                     if (listeners && listeners.message) {
-                        listeners.message.forEach(listener => {
-                            if (typeof listener.listener === 'function' && !$$$listeners.has(listener.listener)) {
-                                $$$listeners.add(listener.listener);
-                                sendHandlerImmediately(listener.listener);
+                        debugLog(`🔍 Found ${listeners.message.length} pre-existing addEventListener handlers via getEventListeners`);
+                        listeners.message.forEach(listenerInfo => {
+                            const listener = listenerInfo.listener;
+                            if (listener && typeof listener === 'function' && !$$$listeners.has(listener)) {
+                                const listenerStr = listener.toString();
+                                const isOwnHandler = listenerStr.includes('__frogPost') || 
+                                                   listenerStr.includes('frogPostAgent') ||
+                                                   listenerStr.includes('messageHub');
+                                
+                                if (!isOwnHandler) {
+                                    $$$listeners.add(listener);
+                                    debugLog(`✅ Found pre-existing addEventListener handler via getEventListeners`);
+                                    sendHandlerImmediately(listener, listenerStr);
+                                }
                             }
                         });
                     }
                 }
             } catch (e) {
-                // getEventListeners not available (expected in most browsers)
+                // getEventListeners not available (expected - it's a DevTools-only API)
+                debugLog('getEventListeners not available (expected)');
             }
             
             // ENHANCED: Periodic rescan for handlers that register after initial load

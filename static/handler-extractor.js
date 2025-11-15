@@ -329,309 +329,6 @@ class HandlerExtractor {
         // Acorn AST parsing removed - no longer used
         const foundHandlers = [];
         return foundHandlers;
-        /* DEPRECATED:
-        if (!ast || typeof acorn === 'undefined' || typeof acorn.walk === 'undefined') return foundHandlers;
-
-        const SCHEDULER_KEYWORDS = ['unstable_now', 'MessageChannel', 'requestAnimationFrame', 'setImmediate', 'setTimeout', 'setInterval'];
-        const VERIFIER_KEYWORDS = /verify|validate|check|authenticate/i;
-        const CALLBACK_MAP_KEYWORDS = /callback|handler|listener/i;
-        const COMMON_DATA_FIELDS = new Set(['type', 'action', 'kind', 'msgType', 'message', 'payload', 'data', 'id', 'command', 'event']);
-        const MAX_RECURSION_DEPTH = 4;
-
-        const quickScanForPatternsRecursive = (node, eventParamName, currentDepth, visitedNodes = new Set()) => {
-            let flags = {
-                callsVerifier: false, usesCallbackMap: false, accessesEventDataConditionally: false,
-                accessesEventOriginConditionally: false, looksLikeScheduler: false, mentionsPostMessageNull: false,
-                usesSwitchOnEventData: false, accessesCommonDataFields: 0, accessesAnyDataField: false,
-                accessesOriginField: false, hasStrongSignal: false
-            };
-
-            if (!node || !node.body || currentDepth > MAX_RECURSION_DEPTH || visitedNodes.has(node)) {
-                return flags;
-            }
-            visitedNodes.add(node);
-            this._log(3, 'debug', `[quickScanRec] Depth ${currentDepth}, Scanning node type ${node.type}`);
-
-
-            try {
-                if (!node || !node.body) {
-                    return flags;
-                }
-                acorn.walk.simple(node.body, {
-                    CallExpression: (callNode) => {
-                        try {
-                            if (!callNode) return;
-                            let calleeName = null;
-                            let resolvedCalleeDef = null;
-                            const args = this._prop(callNode, 'arguments') || [];
-                            const callee = this._prop(callNode, 'callee');
-
-                            let isPassedEventArg = Array.isArray(args) && args.some(arg => arg?.type === 'Identifier' && arg?.name === eventParamName);
-
-                            if (callee?.type === 'Identifier') {
-                                calleeName = this._prop(callee, 'name');
-                                if (calleeName) {
-                                    resolvedCalleeDef = this.functionDefinitions.get(calleeName);
-                                    if (resolvedCalleeDef) this._log(3, 'debug', `[quickScanRec] Depth ${currentDepth}: Found direct call to '${calleeName}', Definition found: ${!!resolvedCalleeDef.node}`);
-                                }
-                            } else if (callee?.type === 'MemberExpression') {
-                                const calleeProp = this._prop(callee, 'property');
-                                if (calleeProp?.type === 'Identifier') {
-                                    calleeName = this._prop(calleeProp, 'name');
-                                    const objExpr = this._prop(callee, 'object');
-                                    let objName = null;
-
-                                    if(objExpr?.type === 'ThisExpression') objName = 'this';
-                                    else if (objExpr?.type === 'Identifier') objName = this._prop(objExpr, 'name');
-
-                                    if (objName && calleeName) {
-                                        const lookupKey = `${objName}.${calleeName}`;
-                                        resolvedCalleeDef = this.functionDefinitions.get(lookupKey);
-                                        this._log(3, 'debug', `[quickScanRec] Depth ${currentDepth}: Found method call '${lookupKey}', Definition found: ${!!resolvedCalleeDef?.node}`);
-
-                                        if (!resolvedCalleeDef) {
-                                            const protoKey = Array.from(this.functionDefinitions.keys()).find(key => key.endsWith(`.${calleeName}`) && this.functionDefinitions.get(key)?.type === 'prototype');
-                                            if(protoKey) {
-                                                resolvedCalleeDef = this.functionDefinitions.get(protoKey);
-                                                this._log(3, 'debug', `[quickScanRec] Depth ${currentDepth}: Found potential prototype method '${calleeName}' via key '${protoKey}', Definition found: ${!!resolvedCalleeDef?.node}`);
-                                            }
-                                        }
-                                    } else {
-                                        this._log(3, 'debug', `[quickScanRec] Depth ${currentDepth}: Method call '${calleeName || 'unknown'}' on complex object type '${objExpr?.type || 'unknown'}', skipping lookup.`);
-                                    }
-                                }
-                            }
-
-                            if (calleeName) {
-                                if (VERIFIER_KEYWORDS.test(calleeName)) flags.callsVerifier = true;
-                                if (SCHEDULER_KEYWORDS.includes(calleeName)) flags.looksLikeScheduler = true;
-                                if (calleeName === 'postMessage' && args.length > 0 && args[0]?.type === 'Literal' && args[0]?.value === null) flags.mentionsPostMessageNull = true;
-                            }
-
-                            if (resolvedCalleeDef?.node && isPassedEventArg) {
-                                this._log(3, 'debug', `[quickScanRec] Depth ${currentDepth}: Recursing into '${calleeName || 'callee'}' because event param '${eventParamName}' was passed.`);
-                                const nestedFlags = quickScanForPatternsRecursive(resolvedCalleeDef.node, eventParamName, currentDepth + 1, new Set(visitedNodes));
-                                this._log(3, 'debug', `[quickScanRec] Depth ${currentDepth}: Flags from recursive call to '${calleeName || 'callee'}':`, nestedFlags);
-                                for(const key in nestedFlags) {
-                                    if (typeof flags[key] === 'boolean') flags[key] = flags[key] || nestedFlags[key];
-                                    else if (typeof flags[key] === 'number') flags[key] += nestedFlags[key];
-                                }
-                            } else if (resolvedCalleeDef?.node && !isPassedEventArg) {
-                                this._log(3, 'debug', `[quickScanRec] Depth ${currentDepth}: Found call to '${calleeName || 'callee'}' but event param '${eventParamName}' not passed, not recursing.`);
-                            }
-                        } catch (e) {
-                            this._safeLog('[quickScanRec] CallExpression error:', e?.message);
-                        }
-                    },
-                    MemberExpression: (memNode) => {
-                        try {
-                            if (!memNode) return;
-                            const obj = this._prop(memNode, 'object');
-                            const prop = this._prop(memNode, 'property');
-
-                            let baseObjectIsEvent = obj?.type === 'Identifier' && obj?.name === eventParamName;
-                            let baseObjectIsDeeperEventData = obj?.type === 'MemberExpression' &&
-                                this._prop(obj, 'object')?.type === 'Identifier' &&
-                                this._prop(obj, 'object')?.name === eventParamName &&
-                                this._prop(obj, 'property')?.name === 'data';
-
-                            if (obj?.type === 'ThisExpression' || obj?.type === 'Identifier') {
-                                if (prop?.type === 'Identifier' && CALLBACK_MAP_KEYWORDS.test(prop?.name || '')) {
-                                    const parent = this._prop(memNode, 'parent');
-                                    let parentCall = parent?.type === 'CallExpression' ? parent : null;
-                                    let grandParentMember = parentCall && this._prop(parentCall, 'parent')?.type === 'MemberExpression' ? this._prop(parentCall, 'parent') : null;
-                                    if (parentCall && parentCall.callee === memNode && grandParentMember && this._prop(grandParentMember, 'property')?.name === 'find') flags.usesCallbackMap = true;
-                                    else if (parent?.type === 'MemberExpression' && parent.object === memNode && this._prop(parent, 'property')?.type !== 'Identifier') flags.usesCallbackMap = true;
-                                }
-                            }
-
-                            if (baseObjectIsEvent && prop?.name === 'origin') {
-                                flags.accessesOriginField = true;
-                                let current = this._prop(memNode, 'parent'); let depth = 0;
-                                while (current && depth < 5) {
-                                    const currentType = current?.type;
-                                    if (currentType === 'IfStatement' || currentType === 'BinaryExpression' || currentType === 'ConditionalExpression' || currentType === 'LogicalExpression') {
-                                        flags.accessesEventOriginConditionally = true; break;
-                                    }
-                                    if (currentType === 'FunctionExpression' || currentType === 'FunctionDeclaration' || currentType === 'ArrowFunctionExpression') break;
-                                    current = this._prop(current, 'parent'); depth++;
-                                }
-                            }
-
-                            if (baseObjectIsDeeperEventData && prop?.type === 'Identifier') {
-                                flags.accessesAnyDataField = true;
-                                if(COMMON_DATA_FIELDS.has(prop?.name || '')) flags.accessesCommonDataFields++;
-                                let current = this._prop(memNode, 'parent'); let depth = 0;
-                                while(current && depth < 5) {
-                                    const currentType = current?.type;
-                                    if(currentType === 'IfStatement' || currentType === 'SwitchCase' || currentType === 'ConditionalExpression' || currentType === 'LogicalExpression' || currentType === 'BinaryExpression') {
-                                        flags.accessesEventDataConditionally = true; break;
-                                    }
-                                    if(currentType === 'FunctionExpression' || currentType === 'FunctionDeclaration' || currentType === 'ArrowFunctionExpression') break;
-                                    current = this._prop(current, 'parent'); depth++;
-                                }
-                            }
-                        } catch (e) {
-                            this._safeLog('[quickScanRec] MemberExpression error:', e?.message);
-                        }
-                    },
-                    SwitchStatement: (switchNode) => {
-                        try {
-                            if (!switchNode) return;
-                            let discriminantChecksEventData = false;
-                            const discriminant = this._prop(switchNode, 'discriminant');
-                            if (discriminant?.type === 'MemberExpression') {
-                                const discObj = this._prop(discriminant, 'object');
-                                const discProp = this._prop(discriminant, 'property');
-                                if (discObj?.type === 'MemberExpression' &&
-                                    this._prop(discObj, 'object')?.name === eventParamName &&
-                                    this._prop(discObj, 'property')?.name === 'data') {
-                                    discriminantChecksEventData = true;
-                                } else if (discObj?.type === 'Identifier') {
-                                    if (COMMON_DATA_FIELDS.has(discProp?.name || '')) discriminantChecksEventData = true;
-                                }
-                            }
-                            if (discriminantChecksEventData) flags.usesSwitchOnEventData = true;
-                        } catch (e) {
-                            this._safeLog('[quickScanRec] SwitchStatement error:', e?.message);
-                        }
-                    },
-                    Identifier: (idNode) => {
-                        try {
-                            if (!idNode) return;
-                            const nodeName = this._prop(idNode, 'name');
-                            if (nodeName && SCHEDULER_KEYWORDS.includes(nodeName)) flags.looksLikeScheduler = true;
-                        } catch (e) {
-                            this._safeLog('[quickScanRec] Identifier error:', e?.message);
-                        }
-                    }
-                });
-            } catch (e) {
-                this._log(2, 'warn', `[Extractor AST Pattern Scan] Error during scan depth ${currentDepth}: ${e?.message || String(e)}`);
-            }
-
-            flags.hasStrongSignal = flags.callsVerifier || flags.usesCallbackMap || flags.accessesEventOriginConditionally || flags.usesSwitchOnEventData || flags.accessesEventDataConditionally;
-            this._log(3, 'debug', `[quickScanRec] Depth ${currentDepth}, Node type ${node.type}. Final flags:`, flags);
-            return flags;
-        };
-
-        try {
-            acorn.walk.simple(ast, {
-                AssignmentExpression: (node) => {
-                    try {
-                        if (!this._is(node, 'AssignmentExpression')) return;
-                        const left = this._prop(node, 'left');
-                        if (!this._is(left, 'MemberExpression')) return;
-                        const prop = this._prop(left, 'property');
-                        if (prop?.name !== 'onmessage') return;
-                        let funcNode = null; let category = 'ast-onmessage-assignment'; let functionName = null;
-                        let handlerFlags = {}; let eventParamName = 'event';
-
-                        if (node.right.type === 'FunctionExpression' || node.right.type === 'ArrowFunctionExpression') {
-                            funcNode = node.right;
-                            if(funcNode.params?.[0]?.type === 'Identifier') eventParamName = funcNode.params[0].name;
-                            else if (funcNode.params?.length > 0) eventParamName = 'param0';
-                            handlerFlags = quickScanForPatternsRecursive(funcNode, eventParamName, 0);
-                        } else if (node.right.type === 'Identifier') {
-                            functionName = node.right.name;
-                            let funcDef = this.functionDefinitions.get(functionName);
-                            funcNode = funcDef?.node || null;
-                            if (funcNode) {
-                                category += '-identifier';
-                                if(funcNode.params?.[0]?.type === 'Identifier') eventParamName = funcDef.node.params[0].name;
-                                else if (funcNode.params?.length > 0) eventParamName = 'param0';
-                                handlerFlags = quickScanForPatternsRecursive(funcNode, eventParamName, 0);
-                            }
-                        }
-                        if (funcNode) {
-                            foundHandlers.push({ category, source: sourceUrl, functionName, handlerNode: funcNode, fullScriptContent: scriptContent, handlerFlags, eventParamName });
-                            this._log(2, 'debug', `[AST Detect] onmessage assignment candidate in ${sourceUrl} (${category}). Function: ${functionName || 'anonymous'}`);
-                        }
-                    } catch (e) {
-                        this._safeLog('[Extractor AST Pattern Scan] swallowed assign error:', e?.message);
-                    }
-                },
-                CallExpression: (node) => {
-                    try {
-                        if (!this._is(node, 'CallExpression')) return;
-                        const callee = this._prop(node, 'callee');
-                        if (!this._is(callee, 'MemberExpression')) return;
-                        const prop = this._prop(callee, 'property');
-                        if (prop?.name !== 'addEventListener') return;
-                        const args = Array.isArray(node.arguments) ? node.arguments : [];
-                        const evtArg = args[0];
-                        const evtName = this._resolveStringLiteral(evtArg);
-                        if (evtName !== 'message') return;
-                        const handlerArg = args[1];
-                        let funcDef = null; let category = 'ast-event-listener'; let functionName = null;
-                        let handlerFlags = {}; let eventParamName = 'event';
-
-                        if (handlerArg.type === 'FunctionExpression' || handlerArg.type === 'ArrowFunctionExpression') {
-                            funcDef = { node: handlerArg };
-                            if(handlerArg.params?.[0]?.type === 'Identifier') eventParamName = handlerArg.params[0].name;
-                            else if (handlerArg.params?.length > 0) eventParamName = 'param0';
-                            handlerFlags = quickScanForPatternsRecursive(handlerArg, eventParamName, 0);
-                        } else if (handlerArg.type === 'Identifier') {
-                            functionName = handlerArg.name;
-                            funcDef = this.functionDefinitions.get(functionName);
-                            if (funcDef?.node) {
-                                category += '-identifier';
-                                if(funcDef.node.params?.[0]?.type === 'Identifier') eventParamName = funcDef.node.params[0].name;
-                                else if (funcDef.node.params?.length > 0) eventParamName = 'param0';
-                                handlerFlags = quickScanForPatternsRecursive(funcDef.node, eventParamName, 0);
-                            } else funcDef = null;
-                        } else if (handlerArg.type === 'MemberExpression') {
-                            functionName = handlerArg.property?.name || functionName;
-                            const objExpr = handlerArg.object;
-                            let objName = null;
-                            if(objExpr?.type === 'ThisExpression') objName = 'this';
-                            else if(objExpr?.type === 'Identifier') objName = objExpr.name;
-                            if (objName && functionName) {
-                                const potentialKey = `${objName}.${functionName}`;
-                                funcDef = this.functionDefinitions.get(potentialKey);
-                                if (!funcDef) { const protoKey = Array.from(this.functionDefinitions.keys()).find(key => key.endsWith(`.${functionName}`) && this.functionDefinitions.get(key)?.type === 'prototype'); if(protoKey) funcDef = this.functionDefinitions.get(protoKey); }
-                            }
-                            if (funcDef?.node) {
-                                category += '-method-lookup';
-                                if(funcDef.node.params?.[0]?.type === 'Identifier') eventParamName = funcDef.node.params[0].name;
-                                else if (funcDef.node.params?.length > 0) eventParamName = 'param0';
-                                handlerFlags = quickScanForPatternsRecursive(funcDef.node, eventParamName, 0);
-                            } else funcDef = null;
-                        } else if (handlerArg.type === 'CallExpression' && handlerArg.callee.type === 'MemberExpression' && handlerArg.callee.property.name === 'bind') {
-                            let baseFuncDef = null;
-                            let potentialFuncName = null;
-                            const calleeObject = handlerArg.callee.object;
-                            if (calleeObject.type === 'Identifier') { potentialFuncName = calleeObject.name; baseFuncDef = this.functionDefinitions.get(potentialFuncName); }
-                            else if (calleeObject.type === 'MemberExpression') {
-                                potentialFuncName = calleeObject.property?.name;
-                                const objExpr = calleeObject.object; let objName = null;
-                                if(objExpr?.type === 'ThisExpression') objName = 'this'; else if(objExpr?.type === 'Identifier') objName = objExpr.name;
-                                if(objName && potentialFuncName) baseFuncDef = this.functionDefinitions.get(`${objName}.${potentialFuncName}`);
-                                if(!baseFuncDef && potentialFuncName) { const protoKey = Array.from(this.functionDefinitions.keys()).find(key => key.endsWith(`.${potentialFuncName}`) && this.functionDefinitions.get(key)?.type === 'prototype'); if(protoKey) baseFuncDef = this.functionDefinitions.get(protoKey); }
-                            } else if (calleeObject.type === 'FunctionExpression') { baseFuncDef = { node: calleeObject }; }
-                            if (baseFuncDef?.node) {
-                                funcDef = baseFuncDef;
-                                functionName = potentialFuncName || funcDef.methodName;
-                                category += '-bind';
-                                if(funcDef.node.params?.[0]?.type === 'Identifier') eventParamName = funcDef.node.params[0].name;
-                                else if (funcDef.node.params?.length > 0) eventParamName = 'param0';
-                                handlerFlags = quickScanForPatternsRecursive(funcDef.node, eventParamName, 0);
-                            } else funcDef = null;
-                        }
-
-                        if (funcDef && funcDef.node) {
-                            foundHandlers.push({ category, source: sourceUrl, functionName: functionName || funcDef.methodName, handlerNode: funcDef.node, fullScriptContent: scriptContent, handlerFlags, eventParamName });
-                            this._log(2, 'debug', `[AST Detect] addEventListener('message', ...) candidate in ${sourceUrl} (${category}). Function: ${functionName || funcDef.methodName || 'anonymous'}`);
-                        }
-                    } catch (e) {
-                        this._safeLog('[Extractor AST Pattern Scan] swallowed node error:', e?.message);
-                    }
-                }
-            });
-        } catch (e) {
-            this._log(1, 'error', `[Extractor] Error walking AST for ${sourceUrl}:`, e);
-        }
-        return foundHandlers; */
     }
 
 
@@ -1048,9 +745,40 @@ class HandlerExtractor {
         let match;
         
         // Pattern 1a: window.onmessage = function(...) { ... }
-        const onMessageRegex = /\bonmessage\s*=\s*(function\s*\([^)]*\)\s*\{(?:[^}]|\}(?![\s;]))*\})/gi;
+        // IMPROVED: Use brace counting for complex nested handlers (like Foxit)
+        const onMessageRegex = /\bonmessage\s*=\s*function\s*\([^)]*\)\s*\{/gi;
         while ((match = onMessageRegex.exec(content)) !== null) {
-            handlers.push({ handler: match[1], category: 'regex-onmessage', source: sourceUrl });
+            // Use proper brace counting to handle deeply nested structures
+            const startIdx = match.index;
+            const braceStart = content.indexOf('{', match.index + match[0].length - 1);
+            if (braceStart > -1) {
+                let depth = 1;
+                let endIdx = braceStart + 1;
+                
+                while (depth > 0 && endIdx < content.length) {
+                    const char = content[endIdx];
+                    // Skip string literals to avoid false brace matches
+                    if (char === '"' || char === "'" || char === '`') {
+                        const quote = char;
+                        endIdx++;
+                        while (endIdx < content.length && content[endIdx] !== quote) {
+                            if (content[endIdx] === '\\') endIdx++; // Skip escaped characters
+                            endIdx++;
+                        }
+                    } else if (char === '{') {
+                        depth++;
+                    } else if (char === '}') {
+                        depth--;
+                    }
+                    endIdx++;
+                }
+                
+                if (depth === 0) {
+                    const fullHandler = content.substring(startIdx, endIdx);
+                    handlers.push({ handler: fullHandler, category: 'regex-onmessage-balanced', source: sourceUrl });
+                    this._log(2, 'debug', `[Regex] Extracted balanced onmessage handler: ${fullHandler.length} chars`);
+                }
+            }
         }
         
         // Pattern 1b: window.onmessage = (event) => { ... }
