@@ -6,7 +6,7 @@ FrogPost is a Chrome extension for security testing of `postMessage` communicati
 
 ## Preview
 <p align="center" width="100%">
-    <img width="80%" src="media/FrogPost_final.gif">
+    <img width="80%" src="FrogPost_final.gif">
 </p>
 
 ---
