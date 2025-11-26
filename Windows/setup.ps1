@@ -43,10 +43,10 @@ while ($EXTENSION_ID -notmatch "^[a-z0-9]{32}$") {
 $SERVER_DIR = "$env:APPDATA\NodeServerStarter"
 $NATIVE_HOST_DIR = "$env:APPDATA\Google\Chrome\NativeMessagingHosts"
 
-# Source file paths
-$SERVER_JS_SRC = Join-Path $FROGPOST_REPO "server.js"
+# Source file paths (updated for correct folder structure)
+$SERVER_JS_SRC = Join-Path $FROGPOST_REPO "server" "server.js"
 $START_PS1_SRC = Join-Path $FROGPOST_REPO "Windows" "start_server.ps1"
-$MANIFEST_SRC = Join-Path $FROGPOST_REPO "com.nodeserver.starter.json"
+$MANIFEST_SRC = Join-Path $FROGPOST_REPO "server" "com.nodeserver.starter.json"
 
 # Target destination paths
 $SERVER_JS_DST = Join-Path $SERVER_DIR "server.js"
@@ -100,22 +100,32 @@ Write-Host "✅ Log file ready."
 
 # ========== STEP 7: Install Node.js dependencies ==========
 Write-Host "📦 Installing Node.js dependencies..."
+$PACKAGE_JSON_SRC = Join-Path $FROGPOST_REPO "package.json"
+$PACKAGE_JSON_DST = Join-Path $SERVER_DIR "package.json"
+Copy-Item -Path $PACKAGE_JSON_SRC -Destination $PACKAGE_JSON_DST -Force
 Push-Location $SERVER_DIR
-npm install express cors body-parser
+npm install
 Pop-Location
-Write-Host "✅ Dependencies installed."
+Write-Host "✅ All dependencies installed from package.json."
 
 # ========== COMPLETE ==========
 Write-Host ""
-Write-Host "🎉 All done!"
-Write-Host "👉 Open Chrome and go to chrome://extensions/"
-Write-Host "   - Enable 'Developer Mode'"
-Write-Host "   - Click 'Load unpacked' and select the FrogPost directory"
+Write-Host "🎉 FrogPost installation complete!"
 Write-Host ""
-Write-Host "⚠️ Extension ID: $EXTENSION_ID"
-Write-Host "   (This ID is also saved in extension_id.txt for your reference)"
+Write-Host "📋 What was installed:"
+Write-Host "   ✅ Native messaging host for Chrome extension"
+Write-Host "   ✅ Server with all dependencies"
+Write-Host ""
+Write-Host "👉 Chrome Extension Setup:"
+Write-Host "   1. Go to chrome://extensions/"
+Write-Host "   2. Enable 'Developer Mode'"
+Write-Host "   3. Click 'Load unpacked' and select: $FROGPOST_REPO"
+Write-Host ""
+Write-Host "⚠️  Extension ID: $EXTENSION_ID"
+Write-Host "    (This ID is configured for native messaging)"
 Write-Host ""
 Write-Host "🚀 To start the local server, run:"
-Write-Host "   powershell.exe -File `"$START_PS1_DST`""
+Write-Host "   cd `"$SERVER_DIR`""
+Write-Host "   node server.js"
 Write-Host ""
 Write-Host "💡 Happy Hacking with FrogPost 🐸"
