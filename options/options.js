@@ -20,10 +20,9 @@ const llmModelSel = document.getElementById('llmModel');
 const llmKeyInput = document.getElementById('llmKey');
 const saveLLMBtn = document.getElementById('saveLLM');
 const MODEL_PRESETS = {
-    openai: ['gpt-4o','gpt-4o-mini','gpt-4-turbo','gpt-3.5-turbo'],
-    anthropic: ['claude-3-5-sonnet-20241022','claude-3-5-haiku-20241022','claude-3-haiku-20240307'],
-    groq: ['llama-3.1-70b-versatile','llama-3.1-8b-instant','mixtral-8x7b-32768'],
-    mistral: ['mistral-large-latest','mistral-medium-latest','open-mixtral-8x7b']
+    openai: ['gpt-4o','gpt-4o-mini','o1','o1-mini'],
+    anthropic: ['claude-3-5-sonnet-20241022','claude-3-5-haiku-20241022','claude-opus-4-20250514','claude-sonnet-4-20250514'],
+    gemini: ['gemini-2.0-flash-exp','gemini-1.5-pro','gemini-1.5-flash']
 };
 
 function showStatus(message, isError = false) {

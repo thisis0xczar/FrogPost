@@ -318,36 +318,26 @@ class LLMCostProtector {
             PRICES_PER_1K: {
                 openai: {
                     "gpt-4o": { in: 0.0025, out: 0.0100, cachedIn: 0.00125 },
-                    "gpt-4o-mini": { in: 0.0006, out: 0.0024, cachedIn: 0.0003 },
-                    "gpt-4-turbo": { in: 0.0100, out: 0.0300 },
-                    "gpt-3.5-turbo": { in: 0.0005, out: 0.0015 },
-                    "o1-mini": { in: 0.0030, out: 0.0150 },
-                    "o1-preview": { in: 0.0150, out: 0.0600 }
+                    "gpt-4o-mini": { in: 0.00015, out: 0.0006, cachedIn: 0.000075 },
+                    "o1": { in: 0.0150, out: 0.0600 },
+                    "o1-mini": { in: 0.0030, out: 0.0120 }
                 },
                 anthropic: {
-                    "claude-3-5-sonnet-20241022": { in: 0.0030, out: 0.0150 },
+                    "claude-3-5-sonnet-20241022": { in: 0.0030, out: 0.0150, cachedIn: 0.0003 },
                     "claude-3-5-haiku-20241022": { in: 0.0008, out: 0.0040 },
-                    "claude-3-haiku-20240307": { in: 0.00025, out: 0.00125 },
-                    "claude-3-opus-20240229": { in: 0.0150, out: 0.0750 }
+                    "claude-opus-4-20250514": { in: 0.0150, out: 0.0750, cachedIn: 0.0015 },
+                    "claude-sonnet-4-20250514": { in: 0.0030, out: 0.0150, cachedIn: 0.0003 }
                 },
-                groq: {
-                    "llama-3.1-70b-versatile": { in: 0.00059, out: 0.00079 },
-                    "llama-3.1-8b-instant": { in: 0.00005, out: 0.00008 },
-                    "mixtral-8x7b-32768": { in: 0.00027, out: 0.00027 },
-                    "gemma-7b-it": { in: 0.00007, out: 0.00007 }
-                },
-                mistral: {
-                    "mistral-large-latest": { in: 0.0020, out: 0.0060 },
-                    "mistral-medium-latest": { in: 0.0004, out: 0.0020 },
-                    "open-mixtral-8x7b": { in: 0.0007, out: 0.0007 },
-                    "mistral-small-latest": { in: 0.0002, out: 0.0006 }
+                gemini: {
+                    "gemini-2.0-flash-exp": { in: 0.0000, out: 0.0000 },
+                    "gemini-1.5-pro": { in: 0.00125, out: 0.0050, cachedIn: 0.0003125 },
+                    "gemini-1.5-flash": { in: 0.000075, out: 0.0003, cachedIn: 0.00001875 }
                 }
             },
             providerLimits: {
                 'openai': { maxTokens: 4000, costPerToken: 0.00005 },
                 'anthropic': { maxTokens: 4000, costPerToken: 0.00008 },
-                'groq': { maxTokens: 8000, costPerToken: 0.00001 },
-                'mistral': { maxTokens: 4000, costPerToken: 0.00006 }
+                'gemini': { maxTokens: 8000, costPerToken: 0.00002 }
             }
         };
     }
