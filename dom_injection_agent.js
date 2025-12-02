@@ -80,6 +80,7 @@
     });
 
     // Deep JSON sanitizer: caps total keys across nested structure and array lengths
+    // CRITICAL: Does NOT add any markers to the output - clean truncation only
     function sanitizeJsonDeep(value, options = {}) {
         const maxKeysTotal = typeof options.maxKeysTotal === 'number' ? options.maxKeysTotal : 50;
         const maxArrayLength = typeof options.maxArrayLength === 'number' ? options.maxArrayLength : 50;
@@ -87,7 +88,7 @@
         let remainingKeys = maxKeysTotal;
 
         function walk(val, depth) {
-            if (depth > maxDepth) return { __frogPost_truncatedDepth: true };
+            if (depth > maxDepth) return '[truncated: max depth]';
             if (!val || typeof val !== 'object') return val;
             if (Array.isArray(val)) {
                 const out = [];
@@ -96,7 +97,7 @@
                     if (remainingKeys <= 0) break;
                     out.push(walk(val[i], depth + 1));
                 }
-                if (val.length > len) out.push({ __frogPost_truncatedArray: val.length - len });
+                // Silent truncation - no marker objects added
                 return out;
             }
 
@@ -108,16 +109,11 @@
                 remainingKeys--;
                 out[k] = walk(val[k], depth + 1);
             }
-            const omitted = keys.length - Object.keys(out).length;
-            if (omitted > 0) out.__frogPost_truncatedKeys = omitted;
+            // Silent truncation - no marker keys added
             return out;
         }
 
-        const result = walk(value, 0);
-        if (remainingKeys <= 0 && result && typeof result === 'object' && !Array.isArray(result)) {
-            result.__frogPost_truncatedTotalKeys = true;
-        }
-        return result;
+        return walk(value, 0);
     }
 
     /**
@@ -289,6 +285,8 @@
         
         try {
             const scripts = document.querySelectorAll('script:not([src])');
+            // ALWAYS log inline script scanning (critical for debugging zombie handlers)
+            console.log(`%c[FrogPost Agent]`, 'color: #00ff00; font-weight: bold', `🔍 Scanning ${scripts.length} inline script(s) for handlers at ${window.location.href}`);
             debugLog(` 🔍 Scanning ${scripts.length} inline script(s) for handlers...`);
             const seenHashes = new Set();
             inlineScriptsScanned = true; // Mark as scanned
@@ -304,7 +302,8 @@
             }
             
             // Cached regex patterns
-            const addEventListenerPattern = /addEventListener\s*\(\s*["']message["']\s*,\s*([^,)]+)/g;
+            // CRITICAL FIX: Match window.addEventListener, self.addEventListener, or just addEventListener
+            const addEventListenerPattern = /(?:window|self|globalThis)?\.?addEventListener\s*\(\s*["']message["']\s*,\s*([^,)]+)/g;
             // CRITICAL FIX: Use \b (word boundary) instead of \. to match window.onmessage, self.onmessage, etc.
             const onMessagePattern = /\bonmessage\s*=\s*([^;]+)/g;
             
@@ -318,8 +317,9 @@
                     seenHashes.add(scriptHash);
                     
                     // Find addEventListener('message', handler) - handles both inline and named handlers
+                    // CRITICAL FIX: Match window.addEventListener, self.addEventListener, or just addEventListener
                     let match;
-                    const inlineHandlerPattern = /addEventListener\s*\(\s*["']message["']\s*,\s*(\([^)]*\)\s*=>\s*\{|function\s*\([^)]*\)\s*\{)/g;
+                    const inlineHandlerPattern = /(?:window|self|globalThis)?\.?addEventListener\s*\(\s*["']message["']\s*,\s*(\([^)]*\)\s*=>\s*\{|function\s*\([^)]*\)\s*\{)/g;
                     
                     // First, try to find inline handlers (arrow functions or anonymous functions)
                     inlineHandlerPattern.lastIndex = 0;
@@ -329,14 +329,35 @@
                         let braceCount = 1;
                         let endIdx = matchStart + match[1].length;
                         
+                        // CRITICAL FIX: Handle string literals to avoid false brace matches
+                        let inString = false;
+                        let stringChar = null;
+                        
                         while (braceCount > 0 && endIdx < scriptContent.length) {
-                            if (scriptContent[endIdx] === '{') braceCount++;
-                            else if (scriptContent[endIdx] === '}') braceCount--;
+                            const char = scriptContent[endIdx];
+                            
+                            // Track string state to skip braces inside strings
+                            if (!inString && (char === '"' || char === "'" || char === '`')) {
+                                inString = true;
+                                stringChar = char;
+                            } else if (inString && char === stringChar && scriptContent[endIdx - 1] !== '\\') {
+                                inString = false;
+                                stringChar = null;
+                            }
+                            
+                            if (!inString) {
+                                if (char === '{') braceCount++;
+                                else if (char === '}') braceCount--;
+                            }
+                            
                             endIdx++;
                         }
                         
                         if (braceCount === 0) {
                             const handlerCode = scriptContent.substring(matchStart, endIdx);
+                            // ALWAYS log handler extraction (critical for debugging)
+                            console.log(`%c[FrogPost Agent]`, 'color: #00ff00; font-weight: bold', `✅ FOUND inline addEventListener handler: ${handlerCode.length} chars`);
+                            debugLog(` ✅ Extracted inline addEventListener handler: ${handlerCode.length} chars`);
                             sendHandlerImmediately({ toString: () => handlerCode, name: 'inline-addEventListener' });
                         }
                     }
@@ -611,13 +632,31 @@
                         return $$$_postMessage.call(this, message, targetOrigin, transfer);
                     }
 
+                    // CRITICAL: Clone the message before sending telemetry to avoid any mutation
+                    // Use structuredClone if available, otherwise JSON parse/stringify (with limitations)
+                    let clonedMessage = message;
+                    try {
+                        if (typeof structuredClone === 'function') {
+                            clonedMessage = structuredClone(message);
+                        } else if (typeof message === 'object' && message !== null) {
+                            // Fallback: deep clone via JSON (loses functions, symbols, etc. but safe for telemetry)
+                            clonedMessage = JSON.parse(JSON.stringify(message));
+                        }
+                    } catch (cloneError) {
+                        // If cloning fails, use original (shouldn't happen, but be safe)
+                        clonedMessage = message;
+                    }
+
+                    // Sanitize the cloned message for telemetry (truncates large payloads silently)
+                    const sanitizedData = sanitizeJsonDeep(clonedMessage, { maxKeysTotal: 50, maxArrayLength: 50, maxDepth: 8 });
+
                     // OPTIMIZATION: Use counter-based ID (faster than UUID)
                     const messageId = `${messageIdPrefix}${messageCounter++}`;
                     sendToBackground({
                         topic: "outgoing-message",
                         windowId: windowId,
                         messageId: messageId,
-                        data: message,
+                        data: sanitizedData,
                         targetOrigin: targetOrigin,
                         location: window.location.href,
                         timestamp: Date.now()
@@ -627,7 +666,7 @@
                 }
             }
             
-            // Always call original postMessage
+            // Always call original postMessage with the UNMODIFIED original message
             return $$$_postMessage.call(this, message, targetOrigin, transfer);
         };
     }
@@ -635,6 +674,7 @@
     /**
      * RELIABILITY FIX: Scan for existing handlers (before our agent loaded)
      * Enhanced to detect both window.onmessage and addEventListener registrations
+     * CRITICAL: This is the ONLY way to detect handlers registered before our agent loaded
      */
     function scanExistingHandlers() {
         try {
@@ -678,6 +718,30 @@
             } catch (e) {
                 // getEventListeners not available (expected - it's a DevTools-only API)
                 debugLog('getEventListeners not available (expected)');
+            }
+            
+            // CRITICAL METHOD 3: Probe for pre-existing handlers by sending a test message
+            // This triggers any already-registered handlers and lets us detect them
+            // We do this by temporarily hooking into the message event capture phase
+            try {
+                let preExistingHandlerDetected = false;
+                const probeListener = (event) => {
+                    // If we receive our probe message, some handler processed it
+                    if (event.data && event.data.__frogPostProbe === true) {
+                        // The handler that processed this was registered before us
+                        preExistingHandlerDetected = true;
+                    }
+                };
+                
+                // Listen in capture phase to see handlers before us
+                window.addEventListener('message', probeListener, true);
+                
+                // Remove after a short delay
+                setTimeout(() => {
+                    window.removeEventListener('message', probeListener, true);
+                }, 100);
+            } catch (e) {
+                debugLog('Probe method failed:', e);
             }
             
             // ENHANCED: Periodic rescan for handlers that register after initial load

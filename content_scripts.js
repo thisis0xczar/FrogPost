@@ -178,6 +178,7 @@
                         case 'received-message':
                         case 'outgoing-message':
                         case 'agent-ready':
+                        case 'agent-scan-complete': // Inline script scan complete
                             messageType = topic;
                             break;
                         default:

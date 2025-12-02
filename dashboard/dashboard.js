@@ -1111,7 +1111,14 @@ async function performEmbeddingCheck(endpoint) {
 }
 
 function getMessageCount(endpointKey) {
-    return window.frogPostState.messages.filter(msg => { if (!msg?.origin || !msg?.destinationUrl) return false; const originKey = getStorageKeyForUrl(msg.origin); const destKey = getStorageKeyForUrl(msg.destinationUrl); return originKey === endpointKey || destKey === endpointKey; }).length;
+    return window.frogPostState.messages.filter(msg => { 
+        if (!msg?.origin || !msg?.destinationUrl) return false; 
+        // Exclude zombie handler placeholder messages from count
+        if (msg.isZombie || msg.messageType === 'zombie-handler' || (typeof msg.data === 'object' && msg.data?.__frogPostZombieHandler)) return false;
+        const originKey = getStorageKeyForUrl(msg.origin); 
+        const destKey = getStorageKeyForUrl(msg.destinationUrl); 
+        return originKey === endpointKey || destKey === endpointKey; 
+    }).length;
 }
 
 function escapeHTML(str) {
@@ -1524,14 +1531,29 @@ function updateMessageListForUrl(url) {
     });
 
     const filteredMessagesToDisplay = relatedMessages.filter(msg => {
-        return !(typeof msg.data === 'object' && msg.data !== null && msg.data.hasOwnProperty(TEST_MESSAGE_KEY) && msg.data[TEST_MESSAGE_KEY] === TEST_MESSAGE_VALUE);
+        // Filter out FrogPost test messages
+        if (typeof msg.data === 'object' && msg.data !== null && msg.data.hasOwnProperty(TEST_MESSAGE_KEY) && msg.data[TEST_MESSAGE_KEY] === TEST_MESSAGE_VALUE) {
+            return false;
+        }
+        // Filter out zombie handler placeholder messages (they're only for endpoint list visibility)
+        if (msg.isZombie || msg.messageType === 'zombie-handler' || (typeof msg.data === 'object' && msg.data?.__frogPostZombieHandler)) {
+            return false;
+        }
+        return true;
     });
 
     if (filteredMessagesToDisplay.length === 0) {
         if (noMessagesDiv) {
             noMessagesDiv.style.display = 'block';
             const totalRelatedCount = relatedMessages.length;
-            if (totalRelatedCount > 0) {
+            
+            // Check if this is a zombie endpoint (has handler but no real messages)
+            const endpointKey = getStorageKeyForUrl(url);
+            const isZombieEndpoint = endpointsWithHandlers.has(endpointKey) || knownHandlerEndpoints.has(endpointKey);
+            
+            if (isZombieEndpoint && totalRelatedCount === 0) {
+                noMessagesDiv.innerHTML = `<span style="color: #00e1ff;">🧟 Zombie Endpoint</span><br><br>Handler detected but no messages captured yet.<br><br>Click <strong>▶ Play</strong> to analyze the handler, or send a postMessage to this endpoint to capture traffic.`;
+            } else if (totalRelatedCount > 0) {
                 noMessagesDiv.textContent = `No organic messages found involving endpoint: ${url} (Internal test messages hidden).`;
             } else {
                 noMessagesDiv.textContent = `No messages found involving endpoint: ${url}`;
@@ -2341,10 +2363,20 @@ window.requestUiUpdate = requestUiUpdate;
 function updateEndpointCounts() {
     try {
         document.querySelectorAll('#endpointsList .endpoint-host .host-name, #endpointsList .endpoint-host .iframe-name').forEach(el => {
-            const url = el.textContent?.replace(/ \(\d+\)$/, '') || '';
+            const url = el.textContent?.replace(/ \(\d+\)$/, '').replace(/ 🧟$/, '') || '';
             if (!url) return;
             const count = getMessageCount(url);
-            el.textContent = `${url} (${count})`;
+            
+            // Check if this is a zombie endpoint (has handler but no real messages)
+            const isZombieEndpoint = count === 0 && (endpointsWithHandlers.has(url) || knownHandlerEndpoints.has(url));
+            
+            if (isZombieEndpoint) {
+                el.textContent = `${url} (0) 🧟`;
+                el.title = `${url} - Zombie endpoint: Handler detected but no messages captured yet`;
+            } else {
+                el.textContent = `${url} (${count})`;
+                el.title = url;
+            }
         });
     } catch(e) {
         log.error("Error updating endpoint counts", e);
@@ -2442,11 +2474,39 @@ function initializeMessageHandling() {
                     break;
                 case "handlerCapturedForEndpoint":
                 case "handlerEndpointDetected":
+                case "handlerDetectedForEndpoint": // NEW: Zombie endpoint with handler detected
                     if (message.payload?.endpointKey) {
                         const key = message.payload.endpointKey;
                         let addedNew = false;
                         if (!endpointsWithHandlers.has(key)) { endpointsWithHandlers.add(key); addedNew = true; }
                         if (!knownHandlerEndpoints.has(key)) { knownHandlerEndpoints.add(key); addedNew = true; }
+                        
+                        // CRITICAL FIX: For zombie endpoints, also add a synthetic message entry
+                        // so the endpoint appears in the endpoint list
+                        if (message.payload?.isZombie && message.payload?.location) {
+                            const zombieEntry = {
+                                messageId: `zombie-handler-${Date.now()}`,
+                                origin: new URL(message.payload.location).origin,
+                                destinationUrl: message.payload.location,
+                                data: { __frogPostZombieHandler: true, handlerName: message.payload.handler?.name || 'anonymous' },
+                                messageType: 'zombie-handler',
+                                timestamp: new Date().toISOString(),
+                                isZombie: true
+                            };
+                            
+                            // Check if we already have this endpoint
+                            const existingEndpointKey = getStorageKeyForUrl(message.payload.location);
+                            const hasExistingMessages = window.frogPostState.messages.some(m => 
+                                getStorageKeyForUrl(m.destinationUrl) === existingEndpointKey
+                            );
+                            
+                            if (!hasExistingMessages) {
+                                window.frogPostState.messages.push(zombieEntry);
+                                log.info(`[Zombie Handler] Added zombie endpoint to list: ${key}`);
+                                addedNew = true;
+                            }
+                        }
+                        
                         if(addedNew) needsUiUpdate = true;
                     }
                     break;

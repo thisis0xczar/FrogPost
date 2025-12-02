@@ -789,9 +789,44 @@ class HandlerExtractor {
         }
         
         // Pattern 2: .addEventListener('message', function(...) { ... })
-        const addEventListenerRegex = /\.addEventListener\s*\(\s*["']message["']\s*,\s*(function\s*\([^)]*\)\s*\{(?:[^}]|\}(?!\s*\)))*\})/gi;
+        // CRITICAL FIX: Also match window.addEventListener without the dot prefix
+        const addEventListenerRegex = /(?:window|self|globalThis)?\.?addEventListener\s*\(\s*["']message["']\s*,\s*(function\s*\([^)]*\)\s*\{)/gi;
         while ((match = addEventListenerRegex.exec(content)) !== null) {
-            handlers.push({ handler: match[1], category: 'regex-event-listener-inline', source: sourceUrl });
+            // Use brace counting for proper extraction
+            const startIdx = match.index + match[0].indexOf(match[1]);
+            const braceStart = content.indexOf('{', startIdx);
+            if (braceStart > -1) {
+                let depth = 1;
+                let endIdx = braceStart + 1;
+                let inString = false;
+                let stringChar = null;
+                
+                while (depth > 0 && endIdx < content.length) {
+                    const char = content[endIdx];
+                    
+                    // Track string state to skip braces inside strings
+                    if (!inString && (char === '"' || char === "'" || char === '`')) {
+                        inString = true;
+                        stringChar = char;
+                    } else if (inString && char === stringChar && content[endIdx - 1] !== '\\') {
+                        inString = false;
+                        stringChar = null;
+                    }
+                    
+                    if (!inString) {
+                        if (char === '{') depth++;
+                        else if (char === '}') depth--;
+                    }
+                    
+                    endIdx++;
+                }
+                
+                if (depth === 0) {
+                    const fullHandler = content.substring(startIdx, endIdx);
+                    handlers.push({ handler: fullHandler, category: 'regex-event-listener-inline', source: sourceUrl });
+                    this._log(2, 'debug', `[Regex] Extracted addEventListener handler: ${fullHandler.length} chars`);
+                }
+            }
         }
         
         // Pattern 3: .addEventListener('message', (param) => { ... }) - ARROW FUNCTIONS

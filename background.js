@@ -484,6 +484,7 @@ class CircularMessageBuffer {
 messageBuffer = new CircularMessageBuffer(100);
 
 // Deep JSON sanitizer: caps total keys across nested structure and array lengths (defense-in-depth)
+// CRITICAL: Does NOT add any markers to the output - clean truncation only
 function sanitizeJsonDeep(value, options = {}) {
     const maxKeysTotal = typeof options.maxKeysTotal === 'number' ? options.maxKeysTotal : 50;
     const maxArrayLength = typeof options.maxArrayLength === 'number' ? options.maxArrayLength : 50;
@@ -491,7 +492,7 @@ function sanitizeJsonDeep(value, options = {}) {
     let remainingKeys = maxKeysTotal;
 
     function walk(val, depth) {
-        if (depth > maxDepth) return { __frogPost_truncatedDepth: true };
+        if (depth > maxDepth) return '[truncated: max depth]';
         if (!val || typeof val !== 'object') return val;
         if (Array.isArray(val)) {
             const out = [];
@@ -500,7 +501,7 @@ function sanitizeJsonDeep(value, options = {}) {
                 if (remainingKeys <= 0) break;
                 out.push(walk(val[i], depth + 1));
             }
-            if (val.length > len) out.push({ __frogPost_truncatedArray: val.length - len });
+            // Silent truncation - no marker objects added
             return out;
         }
 
@@ -512,16 +513,11 @@ function sanitizeJsonDeep(value, options = {}) {
             remainingKeys--;
             out[k] = walk(val[k], depth + 1);
         }
-        const omitted = keys.length - Object.keys(out).length;
-        if (omitted > 0) out.__frogPost_truncatedKeys = omitted;
+        // Silent truncation - no marker keys added
         return out;
     }
 
-    const result = walk(value, 0);
-    if (remainingKeys <= 0 && result && typeof result === 'object' && !Array.isArray(result)) {
-        result.__frogPost_truncatedTotalKeys = true;
-    }
-    return result;
+    return walk(value, 0);
 }
 
 function normalizeEndpointUrl(url) { try { if (!url || typeof url !== 'string' || ['access-denied-or-invalid', 'unknown-origin', 'null'].includes(url)) { return { normalized: url, components: null }; } let absoluteUrlStr = url; if (!url.includes('://') && !url.startsWith('//')) { absoluteUrlStr = 'https:' + url; } else if (url.startsWith('//')) { absoluteUrlStr = 'https:' + url; } const urlObj = new URL(absoluteUrlStr); if (['about:', 'chrome:', 'moz-extension:', 'chrome-extension:', 'blob:', 'data:'].includes(urlObj.protocol)) { const normalized = url; return { normalized: normalized, components: { origin: urlObj.origin, path: urlObj.pathname, query: urlObj.search, hash: urlObj.hash } }; } const normalized = urlObj.origin + urlObj.pathname + urlObj.search; return { normalized: normalized, components: { origin: urlObj.origin, path: urlObj.pathname, query: urlObj.search, hash: urlObj.hash } }; } catch (e) { return { normalized: url, components: null }; } }
@@ -1614,20 +1610,27 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                                     } catch {}
                                 }
                                 
-                                // Also check script parsing
+                                // Also check script parsing (external AND inline scripts)
                                 if (method === 'Debugger.scriptParsed') {
                                     const { scriptId, url: scriptUrl } = params || {};
-                                    if (scriptUrl && typeof HandlerExtractor !== 'undefined') {
+                                    // CRITICAL FIX: Process scripts with URLs AND scripts without URLs (inline scripts)
+                                    // Inline scripts may have no URL, empty URL, or data: URLs
+                                    const isInlineScript = !scriptUrl || scriptUrl === '' || scriptUrl.startsWith('data:') || scriptUrl.startsWith('about:');
+                                    if (typeof HandlerExtractor !== 'undefined') {
                                         try {
                                             const { scriptSource } = await chrome.debugger.sendCommand({ tabId }, 'Debugger.getScriptSource', { scriptId });
                                             if (scriptSource && scriptSource.length < 1500000) {
                                                 const extractor = new HandlerExtractor();
-                                                const foundHandlers = extractor.analyzeScriptContent(scriptSource, scriptUrl);
+                                                // Use appropriate source identifier for inline vs external scripts
+                                                const sourceIdentifier = isInlineScript 
+                                                    ? `zombie_inline_${scriptId}` 
+                                                    : scriptUrl;
+                                                const foundHandlers = extractor.analyzeScriptContent(scriptSource, sourceIdentifier);
                                                 if (foundHandlers && foundHandlers.length > 0) {
                                                     const bestHandler = extractor.getBestHandler(foundHandlers);
                                                     if (bestHandler && bestHandler.handler && !handlerFound) {
                                                         handlerFound = bestHandler;
-                                                        log.success(`[Zombie Debugger] Found handler via script parsing`);
+                                                        log.success(`[Zombie Debugger] Found handler via script parsing (${isInlineScript ? 'inline' : 'external'})`);
                                                     }
                                                 }
                                             }
@@ -1639,6 +1642,62 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                             };
                             
                             chrome.debugger.onEvent.addListener(eventListener);
+                            
+                            // CRITICAL FIX: Also extract inline scripts from HTML after page load
+                            // This catches inline <script> tags that may not trigger Debugger.scriptParsed
+                            const extractInlineScriptsFromHTML = async () => {
+                                try {
+                                    if (typeof HandlerExtractor === 'undefined') return;
+                                    
+                                    // Get the page HTML via debugger
+                                    const { result } = await chrome.debugger.sendCommand({ tabId }, 'Runtime.evaluate', {
+                                        expression: 'document.documentElement.outerHTML',
+                                        returnByValue: true
+                                    });
+                                    
+                                    if (result?.value && typeof result.value === 'string') {
+                                        const html = result.value;
+                                        const extractor = new HandlerExtractor();
+                                        
+                                        // Extract inline scripts using same pattern as extractStaticallyWithContext
+                                        const inlineRegex = /<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/gi;
+                                        let match;
+                                        let inlineIndex = 0;
+                                        
+                                        while ((match = inlineRegex.exec(html)) !== null && !handlerFound) {
+                                            const content = match[1] || '';
+                                            if (content.trim().length < 20) {
+                                                inlineIndex++;
+                                                continue;
+                                            }
+                                            
+                                            const sourceId = `${url}/inline_${inlineIndex}.js`;
+                                            const foundHandlers = extractor.analyzeScriptContent(content, sourceId);
+                                            
+                                            if (foundHandlers && foundHandlers.length > 0) {
+                                                const bestHandler = extractor.getBestHandler(foundHandlers);
+                                                if (bestHandler && bestHandler.handler && !handlerFound) {
+                                                    handlerFound = bestHandler;
+                                                    log.success(`[Zombie Debugger] Found handler in inline script #${inlineIndex}`);
+                                                }
+                                            }
+                                            
+                                            inlineIndex++;
+                                        }
+                                        
+                                        if (inlineIndex > 0) {
+                                            log.debug(`[Zombie Debugger] Scanned ${inlineIndex} inline script(s) from HTML`);
+                                        }
+                                    }
+                                } catch (e) {
+                                    log.debug(`[Zombie Debugger] Inline script extraction error: ${e.message}`);
+                                }
+                            };
+                            
+                            // Wait for page to fully load, then extract inline scripts
+                            setTimeout(async () => {
+                                await extractInlineScriptsFromHTML();
+                            }, 3000);
                             
                             // Wait for handler discovery (max 8 seconds)
                             await new Promise(resolve => setTimeout(resolve, 8000));
@@ -1896,6 +1955,22 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                     console.log(`[FROGPOST-BG] Primary cache key now has ${handlerCache.get(normalizedUrl)?.handlers.length || 0} handler(s)`);
                 }
                 // LRU cache automatically handles eviction when size exceeds MAX_CACHE_SIZE
+                
+                // CRITICAL FIX: Notify dashboard about the new endpoint with handler
+                // This ensures zombie endpoints (handlers without messages) appear in the endpoint list
+                notifyDashboard('handlerDetectedForEndpoint', {
+                    endpointKey: normalizedUrl,
+                    location: url,
+                    handler: {
+                        code: handlerData.code,
+                        name: handlerData.name,
+                        source: handlerData.source,
+                        timestamp: handlerData.timestamp
+                    },
+                    isZombie: true // Mark as zombie endpoint (handler detected, no messages yet)
+                });
+                
+                log.info(`[handler-detected] Handler cached for zombie endpoint: ${normalizedUrl}`);
             }
             break;
 
