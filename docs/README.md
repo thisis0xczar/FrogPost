@@ -112,11 +112,11 @@ bash setup.sh stop
 ## 🤖 AI Features (Optional)
 
 ### **Supported Providers**
-| Provider | Models | Notes |
-|----------|--------|-------|
-| **OpenAI** | `gpt-4o`, `gpt-4o-mini`, `o1`, `o1-mini` | Best for detailed analysis, o1 models have enhanced reasoning |
-| **Anthropic** | `claude-opus-4-20250514`, `claude-sonnet-4-20250514`, `claude-3-5-sonnet-20241022`, `claude-3-5-haiku-20241022` | Claude 4 models for advanced analysis |
-| **Google Gemini** | `gemini-2.0-flash-exp`, `gemini-1.5-pro`, `gemini-1.5-flash` | Fast and cost-effective |
+| Provider | Models |
+|----------|--------|
+| **OpenAI** | `gpt-4o`, `gpt-4o-mini`, `o3`, `o3-mini`, `o1`, `o1-mini` |
+| **Anthropic** | `claude-opus-4-20250514`, `claude-sonnet-4-20250514`, `claude-3-5-sonnet-20241022`, `claude-3-5-haiku-20241022` |
+| **Google Gemini** | `gemini-2.5-pro-preview-06-05`, `gemini-2.5-flash-preview-05-20`, `gemini-2.0-flash`, `gemini-1.5-pro`, `gemini-1.5-flash` |
 
 ### **Setup AI Features**
 1. **Configure API Keys**: Click extension icon → Options
