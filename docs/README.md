@@ -41,7 +41,7 @@ bash setup.sh
 
 ### **Step 4: Enable AI Features (Optional)**
 1. Click extension icon → **Options**
-2. Add your API key (OpenAI, Anthropic, Groq, or Mistral)
+2. Add your API key (OpenAI, Anthropic, or Google Gemini)
 3. Start server: `bash setup.sh start`
 4. Use **"Analyze with LLM"** for AI-powered insights
 
@@ -51,10 +51,12 @@ bash setup.sh
 
 - **Live Monitoring**: Captures `postMessage` traffic between iframes in real-time
 - **Handler Analysis**: Detects and analyzes message handlers for vulnerabilities using runtime interception
+- **Zombie Handler Detection**: Identifies registered handlers that haven't received messages yet (potential attack surface)
 - **Payload Testing**: Launches crafted payloads to test security
 - **Auto Pilot Mode**: Automatically scans new endpoints as they appear, testing them without manual intervention
 - **URL List Upload**: Bulk import and scan multiple URLs from a text file for automated testing
 - **AI Enhancement**: Optional LLM-powered analysis (requires server)
+- **Message Truncation**: Large messages are automatically truncated for performance, with "Show Full" option to view complete data
 
 ### **What FrogPost Detects**
 - Missing origin validation in message handlers
@@ -110,12 +112,11 @@ bash setup.sh stop
 ## 🤖 AI Features (Optional)
 
 ### **Supported Providers**
-| Provider | Models | Cost |
-|----------|--------|------|
-| **OpenAI** | gpt-4o, gpt-4o-mini | ~$0.01-0.03 per analysis |
-| **Anthropic** | claude-3-sonnet, claude-3-haiku | ~$0.01-0.02 per analysis |
-| **Groq** | llama-3.1, mixtral-8x7b | ~$0.001-0.005 per analysis |
-| **Mistral** | mistral-large, mistral-small | ~$0.005-0.015 per analysis |
+| Provider | Models | Notes |
+|----------|--------|-------|
+| **OpenAI** | `gpt-4o`, `gpt-4o-mini`, `o1`, `o1-mini` | Best for detailed analysis, o1 models have enhanced reasoning |
+| **Anthropic** | `claude-opus-4-20250514`, `claude-sonnet-4-20250514`, `claude-3-5-sonnet-20241022`, `claude-3-5-haiku-20241022` | Claude 4 models for advanced analysis |
+| **Google Gemini** | `gemini-2.0-flash-exp`, `gemini-1.5-pro`, `gemini-1.5-flash` | Fast and cost-effective |
 
 ### **Setup AI Features**
 1. **Configure API Keys**: Click extension icon → Options
@@ -128,6 +129,23 @@ bash setup.sh stop
 - **Security Assessment**: Detailed vulnerability analysis
 - **Custom Payloads**: AI-generated payloads for detected sinks
 - **Risk Recommendations**: Specific security improvements
+- **Unified Analysis**: Combined handler and message pattern analysis
+
+---
+
+## 🔧 Advanced Features
+
+### **Truncated Message Handling**
+Large postMessage payloads are automatically truncated for performance:
+- Messages exceeding 50 keys, 50 array items, or 8 levels of nesting are truncated
+- Truncated messages show a **✂️ Truncated** badge in the dashboard
+- Click **"📋 Show Full"** button to request and display the complete message data
+
+### **Zombie Handler Detection**
+FrogPost identifies "zombie" handlers - message listeners that are registered but haven't received any messages:
+- Zombie endpoints are marked with 🧟 emoji
+- These represent potential attack surface that may not be visible through normal traffic
+- Useful for discovering handlers that only activate under specific conditions
 
 ---
 
@@ -149,6 +167,7 @@ bash setup.sh stop
 - **Analysis fails**: Check browser console for error details
 - **Auto Pilot not scanning**: Ensure endpoints are not in the ignored list and haven't been scanned already
 - **URL Upload fails**: Verify file format (one URL per line, plain text)
+- **Show Full not working**: Ensure the original tab with the message is still open
 
 ---
 
